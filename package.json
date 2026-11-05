@@ -40,9 +40,9 @@
     },
     "publish": {
       "provider": "github",
-      "releaseType": "release",
       "owner": "AshtonCMiller",
-      "repo": "pts-workbench"
+      "repo": "pts-workbench",
+      "releaseType": "release"
     }
   },
   "dependencies": {

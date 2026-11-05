@@ -49,9 +49,10 @@ jobs:
 
       - name: Build and publish release v${{ steps.version.outputs.number }}
         if: steps.check.outputs.exists == 'false'
+        shell: bash # PowerShell (the Windows default) mangles the --config.x=y options
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: >
           npx electron-builder --win nsis portable --publish always
-          -c.publish.owner=${{ github.repository_owner }}
-          -c.publish.repo=${{ github.event.repository.name }}
+          --config.publish.owner="${{ github.repository_owner }}"
+          --config.publish.repo="${{ github.event.repository.name }}"
