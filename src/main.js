@@ -39,6 +39,8 @@ const DEFAULT_SETTINGS = {
   sidebarWidth: 380,
 };
 const BOOLEAN_SETTINGS = ['autoLogin', 'setupDone'];
+// Not shown in Settings (too technical): always the built-in values, updated with the app
+const FIXED_SETTINGS = ['ptsUrl', 'ptsTransportUrl', 'oasisUrl', 'xtimeApiPath', 'xtimeRoUrl', 'xtimeDetailsPath', 'xtimeEmployeesPath'];
 // Ford transport link codes: 704 = OASIS landing page (workshop manual), 702 = Over-the-Air update
 // dashboard, 701 = Connected Vehicle Data
 const FORD_LINKS = { pts: '704', ota: '702', cvd: '701' };
@@ -108,10 +110,21 @@ function initUpdater() {
     Object.assign(update, { state: 'error', message: 'The updater is missing from this build' });
     return;
   }
+  // Keep a short log of what the updater sees (⚙ Settings → Version & updates → Open update log)
+  const logFile = path.join(app.getPath('userData'), 'updater.log');
+  const log = (level) => (...args) => {
+    try {
+      try { if (fs.statSync(logFile).size > 512 * 1024) fs.renameSync(logFile, logFile + '.old'); } catch { /* no log yet */ }
+      fs.appendFileSync(logFile, `${new Date().toISOString()} ${level} ${args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ')}\n`);
+    } catch { /* logging is best effort */ }
+  };
+  updater.logger = { info: log('INFO'), warn: log('WARN'), error: log('ERROR'), debug: () => {} };
+  update.logFile = logFile;
   updater.autoDownload = true;
   updater.autoInstallOnAppQuit = true; // a downloaded update also installs whenever you close the app
   updater.on('checking-for-update', () => setUpdate({ state: 'checking', message: '' }));
-  updater.on('update-not-available', () => setUpdate({ state: 'current', checkedAt: Date.now(), message: '' }));
+  // info.version is the newest version GitHub offered, so a stuck release is easy to spot
+  updater.on('update-not-available', (info) => setUpdate({ state: 'current', latest: info?.version || '', checkedAt: Date.now(), message: '' }));
   updater.on('update-available', (info) => setUpdate({ state: 'downloading', version: info.version, percent: 0, checkedAt: Date.now() }));
   updater.on('download-progress', (p) => {
     const pct = Math.round(p.percent || 0);
@@ -154,6 +167,8 @@ function createWorkbench(profile) {
 
   const savedSettings = readJson('settings.json', {});
   let settings = { ...DEFAULT_SETTINGS, ...savedSettings };
+  // Addresses that aren't shown in Settings always come from the app itself, so an update can fix them
+  for (const k of FIXED_SETTINGS) settings[k] = DEFAULT_SETTINGS[k];
   // Before employee numbers, the first window always used this technician ID by default
   if (profile.id === 'main' && !('techId' in savedSettings)) settings.techId = '594351';
   let employeeStatus = ''; // result of the last employee-number lookup, shown in Settings
@@ -509,7 +524,7 @@ function createWorkbench(profile) {
       settings.techId = res.id;
       settings.techIdFor = num;
       writeJson('settings.json', settings);
-      employeeStatus = `Found: ${res.name || 'employee ' + num}, Xtime technician ID ${res.id}${res.active ? '' : ' (marked inactive)'}`;
+      employeeStatus = `Found: ${res.name || 'employee ' + num}${res.active ? '' : ' (marked inactive in Xtime)'}`;
       if (res.name && res.name !== xtimeName) { xtimeName = res.name; updateTitle(); saveWorkspaces(); }
     } else {
       employeeStatus = res?.error || "Couldn't look up the employee number yet";
@@ -850,7 +865,7 @@ function createWorkbench(profile) {
     'save-settings': (next) => {
       const clean = {};
       for (const k of Object.keys(DEFAULT_SETTINGS)) {
-        if (next[k] === undefined) continue;
+        if (next[k] === undefined || FIXED_SETTINGS.includes(k)) continue;
         if (BOOLEAN_SETTINGS.includes(k)) clean[k] = next[k] === true;
         else if (NUMBER_SETTINGS[k]) {
           const [lo, hi] = NUMBER_SETTINGS[k];
@@ -886,6 +901,7 @@ function createWorkbench(profile) {
     },
     // Updates
     'check-update': () => { if (updater) updater.checkForUpdates().catch(() => {}); },
+    'open-update-log': () => { if (update.logFile) shell.openPath(update.logFile).catch(() => {}); },
     'install-update': () => installUpdate(),
     // Windows / profiles
     'open-profile': (id) => openProfileWindow(String(id)),

@@ -100,6 +100,7 @@
           <span class="strong" id="about-version"></span>
           <span class="muted small" id="about-update"></span>
           <button type="button" class="ghost small push" id="btn-check-update">Check now</button>
+          <button type="button" class="ghost small" id="btn-update-log" hidden>Open update log</button>
         </div>
       </div>
       <div class="profiles-box">
@@ -111,27 +112,20 @@
           <button type="button" class="ghost" id="btn-new-profile">Open new window</button>
         </div>
       </div>
-      <label>Name for this window (shown in the title until Xtime provides one) <input name="profileName" maxlength="40"></label>
+      <label>Your name <input name="profileName" maxlength="40"></label>
       <label>Employee number <input name="employeeNumber" inputmode="numeric" autocomplete="off"></label>
       <p class="muted small employee-status" id="employee-status"></p>
       <label>Store ID <input name="storeId" required inputmode="numeric"></label>
-      <label>Xtime technician ID (looked up from your employee number) <input name="techId" autocomplete="off"></label>
       <label>Xtime start page <input name="xtimeUrl" required></label>
       <label>Xtime data host <input name="xtimeDataHost" required></label>
-      <label>Xtime dashboard API path <input name="xtimeApiPath" required></label>
-      <label>PTS start page <input name="ptsUrl" required></label>
-      <label><span>PTS vehicle link (<code>{LINK}</code> 704 OASIS · 702 OTA · 701 Connected Data, <code>{VIN}</code> is replaced)</span> <input name="ptsTransportUrl" required></label>
-      <label><span>OASIS link (<code>{VIN}</code> is replaced)</span> <input name="oasisUrl" required></label>
       <div class="logins-box">
         <div class="profiles-head">Saved logins</div>
         <p class="muted small" id="logins-note">Logins are saved when you sign in to Xtime, PTS or ProDemand in this window, encrypted with your Windows account.</p>
         <div id="logins-list"></div>
         <label class="check"><input name="autoLogin" type="checkbox"> Sign in automatically with a saved login (e.g. when Xtime's session expires)</label>
       </div>
-      <label><span>Xtime RO page for the first tab (<code>{RO}</code> is replaced)</span> <input name="xtimeRoUrl" required></label>
       <label>ProDemand start page <input name="prodemandUrl" required placeholder="https://prodemand.com/"></label>
       <label>Refresh Xtime in the background every (minutes) <input name="xtimeRefreshMinutes" type="number" min="20" max="600" required></label>
-      <label><span>RO details path (<code>{RO}</code> is replaced)</span> <input name="xtimeDetailsPath" required></label>
       <div class="hidden-row" id="hidden-row">
         <span id="hidden-count"></span>
         <button type="button" class="ghost small" id="btn-unhide-all">Unhide all</button>
@@ -151,7 +145,7 @@
       <label>Your name <input name="profileName" required maxlength="40" autocomplete="off"></label>
       <label>Employee number <input name="employeeNumber" required inputmode="numeric" autocomplete="off"></label>
       <label>Store ID <input name="storeId" required inputmode="numeric"></label>
-      <p class="muted small">Your Xtime technician ID is looked up from your employee number once you've logged in to Xtime.</p>
+      <p class="muted small">Your ROs show up once you've logged in to Xtime.</p>
       <div class="actions">
         <button type="button" class="ghost" id="btn-setup-later">Later</button>
         <button type="submit" class="primary">Save</button>

@@ -454,9 +454,9 @@ $('btn-alert-restart').onclick = () => {
 // ---------- employee number & first-launch setup ----------
 function employeeText() {
   const st = state?.settings || {};
-  if (!st.employeeNumber) return 'Enter your employee number and the technician ID is filled in for you.';
+  if (!st.employeeNumber) return 'Enter your employee number so this window shows your ROs.';
   if (state.employeeStatus) return state.employeeStatus;
-  if (st.techId && st.techIdFor === st.employeeNumber) return `Xtime technician ID ${st.techId}`;
+  if (st.techId && st.techIdFor === st.employeeNumber) return state.profile?.xtimeName ? `Found: ${state.profile.xtimeName}` : 'Found in Xtime';
   return 'Looked up once you are logged in to Xtime.';
 }
 
@@ -488,7 +488,7 @@ function updateText(u) {
   const at = u.checkedAt ? ` (checked ${new Date(u.checkedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })})` : '';
   switch (u.state) {
     case 'checking': return 'Checking for updates…';
-    case 'current': return `Up to date${at}`;
+    case 'current': return `Up to date${u.latest ? ` — newest release on GitHub is v${u.latest}` : ''}${at}`;
     case 'downloading': return `Downloading v${u.version}… ${u.percent || 0}%`;
     case 'ready': return `v${u.version} is ready to install`;
     case 'error': return `Update check failed: ${u.message}${at}`;
@@ -503,6 +503,7 @@ function renderVersion() {
   $('about-version').textContent = `Version ${a.version}`;
   $('about-update').textContent = updateText(a.update);
   $('btn-check-update').disabled = a.update.state === 'off' || a.update.state === 'checking' || a.update.state === 'downloading';
+  $('btn-update-log').hidden = !a.update.logFile;
   const btn = $('btn-update');
   const ready = a.update.state === 'ready';
   btn.hidden = !ready && a.update.state !== 'downloading';
@@ -516,6 +517,7 @@ $('btn-update').onclick = () => {
   }
 };
 $('btn-check-update').onclick = () => api.send('check-update');
+$('btn-update-log').onclick = () => api.send('open-update-log');
 
 // ---------- top bar ----------
 function renderTimer() {
