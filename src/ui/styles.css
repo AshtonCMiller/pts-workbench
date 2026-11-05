@@ -308,3 +308,23 @@ table.grid tr.ro-head.confirmed td, table.grid tr.ro-line.confirmed td { color: 
 .update-btn:disabled { background: transparent; color: #15803d; cursor: default; }
 .about-box { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; background: var(--bg); display: flex; flex-direction: column; gap: 4px; }
 @media (max-width: 1350px) { .ver { display: none; } }
+
+/* Xtime not updating */
+.xtime-alert { display: inline-flex; align-items: center; gap: 6px; padding: 3px 4px 3px 10px; border-radius: 8px; background: #fef3c7; border: 1px solid #d97706; color: #92400e; font-weight: 700; font-size: 12px; white-space: nowrap; }
+.xtime-alert[hidden] { display: none; }
+.xtime-alert button { background: #fff; color: #92400e; border-color: #d97706; }
+@media (prefers-color-scheme: dark) { .xtime-alert { background: #451a03; color: #fcd34d; } .xtime-alert button { background: transparent; color: #fcd34d; } }
+.employee-status { margin: -4px 0 2px; }
+
+/* keep the top bar on screen when the Xtime warning is showing */
+#topbar { overflow: hidden; }
+#topbar .right > button, #topbar .right > .update-btn { flex-shrink: 0; }
+.xtime-alert { min-width: 0; flex-shrink: 1; }
+#xtime-alert-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.xtime-alert button { flex-shrink: 0; }
+#topbar .right:has(#xtime-alert:not([hidden])) #xtime-status { display: none; }
+#xtime-alert-text { min-width: 150px; white-space: nowrap; }
+@media (max-width: 1250px) {
+  .today .muted { display: none; }                         /* "This pay period" label */
+  .timer.stopped > span:not(.dot) { display: none; }      /* "Clocked out …" text; the Clock in button stays */
+}

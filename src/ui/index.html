@@ -17,6 +17,11 @@
     <div id="timer" class="timer" title="Your shift clock"></div>
     <button id="btn-hours" class="today" title="Your flagged hours this pay period"></button>
     <div class="right">
+      <span id="xtime-alert" class="xtime-alert" hidden>
+        <span id="xtime-alert-text"></span>
+        <button type="button" id="btn-alert-reload" class="ghost small">Reload Xtime</button>
+        <button type="button" id="btn-alert-restart" class="ghost small">Restart app</button>
+      </span>
       <button id="btn-update" class="update-btn" hidden></button>
       <button id="btn-unhide" class="primary small-btn" hidden></button>
       <span id="notice" class="notice" hidden></span>
@@ -107,7 +112,10 @@
         </div>
       </div>
       <label>Name for this window (shown in the title until Xtime provides one) <input name="profileName" maxlength="40"></label>
-      <label>Technician ID <input name="techId" required></label>
+      <label>Employee number <input name="employeeNumber" inputmode="numeric" autocomplete="off"></label>
+      <p class="muted small employee-status" id="employee-status"></p>
+      <label>Store ID <input name="storeId" required inputmode="numeric"></label>
+      <label>Xtime technician ID (looked up from your employee number) <input name="techId" autocomplete="off"></label>
       <label>Xtime start page <input name="xtimeUrl" required></label>
       <label>Xtime data host <input name="xtimeDataHost" required></label>
       <label>Xtime dashboard API path <input name="xtimeApiPath" required></label>
@@ -131,6 +139,21 @@
       <label>Check Xtime every (seconds) <input name="pollSeconds" type="number" min="15" required></label>
       <div class="actions">
         <button type="button" class="ghost" data-close>Cancel</button>
+        <button type="submit" class="primary">Save</button>
+      </div>
+    </form>
+  </div>
+
+  <div id="modal-setup" class="modal" hidden>
+    <form class="dialog" id="form-setup">
+      <h2>Set up PTS Workbench</h2>
+      <p class="muted small">A couple of details so this window shows your ROs. You can change them any time in ⚙ Settings.</p>
+      <label>Your name <input name="profileName" required maxlength="40" autocomplete="off"></label>
+      <label>Employee number <input name="employeeNumber" required inputmode="numeric" autocomplete="off"></label>
+      <label>Store ID <input name="storeId" required inputmode="numeric"></label>
+      <p class="muted small">Your Xtime technician ID is looked up from your employee number once you've logged in to Xtime.</p>
+      <div class="actions">
+        <button type="button" class="ghost" id="btn-setup-later">Later</button>
         <button type="submit" class="primary">Save</button>
       </div>
     </form>

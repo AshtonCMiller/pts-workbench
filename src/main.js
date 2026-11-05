@@ -9,6 +9,7 @@ const fs = require('fs');
 const XTIME_EXTRACT = fs.readFileSync(path.join(__dirname, 'inject', 'xtime-extract.js'), 'utf8').trim();
 const XTIME_DETAILS = fs.readFileSync(path.join(__dirname, 'inject', 'xtime-details.js'), 'utf8').trim();
 const XTIME_VEHICLE = fs.readFileSync(path.join(__dirname, 'inject', 'xtime-vehicle.js'), 'utf8').trim();
+const XTIME_EMPLOYEE = fs.readFileSync(path.join(__dirname, 'inject', 'xtime-employee.js'), 'utf8').trim();
 const { Tracker } = require('./tracker');
 
 const TOP_BAR = 48;
@@ -16,7 +17,12 @@ const TAB_STRIP = 38;
 const DRAWER = 360;
 
 const DEFAULT_SETTINGS = {
-  techId: '594351',
+  employeeNumber: '',  // your employee number; the Xtime technician ID is looked up from it
+  storeId: '3590',
+  xtimeEmployeesPath: '/JS/Employees?storeID={STORE}',
+  techId: '',          // Xtime's internal technician ID (filled in from the employee number)
+  techIdFor: '',       // the employee number techId was looked up for
+  setupDone: false,    // first-launch questions answered
   xtimeUrl: 'https://www.inspect.app.coxautoinc.com/',
   xtimeDataHost: 'www.inspect.app.coxautoinc.com',
   xtimeApiPath: '/api/RepairOrderDashboard/?showCustomerROs=true&showInternalROs=true&showExpressROs=&showWaiterROs=',
@@ -32,7 +38,7 @@ const DEFAULT_SETTINGS = {
   autoLogin: true,         // press "Sign in" with a saved password when a site asks you to log in
   sidebarWidth: 380,
 };
-const BOOLEAN_SETTINGS = ['autoLogin'];
+const BOOLEAN_SETTINGS = ['autoLogin', 'setupDone'];
 // Ford transport link codes: 704 = OASIS landing page (workshop manual), 702 = Over-the-Air update
 // dashboard, 701 = Connected Vehicle Data
 const FORD_LINKS = { pts: '704', ota: '702', cvd: '701' };
@@ -146,7 +152,11 @@ function createWorkbench(profile) {
   const readJson = (name, fallback) => readJsonAt(profileFile(profile.id, name), fallback);
   const writeJson = (name, value) => writeJsonAt(profileFile(profile.id, name), value);
 
-  let settings = { ...DEFAULT_SETTINGS, ...readJson('settings.json', {}) };
+  const savedSettings = readJson('settings.json', {});
+  let settings = { ...DEFAULT_SETTINGS, ...savedSettings };
+  // Before employee numbers, the first window always used this technician ID by default
+  if (profile.id === 'main' && !('techId' in savedSettings)) settings.techId = '594351';
+  let employeeStatus = ''; // result of the last employee-number lookup, shown in Settings
   if (settings.prodemandUrl === 'https://www1.prodemand.com/') settings.prodemandUrl = DEFAULT_SETTINGS.prodemandUrl; // old wrong default
   const sidebarWidth = () => Math.min(700, Math.max(260, Number(settings.sidebarWidth) || 380));
 
@@ -268,6 +278,7 @@ function createWorkbench(profile) {
       search: searchQuery && tracker ? { query: searchQuery, results: tracker.searchRO(searchQuery) } : null,
       currentPeriodTotal: tracker?.period(0).total ?? 0,
       lookup,
+      employeeStatus,
       statusLists,
       addLookup,
       hidden: [...hiddenROs],
@@ -483,6 +494,29 @@ function createWorkbench(profile) {
     pushState();
   }
 
+  // Employee number → Xtime technician ID (and your name for the title bar), from the store's list.
+  // Looked up once per employee number; the result is saved with the settings.
+  async function resolveTechId(frame, force = false) {
+    const num = String(settings.employeeNumber || '').trim();
+    if (!num) return;
+    if (!force && settings.techIdFor === num && settings.techId) return;
+    let res = null;
+    try {
+      res = await frame.executeJavaScript(
+        `${XTIME_EMPLOYEE}(${JSON.stringify(num)}, ${JSON.stringify(settings.storeId)}, ${JSON.stringify(settings.xtimeEmployeesPath)})`, true);
+    } catch { res = null; }
+    if (res?.ok) {
+      settings.techId = res.id;
+      settings.techIdFor = num;
+      writeJson('settings.json', settings);
+      employeeStatus = `Found: ${res.name || 'employee ' + num}, Xtime technician ID ${res.id}${res.active ? '' : ' (marked inactive)'}`;
+      if (res.name && res.name !== xtimeName) { xtimeName = res.name; updateTitle(); saveWorkspaces(); }
+    } else {
+      employeeStatus = res?.error || "Couldn't look up the employee number yet";
+    }
+    pushAll();
+  }
+
   async function pollXtimeOnce() {
     const frame = findXtimeDataFrame();
     if (!frame) {
@@ -498,6 +532,12 @@ function createWorkbench(profile) {
       }
       return;
     }
+    await resolveTechId(frame);
+    if (!settings.techId) {
+      xtimeStatus = settings.employeeNumber ? (employeeStatus || 'Looking up your employee number…') : 'Enter your employee number in ⚙ Settings';
+      pushState();
+      return;
+    }
     try {
       const res = await frame.executeJavaScript(
         `${XTIME_EXTRACT}(${JSON.stringify(settings.techId)}, ${JSON.stringify(settings.xtimeApiPath)})`, true);
@@ -508,7 +548,8 @@ function createWorkbench(profile) {
       if (res.total > 0) tracker.syncStatus(settings.techId, myROs);
       lastPoll = Date.now();
       xtimeStatus = `${myROs.length} of ${res.total} ROs are yours`;
-      if (res.techName && res.techName !== xtimeName) { xtimeName = res.techName; updateTitle(); saveWorkspaces(); pushAll(); }
+      // The name from the employee list wins; the RO data's name is only a fallback without an employee number
+      if (res.techName && !settings.employeeNumber && res.techName !== xtimeName) { xtimeName = res.techName; updateTitle(); saveWorkspaces(); pushAll(); }
       for (const r of myROs) {
         const ws = workspaces.get(r.ro);
         if (ws) ws.ymm = [r.year, r.make, r.model].filter(Boolean).join(' ');
@@ -817,7 +858,11 @@ function createWorkbench(profile) {
         } else clean[k] = String(next[k]).trim();
       }
       const xtimeChanged = clean.xtimeUrl && clean.xtimeUrl !== settings.xtimeUrl;
-      const techChanged = clean.techId && clean.techId !== settings.techId;
+      const empChanged = clean.employeeNumber !== undefined && clean.employeeNumber !== settings.employeeNumber;
+      const storeChanged = clean.storeId !== undefined && clean.storeId !== settings.storeId;
+      // New employee number or store: look the technician ID up again (and don't keep showing the old one's ROs)
+      if (empChanged || storeChanged) { clean.techId = ''; clean.techIdFor = ''; employeeStatus = ''; myROs = []; }
+      const techChanged = (clean.techId && clean.techId !== settings.techId) || empChanged || storeChanged;
       settings = { ...settings, ...clean };
       writeJson('settings.json', settings);
       if (typeof next.profileName === 'string' && next.profileName.trim()) {
@@ -830,6 +875,14 @@ function createWorkbench(profile) {
       startPolling();
       pollXtime();
       pushAll();
+    },
+    // Restart the whole app (reopens the same windows; the shift clock keeps running)
+    'restart-app': () => {
+      quitting = true;
+      saveProfiles();
+      tracker?.appClosed();
+      app.relaunch();
+      app.quit();
     },
     // Updates
     'check-update': () => { if (updater) updater.checkForUpdates().catch(() => {}); },

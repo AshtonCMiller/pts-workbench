@@ -429,6 +429,59 @@ document.querySelectorAll('#side-tabs button').forEach((b) => {
   };
 });
 
+// ---------- Xtime not updating ----------
+// After at least one good refresh: if the list hasn't updated for 5 minutes (or 3 missed checks),
+// show a warning with Reload Xtime / Restart app.
+function renderXtimeAlert() {
+  const s = state;
+  const box = $('xtime-alert');
+  if (!s || !s.lastPoll) { box.hidden = true; return; }
+  const limit = Math.max(5 * 60 * 1000, 3 * (Number(s.settings?.pollSeconds) || 60) * 1000);
+  const age = Date.now() - s.lastPoll;
+  if (age < limit) { box.hidden = true; return; }
+  const mins = Math.round(age / 60000);
+  const since = new Date(s.lastPoll).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  const howLong = mins >= 60 ? `${Math.floor(mins / 60)} h ${mins % 60} min` : `${mins} min`;
+  $('xtime-alert-text').textContent = `Xtime not updating since ${since}`;
+  box.title = `Your RO list hasn't updated for ${howLong}.${s.xtimeStatus ? ` Last message: ${s.xtimeStatus}` : ''}`;
+  box.hidden = false;
+}
+$('btn-alert-reload').onclick = () => api.send('reload-xtime');
+$('btn-alert-restart').onclick = () => {
+  if (confirm('Restart PTS Workbench? Your windows and open vehicles come back, and the clock keeps running.')) api.send('restart-app');
+};
+
+// ---------- employee number & first-launch setup ----------
+function employeeText() {
+  const st = state?.settings || {};
+  if (!st.employeeNumber) return 'Enter your employee number and the technician ID is filled in for you.';
+  if (state.employeeStatus) return state.employeeStatus;
+  if (st.techId && st.techIdFor === st.employeeNumber) return `Xtime technician ID ${st.techId}`;
+  return 'Looked up once you are logged in to Xtime.';
+}
+
+let setupShown = false; // ask once per session until it's answered
+function maybeShowSetup() {
+  if (setupShown || !state?.settings || state.settings.setupDone) return;
+  if (document.querySelector('.modal:not([hidden])')) return; // don't stack on another dialog
+  setupShown = true;
+  const f = $('form-setup');
+  f.elements.profileName.value = state.profile?.name && state.profile.name !== 'Main' ? state.profile.name : (state.profile?.xtimeName || '');
+  f.elements.employeeNumber.value = state.settings.employeeNumber || '';
+  f.elements.storeId.value = state.settings.storeId || '';
+  openModal('modal-setup');
+  setTimeout(() => (f.elements.profileName.value ? f.elements.employeeNumber : f.elements.profileName).focus(), 50);
+}
+$('form-setup').onsubmit = (e) => {
+  e.preventDefault();
+  const d = Object.fromEntries(new FormData(e.target));
+  api.send('save-settings', {
+    profileName: d.profileName.trim(), employeeNumber: d.employeeNumber.trim(), storeId: d.storeId.trim(), setupDone: true,
+  });
+  closeModal('modal-setup');
+};
+$('btn-setup-later').onclick = () => closeModal('modal-setup');
+
 // ---------- version & updates ----------
 function updateText(u) {
   if (!u) return '';
@@ -522,6 +575,7 @@ function render() {
   renderTimer();
   renderPayChip();
   renderVersion();
+  renderXtimeAlert();
 
   const hidden = new Set(s.hidden || []);
   const statusOf = (ro) => s.roInfo?.[ro]?.status || 'active';
@@ -568,7 +622,7 @@ function render() {
 
     renderStatusView();
     if (!$('modal-hours').hidden) renderPeriod();
-    if (!$('modal-settings').hidden) { renderProfiles(); renderLogins(); }
+    if (!$('modal-settings').hidden) { renderProfiles(); renderLogins(); $('employee-status').textContent = employeeText(); }
   }
 
   const ws = s.workspaces.find((w) => w.ro === s.activeRO);
@@ -902,6 +956,7 @@ $('btn-settings').onclick = () => {
     if (input.type === 'checkbox') input.checked = !!v; else input.value = v;
   }
   f.elements.profileName.value = state?.profile?.name || '';
+  $('employee-status').textContent = employeeText();
   renderProfiles();
   renderLogins();
   openModal('modal-settings');
@@ -966,6 +1021,7 @@ function renderAddLookup() {
 setInterval(() => {
   if (!state) return;
   renderTimer();
+  renderXtimeAlert();
 }, 1000);
 
 let noticeTimer = null;
@@ -980,5 +1036,5 @@ api.onNotice?.((n) => {
   noticeTimer = setTimeout(() => { box.hidden = true; }, n.removeHost ? 15000 : 5000);
 });
 
-api.onState((s) => { state = s; render(); renderAddLookup(); });
+api.onState((s) => { state = s; render(); renderAddLookup(); maybeShowSetup(); });
 api.send('ui-ready');
