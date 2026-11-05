@@ -11,3 +11,4 @@ Features Build-in integration between various systems:
 - Setup cloud data saving with conflict resolution
 - PTS View - Show SVC (if available and applicable) next to any open recalls. (maybe a button to get it instead of always getting it)
 - Allow printing from XTime + monitor total upsells to determine if a ticket is eligible for a 'spiff'
+- Allow hiding lines from view (for lines that belong to other technicians
