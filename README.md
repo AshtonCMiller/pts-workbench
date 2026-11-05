@@ -7,8 +7,5 @@ Features Build-in integration between various systems:
 - **Workshop Manual**: Dedicated access to the workshop manual with multiple tabs available, isolated per-RO to make working on multiple vehicles more efficient.
 - **Time Tracking**: Helps track your total hours per pay period, how many hours each RO is paying you, and gives you a tool to help keep people accountable for ensuring you are paid.
 
-# To DO:
-- Setup cloud data saving with conflict resolution
-- PTS View - Show SVC (if available and applicable) next to any open recalls. (maybe a button to get it instead of always getting it)
-- Allow printing from XTime + monitor total upsells to determine if a ticket is eligible for a 'spiff'
-- Allow hiding lines from view (for lines that belong to other technicians
+# Contributing
+See [issues](https://github.com/AshtonCMiller/pts-workbench/issues/) for a list of features to add.
