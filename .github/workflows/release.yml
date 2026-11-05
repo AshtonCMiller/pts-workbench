@@ -1,0 +1,57 @@
+# Builds PTS Workbench on Windows and publishes it as a GitHub release whenever you push a
+# new version number in package.json. Pushes that keep the same version just skip the build.
+name: Build and release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: # "Run workflow" button on GitHub, for a manual retry
+
+permissions:
+  contents: write # create releases and upload the installers
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read version from package.json
+        id: version
+        shell: bash
+        run: echo "number=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Skip if this version is already released
+        id: check
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "v${{ steps.version.outputs.number }}" > /dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::v${{ steps.version.outputs.number }} is already released. Raise the version in package.json to publish a new one."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-node@v4
+        if: steps.check.outputs.exists == 'false'
+        with:
+          node-version: 20
+
+      - name: Install
+        if: steps.check.outputs.exists == 'false'
+        run: npm install --no-audit --no-fund
+
+      - name: Build and publish release v${{ steps.version.outputs.number }}
+        if: steps.check.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >
+          npx electron-builder --win nsis portable --publish always
+          -c.publish.owner=${{ github.repository_owner }}
+          -c.publish.repo=${{ github.event.repository.name }}

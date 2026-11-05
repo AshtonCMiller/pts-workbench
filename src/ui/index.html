@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:">
+  <title>PTS Workbench</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header id="topbar">
+    <div class="brand" id="brand">PTS Workbench</div>
+    <span id="app-version" class="ver" title="Installed version"></span>
+    <nav class="seg" role="tablist">
+      <button id="mode-xtime" role="tab">Xtime</button>
+      <button id="mode-manual" role="tab">Workbench <span id="ws-count" class="count"></span></button>
+    </nav>
+    <div id="timer" class="timer" title="Your shift clock"></div>
+    <button id="btn-hours" class="today" title="Your flagged hours this pay period"></button>
+    <div class="right">
+      <button id="btn-update" class="update-btn" hidden></button>
+      <button id="btn-unhide" class="primary small-btn" hidden></button>
+      <span id="notice" class="notice" hidden></span>
+      <span id="xtime-status" class="muted"></span>
+      <button id="btn-refresh" class="icon" title="Refresh my ROs">↻</button>
+      <button id="btn-drawer" class="ghost" title="Show or hide My ROs">My ROs</button>
+      <button id="btn-settings" class="icon" title="Settings">⚙</button>
+    </div>
+  </header>
+
+  <!-- Xtime mode: right-hand drawer next to the live Xtime page -->
+  <aside id="drawer">
+    <div class="panel-head">
+      <span>My ROs</span>
+      <button id="btn-reload-xtime" class="ghost small" title="Reload the Xtime page">Reload Xtime</button>
+    </div>
+    <div id="drawer-list" class="list"></div>
+  </aside>
+
+  <!-- Workbench mode -->
+  <aside id="sidebar">
+    <nav class="side-tabs" id="side-tabs">
+      <button data-view="active">Active</button>
+      <button data-view="review" title="ROs in Pending Review or closed: check everything is flagged">Review <span id="review-count" class="count warn"></span></button>
+      <button data-view="completed">Completed</button>
+    </nav>
+    <section class="side-status" id="side-status">
+      <p class="muted small side-help" id="status-help"></p>
+      <div id="status-list" class="list"></div>
+    </section>
+    <section class="side-open">
+      <div class="panel-head"><span>Open vehicles <span id="open-count" class="count"></span></span></div>
+      <div id="open-list" class="list"></div>
+    </section>
+    <section class="side-mine" id="side-mine">
+      <div class="panel-head">
+        <span>My ROs <span id="mine-count" class="count"></span> <span id="mine-hidden" class="hidden-note"></span></span>
+        <button id="btn-mine-toggle" class="ghost small" title="Show or hide your RO list">Hide</button>
+      </div>
+      <div id="mine-list" class="list"></div>
+      <button id="btn-add-vehicle" class="ghost add">+ Add vehicle manually</button>
+    </section>
+    <div id="resizer" title="Drag to resize"></div>
+  </aside>
+
+  <div id="tabstrip">
+    <div id="tabs"></div>
+    <select id="add-tab" class="add-select" title="Open another tab for this vehicle">
+      <option value="">+ Add tab…</option>
+      <option value="pts">PTS</option>
+      <option value="ota">OTA updates</option>
+      <option value="cvd">Connected vehicle data</option>
+      <option value="prodemand">ProDemand</option>
+      <option value="xtime">Xtime RO page</option>
+    </select>
+    <span id="tab-status" class="tab-status"></span>
+    <button id="btn-copy-vin" class="ghost small" title="Copy this vehicle's VIN">Copy VIN</button>
+    <button id="btn-reenter" class="ghost small" title="Type this vehicle's VIN in again">Re-enter VIN</button>
+    <button id="btn-reload-tab" class="icon" title="Reload this tab">↻</button>
+  </div>
+
+  <main id="empty">
+    <div class="empty-card">
+      <h2>No vehicle open</h2>
+      <p>Pick one of your ROs on the left, or switch to <strong>Xtime</strong> and press <strong>Open in Workbench</strong>.</p>
+    </div>
+  </main>
+
+  <!-- Dialogs -->
+  <div id="modal-settings" class="modal" hidden>
+    <form class="dialog" id="form-settings">
+      <h2>Settings <span class="muted small" id="settings-for"></span></h2>
+      <div class="about-box">
+        <div class="profiles-head">Version &amp; updates</div>
+        <div class="profile-row">
+          <span class="strong" id="about-version"></span>
+          <span class="muted small" id="about-update"></span>
+          <button type="button" class="ghost small push" id="btn-check-update">Check now</button>
+        </div>
+      </div>
+      <div class="profiles-box">
+        <div class="profiles-head">Windows</div>
+        <p class="muted small">Each window has its own Xtime/PTS login and settings. The clock and flagged hours are shared by all of them.</p>
+        <div id="profile-list"></div>
+        <div class="row-form">
+          <input id="new-profile-name" class="grow" placeholder="Name for a new window (e.g. trainee's name)" autocomplete="off">
+          <button type="button" class="ghost" id="btn-new-profile">Open new window</button>
+        </div>
+      </div>
+      <label>Name for this window (shown in the title until Xtime provides one) <input name="profileName" maxlength="40"></label>
+      <label>Technician ID <input name="techId" required></label>
+      <label>Xtime start page <input name="xtimeUrl" required></label>
+      <label>Xtime data host <input name="xtimeDataHost" required></label>
+      <label>Xtime dashboard API path <input name="xtimeApiPath" required></label>
+      <label>PTS start page <input name="ptsUrl" required></label>
+      <label><span>PTS vehicle link (<code>{LINK}</code> 704 OASIS · 702 OTA · 701 Connected Data, <code>{VIN}</code> is replaced)</span> <input name="ptsTransportUrl" required></label>
+      <label><span>OASIS link (<code>{VIN}</code> is replaced)</span> <input name="oasisUrl" required></label>
+      <div class="logins-box">
+        <div class="profiles-head">Saved logins</div>
+        <p class="muted small" id="logins-note">Logins are saved when you sign in to Xtime, PTS or ProDemand in this window, encrypted with your Windows account.</p>
+        <div id="logins-list"></div>
+        <label class="check"><input name="autoLogin" type="checkbox"> Sign in automatically with a saved login (e.g. when Xtime's session expires)</label>
+      </div>
+      <label><span>Xtime RO page for the first tab (<code>{RO}</code> is replaced)</span> <input name="xtimeRoUrl" required></label>
+      <label>ProDemand start page <input name="prodemandUrl" required placeholder="https://prodemand.com/"></label>
+      <label>Refresh Xtime in the background every (minutes) <input name="xtimeRefreshMinutes" type="number" min="20" max="600" required></label>
+      <label><span>RO details path (<code>{RO}</code> is replaced)</span> <input name="xtimeDetailsPath" required></label>
+      <div class="hidden-row" id="hidden-row">
+        <span id="hidden-count"></span>
+        <button type="button" class="ghost small" id="btn-unhide-all">Unhide all</button>
+      </div>
+      <label>Check Xtime every (seconds) <input name="pollSeconds" type="number" min="15" required></label>
+      <div class="actions">
+        <button type="button" class="ghost" data-close>Cancel</button>
+        <button type="submit" class="primary">Save</button>
+      </div>
+    </form>
+  </div>
+
+  <div id="modal-add" class="modal" hidden>
+    <form class="dialog" id="form-add">
+      <h2>Add vehicle</h2>
+      <label>RO number <input name="ro" required inputmode="numeric" autocomplete="off"></label>
+      <label>VIN (optional) <input name="vin" maxlength="17" autocomplete="off" class="mono" placeholder="Leave blank to get it from Xtime"></label>
+      <label>Year / make / model (optional) <input name="ymm" autocomplete="off" placeholder="Leave blank to get it from Xtime"></label>
+      <p id="add-error" class="error"></p>
+      <div class="actions">
+        <button type="button" class="ghost" data-close>Cancel</button>
+        <button type="submit" class="primary">Open</button>
+      </div>
+    </form>
+  </div>
+
+  <div id="modal-hours" class="modal" hidden>
+    <div class="dialog wide">
+      <div class="period-head">
+        <button type="button" class="ghost small" id="period-prev" title="Previous pay period">‹ Previous</button>
+        <h2 id="period-title"></h2>
+        <button type="button" class="ghost small" id="period-next" title="Next pay period">Next ›</button>
+      </div>
+      <div class="search-row">
+        <input id="flag-search" type="search" placeholder="Search every pay period by RO number…" autocomplete="off" inputmode="numeric">
+      </div>
+      <div class="stats" id="hours-stats"></div>
+      <table class="grid" id="flag-table"></table>
+
+      <h3>Add an RO</h3>
+      <p class="muted small">For an RO that isn't on your list any more (e.g. already closed). Load its lines from Xtime, or type them in.</p>
+      <form id="form-lookup" class="row-form">
+        <input name="ro" placeholder="RO number" required autocomplete="off" inputmode="numeric">
+        <button type="submit" class="ghost">Load lines</button>
+      </form>
+      <div id="lookup-result"></div>
+      <form id="form-manual" class="row-form" hidden>
+        <input name="dms" placeholder="Line" maxlength="4" class="w-line" autocomplete="off">
+        <input name="complaint" placeholder="What the line was for" class="grow" autocomplete="off">
+        <input name="hours" type="number" step="0.1" min="0" placeholder="Hours" required class="w-hours">
+        <input name="date" type="date" required title="Date flagged">
+        <button type="submit" class="primary">Flag line</button>
+      </form>
+
+      <div class="actions"><button type="button" class="primary" data-close>Close</button></div>
+    </div>
+  </div>
+
+  <script src="ui.js"></script>
+</body>
+</html>

@@ -1,0 +1,51 @@
+{
+  "name": "pts-workbench",
+  "productName": "PTS Workbench",
+  "version": "0.1.0",
+  "description": "A more efficient way to work on cars. Works with Ford PTS + XTime.",
+  "main": "src/main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win nsis",
+    "release": "electron-builder --win nsis --publish always"
+  },
+  "devDependencies": {
+    "electron": "^33.2.1",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "local.ptsworkbench",
+    "productName": "PTS Workbench",
+    "files": [
+      "src/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "allowElevation": false,
+      "createDesktopShortcut": true,
+      "shortcutName": "PTS Workbench",
+      "artifactName": "PTS-Workbench-Setup-${version}.exe"
+    },
+    "portable": {
+      "artifactName": "PTS-Workbench-Portable-${version}.exe"
+    },
+    "publish": {
+      "provider": "github",
+      "releaseType": "release",
+      "owner": "AshtonCMiller",
+      "repo": "pts-workbench"
+    }
+  },
+  "dependencies": {
+    "electron-updater": "^6.3.9"
+  }
+}
