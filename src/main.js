@@ -2,7 +2,7 @@
 // Each window runs one profile: its own Xtime/PTS login, settings, open vehicles and hidden ROs.
 // The shift clock and the flag sheet are shared by every window, so all flags land in one set of hours.
 // Every page is loaded from Ford/Cox as normal, so access is recorded under that window's own login.
-const { app, BaseWindow, WebContentsView, ipcMain, session, shell, safeStorage, clipboard } = require('electron');
+const { app, BaseWindow, WebContentsView, ipcMain, session, shell, safeStorage, clipboard, net } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
@@ -11,6 +11,9 @@ const XTIME_DETAILS = fs.readFileSync(path.join(__dirname, 'inject', 'xtime-deta
 const XTIME_VEHICLE = fs.readFileSync(path.join(__dirname, 'inject', 'xtime-vehicle.js'), 'utf8').trim();
 const XTIME_EMPLOYEE = fs.readFileSync(path.join(__dirname, 'inject', 'xtime-employee.js'), 'utf8').trim();
 const { Tracker } = require('./tracker');
+const { SyncEngine } = require('./sync');
+// The sync server's address is set in package.json ("ptsWorkbench": { "syncUrl": … })
+const SYNC_URL = (() => { try { return require('../package.json').ptsWorkbench?.syncUrl || ''; } catch { return ''; } })();
 
 const TOP_BAR = 48;
 const TAB_STRIP = 38;
@@ -36,9 +39,10 @@ const DEFAULT_SETTINGS = {
   pollSeconds: 60,
   xtimeRefreshMinutes: 90, // reload Xtime in the background before its ~2 h session runs out
   autoLogin: true,         // press "Sign in" with a saved password when a site asks you to log in
+  syncEnabled: false,      // keep flags, hours and the clock in sync across computers (main window's setting)
   sidebarWidth: 380,
 };
-const BOOLEAN_SETTINGS = ['autoLogin', 'setupDone'];
+const BOOLEAN_SETTINGS = ['autoLogin', 'setupDone', 'syncEnabled'];
 // Not shown in Settings (too technical): always the built-in values, updated with the app
 const FIXED_SETTINGS = ['ptsUrl', 'ptsTransportUrl', 'oasisUrl', 'xtimeApiPath', 'xtimeRoUrl', 'xtimeDetailsPath', 'xtimeEmployeesPath'];
 // Ford transport link codes: 704 = OASIS landing page (workshop manual), 702 = Over-the-Air update
@@ -143,12 +147,56 @@ function initUpdater() {
   setInterval(check, 30 * 60 * 1000);    // and every 30 minutes
 }
 
-function installUpdate() {
+async function installUpdate() {
   if (!updater || update.state !== 'ready') return;
   quitting = true;
   saveProfiles();          // reopen the same windows after the update
   tracker?.appClosed();    // the shift clock keeps running across the restart
+  await flushSync();       // send anything not yet synced first
   updater.quitAndInstall(true, true); // silent install, then start the app again
+}
+
+// =====================================================================================
+// Sync across computers (opt-in, set in the main window). Follows the main window's employee number.
+// =====================================================================================
+let sync = null;
+let syncFlushed = false;
+const syncStatus = { state: 'off', message: '', lastSync: null };
+
+function syncIdentity() {
+  const s = readJsonAt(profileFile('main', 'settings.json'), {}) || {};
+  return { enabled: !!s.syncEnabled, storeId: s.storeId || DEFAULT_SETTINGS.storeId, employeeNumber: s.employeeNumber || '' };
+}
+
+async function syncRequest(method, url, body) {
+  // Electron's net.fetch uses the computer's own network/proxy settings
+  const res = await net.fetch(url, {
+    method,
+    headers: { 'content-type': 'application/json' },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  let json = null;
+  try { json = await res.json(); } catch { /* not JSON */ }
+  return { status: res.status, body: json };
+}
+
+function initSync() {
+  sync = new SyncEngine({
+    tracker,
+    identity: syncIdentity,
+    url: SYNC_URL,
+    load: () => readJsonAt(userFile('sync.json'), null),
+    save: (state) => writeJsonAt(userFile('sync.json'), state),
+    request: syncRequest,
+    onStatus: (st) => { Object.assign(syncStatus, st); pushAll(); },
+  });
+  syncStatus.lastSync = sync.state.lastSync || null;
+}
+
+async function flushSync() {
+  if (syncFlushed || !sync) return;
+  syncFlushed = true;
+  try { await sync.flush(4000); } catch { /* best effort */ }
 }
 
 function prepareSession(id) {
@@ -300,6 +348,12 @@ function createWorkbench(profile) {
       xtimeViewingRO,
       logins: readLogins().map((l) => ({ host: l.host, username: l.username })), // never the passwords
       canSavePasswords: canEncrypt(),
+      sync: {
+        ...syncStatus,
+        configured: !!SYNC_URL,
+        enabled: profile.id === 'main' ? !!settings.syncEnabled : syncIdentity().enabled,
+        isMain: profile.id === 'main',
+      },
       app: { version: app.getVersion(), update: { ...update } },
       profile: { id: profile.id, name: profile.name, xtimeName, displayName: displayName() },
       profiles: profiles.map((p) => ({
@@ -873,6 +927,8 @@ function createWorkbench(profile) {
         } else clean[k] = String(next[k]).trim();
       }
       const xtimeChanged = clean.xtimeUrl && clean.xtimeUrl !== settings.xtimeUrl;
+      const syncWas = !!settings.syncEnabled;
+      if (profile.id !== 'main') delete clean.syncEnabled; // sync follows the main window
       const empChanged = clean.employeeNumber !== undefined && clean.employeeNumber !== settings.employeeNumber;
       const storeChanged = clean.storeId !== undefined && clean.storeId !== settings.storeId;
       // New employee number or store: look the technician ID up again (and don't keep showing the old one's ROs)
@@ -880,6 +936,11 @@ function createWorkbench(profile) {
       const techChanged = (clean.techId && clean.techId !== settings.techId) || empChanged || storeChanged;
       settings = { ...settings, ...clean };
       writeJson('settings.json', settings);
+      if (profile.id === 'main' && sync) {
+        if (settings.syncEnabled && !syncWas) { sync.rejoin(); sync.start(); }       // turned on: join fresh
+        else if (!settings.syncEnabled && syncWas) { sync.stop(); Object.assign(syncStatus, { state: 'off', message: '' }); }
+        else if (settings.syncEnabled && (empChanged || storeChanged)) sync.syncNow(); // new person: their own data
+      }
       if (typeof next.profileName === 'string' && next.profileName.trim()) {
         profile.name = next.profileName.trim().slice(0, 40);
         saveProfiles();
@@ -892,13 +953,16 @@ function createWorkbench(profile) {
       pushAll();
     },
     // Restart the whole app (reopens the same windows; the shift clock keeps running)
-    'restart-app': () => {
+    'restart-app': async () => {
       quitting = true;
       saveProfiles();
       tracker?.appClosed();
+      await flushSync();
       app.relaunch();
       app.quit();
     },
+    // Sync across computers
+    'sync-now': () => { if (sync) sync.syncNow(); },
     // Updates
     'check-update': () => { if (updater) updater.checkForUpdates().catch(() => {}); },
     'open-update-log': () => { if (update.logFile) shell.openPath(update.logFile).catch(() => {}); },
@@ -1102,10 +1166,19 @@ if (!app.requestSingleInstanceLock()) {
     profiles = Array.isArray(saved?.profiles) && saved.profiles.length ? saved.profiles : [{ id: 'main', name: 'Main' }];
     if (!profiles.some((p) => p.id === 'main')) profiles.unshift({ id: 'main', name: 'Main' });
 
+    const syncOn = !!SYNC_URL && syncIdentity().enabled;
     tracker = new Tracker({
       load: () => readJsonAt(userFile('tracking.json'), null),
-      save: (data) => writeJsonAt(userFile('tracking.json'), data),
+      save: (data) => { writeJsonAt(userFile('tracking.json'), data); sync?.noteLocalChange(); },
+      deferStartupCheck: syncOn, // with sync, "forgot to clock out" is checked after hearing from the other computers
     });
+    initSync();
+    if (syncOn) {
+      let checked = false;
+      const check = () => { if (checked) return; checked = true; tracker.startupCheck(); pushAll(); };
+      sync.start().finally(check);
+      setTimeout(check, 15 * 1000); // offline: don't wait forever
+    }
     // Keep lines for any RO open in any profile
     const openEverywhere = profiles.flatMap((p) => (readJsonAt(profileFile(p.id, 'workspaces.json'), {})?.list || []).map((w) => w.ro));
     tracker.prune(60, openEverywhere);
@@ -1120,11 +1193,16 @@ if (!app.requestSingleInstanceLock()) {
     for (const id of reopen.length ? reopen : ['main']) openProfileWindow(id);
   });
 
-  app.on('before-quit', () => {
+  app.on('before-quit', (event) => {
     quitting = true;
     saveProfiles(); // remember which windows were open
     // Closing the app doesn't clock you out; it records when, in case you forget to clock out.
     tracker?.appClosed();
+    // Send anything not yet synced before closing (a few seconds at most)
+    if (!syncFlushed && sync?.keys() && sync.configured()) {
+      event.preventDefault();
+      flushSync().finally(() => app.quit());
+    }
   });
 
   app.on('web-contents-created', (_e, wc) => {

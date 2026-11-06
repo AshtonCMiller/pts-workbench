@@ -1,0 +1,12 @@
+{
+  "name": "pts-workbench-sync",
+  "private": true,
+  "type": "module",
+  "description": "Stores encrypted profile data to be saved between computers.",
+  "scripts": {
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^3.90.0"
+  }
+}

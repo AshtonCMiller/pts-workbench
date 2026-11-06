@@ -16,6 +16,7 @@
     </nav>
     <div id="timer" class="timer" title="Your shift clock"></div>
     <button id="btn-hours" class="today" title="Your flagged hours this pay period"></button>
+    <span id="sync-chip" class="sync-chip" hidden></span>
     <div class="right">
       <span id="xtime-alert" class="xtime-alert" hidden>
         <span id="xtime-alert-text"></span>
@@ -118,6 +119,15 @@
       <label>Store ID <input name="storeId" required inputmode="numeric"></label>
       <label>Xtime start page <input name="xtimeUrl" required></label>
       <label>Xtime data host <input name="xtimeDataHost" required></label>
+      <div class="sync-box" id="sync-box">
+        <div class="profiles-head">Sync across computers</div>
+        <label class="check" id="sync-toggle"><input name="syncEnabled" type="checkbox"> Keep my flags, hours and clock the same on every computer I use</label>
+        <div class="profile-row">
+          <span class="small" id="sync-status"></span>
+          <button type="button" class="ghost small push" id="btn-sync-now">Sync now</button>
+        </div>
+        <p class="muted small" id="sync-note">Linked by your employee number. Customer details, VINs and passwords are never synced, and everything is encrypted before it leaves this computer.</p>
+      </div>
       <div class="logins-box">
         <div class="profiles-head">Saved logins</div>
         <p class="muted small" id="logins-note">Logins are saved when you sign in to Xtime, PTS or ProDemand in this window, encrypted with your Windows account.</p>

@@ -1,0 +1,11 @@
+# PTS Workbench sync server (Cloudflare Worker + D1 database).
+# The GitHub workflow fills in database_id on every deploy, so leave it as is.
+name = "pts-sync"
+main = "src/worker.js"
+compatibility_date = "2024-11-01"
+workers_dev = true
+
+[[d1_databases]]
+binding = "DB"
+database_name = "pts-sync"
+database_id = "filled-in-by-github-workflow"

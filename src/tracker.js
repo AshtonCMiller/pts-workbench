@@ -27,7 +27,7 @@ function payPeriod(t, offset = 0) {
 }
 
 class Tracker {
-  constructor({ load = () => null, save = () => {}, now = () => Date.now() } = {}) {
+  constructor({ load = () => null, save = () => {}, now = () => Date.now(), deferStartupCheck = false } = {}) {
     this.save_ = save;
     this.now = now;
     this.data = { ros: {}, flags: [], shifts: [], lastSeen: null, lastClosed: null, nextFlagId: 1, ...(load() || {}) };
@@ -35,7 +35,7 @@ class Tracker {
     if (!Array.isArray(this.data.shifts)) this.data.shifts = [];
     delete this.data.current; // per-RO job clock from older versions is no longer used
     this.autoClockOut = null;
-    this.startupCheck();
+    if (!deferStartupCheck) this.startupCheck(); // with sync on, it runs after the first sync instead
   }
 
   save() { this.save_(this.data); }
@@ -73,7 +73,8 @@ class Tracker {
   startupCheck() {
     const s = this.openShift();
     if (!s) return;
-    const lastOpen = Math.max(this.data.lastClosed || 0, this.data.lastSeen || 0);
+    // lastClosedAll: the latest any of your computers closed the app (filled in by sync)
+    const lastOpen = Math.max(this.data.lastClosed || 0, this.data.lastSeen || 0, this.data.lastClosedAll || 0);
     if (!lastOpen || startOfDay(lastOpen) >= startOfDay(this.now())) return; // same day: keep going
     s.end = Math.max(s.start, lastOpen);
     s.auto = true;

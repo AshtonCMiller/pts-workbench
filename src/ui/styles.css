@@ -328,3 +328,14 @@ table.grid tr.ro-head.confirmed td, table.grid tr.ro-line.confirmed td { color: 
   .today .muted { display: none; }                         /* "This pay period" label */
   .timer.stopped > span:not(.dot) { display: none; }      /* "Clocked out …" text; the Clock in button stays */
 }
+
+/* sync */
+.sync-box { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; background: var(--bg); display: flex; flex-direction: column; gap: 6px; }
+.sync-box p { margin: 0; }
+.sync-box [hidden] { display: none !important; }
+.sync-chip { font-size: 12px; font-weight: 600; color: #15803d; white-space: nowrap; flex-shrink: 0; }
+.sync-chip[hidden] { display: none; }
+.sync-chip.busy { color: var(--muted); }
+.sync-chip.bad { color: var(--danger); }
+.error-text { color: var(--danger); font-weight: 600; }
+@media (max-width: 1250px) { .sync-chip { font-size: 0; } .sync-chip::before { content: '☁'; font-size: 14px; } }

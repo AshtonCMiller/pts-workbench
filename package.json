@@ -47,5 +47,8 @@
   },
   "dependencies": {
     "electron-updater": "^6.3.9"
+  },
+  "ptsWorkbench": {
+    "syncUrl": ""
   }
 }

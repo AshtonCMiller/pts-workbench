@@ -451,6 +451,37 @@ $('btn-alert-restart').onclick = () => {
   if (confirm('Restart PTS Workbench? Your windows and open vehicles come back, and the clock keeps running.')) api.send('restart-app');
 };
 
+// ---------- sync across computers ----------
+const clock = (t) => new Date(t).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+function syncText(sy) {
+  if (!sy) return '';
+  if (!sy.configured) return "Sync isn't available in this version yet.";
+  if (!sy.enabled) return sy.isMain ? 'Off' : '';
+  switch (sy.state) {
+    case 'syncing': return 'Syncing…';
+    case 'ok': return `Synced ${clock(sy.lastSync)}`;
+    case 'error': return `Not synced: ${sy.message}${sy.lastSync ? ` (last synced ${clock(sy.lastSync)})` : ''}`;
+    default: return sy.lastSync ? `Last synced ${clock(sy.lastSync)}` : 'Waiting to sync…';
+  }
+}
+function renderSync() {
+  const sy = state?.sync;
+  if (!sy) return;
+  const chip = $('sync-chip');
+  chip.hidden = !(sy.configured && sy.enabled);
+  chip.className = 'sync-chip' + (sy.state === 'error' ? ' bad' : sy.state === 'syncing' ? ' busy' : '');
+  chip.textContent = sy.state === 'error' ? '☁ Not synced' : sy.state === 'syncing' ? '☁ Syncing' : '☁ Synced';
+  chip.title = syncText(sy);
+  // Settings
+  $('sync-toggle').hidden = !sy.isMain || !sy.configured;
+  $('btn-sync-now').hidden = !sy.enabled || !sy.configured;
+  $('btn-sync-now').disabled = sy.state === 'syncing';
+  $('sync-status').textContent = sy.isMain ? syncText(sy)
+    : (sy.enabled ? `Set in your main window. ${syncText(sy)}` : 'Sync is turned on or off in your main window.');
+  $('sync-status').className = 'small' + (sy.state === 'error' && sy.enabled ? ' error-text' : ' muted');
+}
+$('btn-sync-now').onclick = () => api.send('sync-now');
+
 // ---------- employee number & first-launch setup ----------
 function employeeText() {
   const st = state?.settings || {};
@@ -577,6 +608,7 @@ function render() {
   renderTimer();
   renderPayChip();
   renderVersion();
+  renderSync();
   renderXtimeAlert();
 
   const hidden = new Set(s.hidden || []);
