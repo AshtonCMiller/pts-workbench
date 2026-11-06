@@ -890,6 +890,7 @@ $('mode-manual').onclick = () => api.send('set-mode', 'manual');
 $('btn-refresh').onclick = () => api.send('refresh-ros');
 $('btn-drawer').onclick = () => api.send('toggle-drawer');
 $('btn-reload-xtime').onclick = () => api.send('reload-xtime');
+$('btn-print').onclick = () => api.send('print-page');
 $('btn-hours').onclick = () => {
   $('flag-search').value = '';
   api.send('search-flags', '');
@@ -941,7 +942,7 @@ document.addEventListener('keydown', (e) => {
   document.querySelectorAll('.modal:not([hidden])').forEach((m) => closeModal(m.id));
 });
 
-// Windows (profiles): each has its own logins and settings; hours are shared
+// Windows (profiles): each is one person, with their own logins, settings and hours
 function renderProfiles() {
   const list = $('profile-list');
   if (!state?.profiles) return;
@@ -1061,10 +1062,11 @@ setInterval(() => {
 let noticeTimer = null;
 api.onNotice?.((n) => {
   const box = $('notice');
-  box.replaceChildren(el('span', { text: n.text }), n.removeHost
-    ? el('button', { class: 'ghost small', text: 'Remove', title: "Don't keep this login",
-        onclick: () => { api.send('remove-login', n.removeHost); box.hidden = true; } })
-    : null);
+  box.replaceChildren(el('span', { text: n.text }));
+  if (n.removeHost) {
+    box.append(el('button', { class: 'ghost small', text: 'Remove', title: "Don't keep this login",
+      onclick: () => { api.send('remove-login', n.removeHost); box.hidden = true; } }));
+  }
   box.hidden = false;
   clearTimeout(noticeTimer);
   noticeTimer = setTimeout(() => { box.hidden = true; }, n.removeHost ? 15000 : 5000);

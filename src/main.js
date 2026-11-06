@@ -88,7 +88,6 @@ const profileFile = (id, name) => (id === 'main' ? userFile(name) : userFile('pr
 const partitionFor = (id) => (id === 'main' ? 'persist:workbench' : `persist:profile-${id}`);
 
 // ---------- shared state ----------
-let tracker;
 let profiles = [];            // [{ id, name }]
 const windows = new Map();    // profile id -> workbench (one window per profile)
 let quitting = false;
@@ -151,25 +150,49 @@ async function installUpdate() {
   if (!updater || update.state !== 'ready') return;
   quitting = true;
   saveProfiles();          // reopen the same windows after the update
-  tracker?.appClosed();    // the shift clock keeps running across the restart
-  await flushSync();       // send anything not yet synced first
+  await closeOutAll();     // record closing time + send anything not yet synced (clocks keep running)
   updater.quitAndInstall(true, true); // silent install, then start the app again
 }
 
-// =====================================================================================
-// Sync across computers (opt-in, set in the main window). Follows the main window's employee number.
-// =====================================================================================
-let sync = null;
-let syncFlushed = false;
-const syncStatus = { state: 'off', message: '', lastSync: null };
-
-function syncIdentity() {
-  const s = readJsonAt(profileFile('main', 'settings.json'), {}) || {};
-  return { enabled: !!s.syncEnabled, storeId: s.storeId || DEFAULT_SETTINGS.storeId, employeeNumber: s.employeeNumber || '' };
+// Before the app closes: every window records when it closed and sends unsynced changes (a few seconds at most)
+let closingOut = false;
+async function closeOutAll() {
+  closingOut = true;
+  await Promise.all([...windows.values()].map((wb) => wb.closeOut().catch(() => {})));
 }
 
+// =====================================================================================
+// Printing. PTS (and some Xtime screens) show their content inside frames, so this prints the part
+// of the page you're working in, not the outer page with the content cut off.
+// =====================================================================================
+const appUiContents = new WeakSet(); // the app's own screens (not web pages)
+const isPrintKey = (input) => input.type === 'keyDown' && (input.control || input.meta) && !input.alt && input.key.toLowerCase() === 'p';
+async function printPage(wc) {
+  const fallback = () => wc.print({}, () => {});
+  try {
+    const top = wc.mainFrame;
+    const probe = `(() => { const d = document; const fs = d.body && d.body.tagName === 'FRAMESET';
+      return { focus: d.hasFocus(), area: innerWidth * innerHeight, frameset: fs,
+               text: fs ? 0 : ((d.body && d.body.innerText) || '').trim().length }; })()`;
+    const info = [];
+    for (const f of top.framesInSubtree) {
+      let depth = 0;
+      for (let p = f.parent; p; p = p.parent) depth++;
+      try { info.push({ f, depth, ...(await f.executeJavaScript(probe)) }); } catch { /* another site's frame */ }
+    }
+    const topInfo = info.find((i) => i.f === top);
+    if (!topInfo) return fallback();
+    const big = (i) => i.area >= topInfo.area * 0.3 && !i.frameset && i.text > 0;
+    // The frame you last clicked in, if it's a big part of the page; otherwise the biggest frame with content
+    let pick = info.filter((i) => i.f !== top && i.focus && big(i)).sort((a, b) => b.depth - a.depth)[0];
+    if (!pick && (topInfo.frameset || topInfo.text < 200)) pick = info.filter((i) => i.f !== top && big(i)).sort((a, b) => b.area - a.area)[0];
+    pick ||= topInfo;
+    await pick.f.executeJavaScript('window.print()', true);
+  } catch { fallback(); }
+}
+
+// Sync requests use Electron's net.fetch, which follows the computer's own network/proxy settings
 async function syncRequest(method, url, body) {
-  // Electron's net.fetch uses the computer's own network/proxy settings
   const res = await net.fetch(url, {
     method,
     headers: { 'content-type': 'application/json' },
@@ -178,25 +201,6 @@ async function syncRequest(method, url, body) {
   let json = null;
   try { json = await res.json(); } catch { /* not JSON */ }
   return { status: res.status, body: json };
-}
-
-function initSync() {
-  sync = new SyncEngine({
-    tracker,
-    identity: syncIdentity,
-    url: SYNC_URL,
-    load: () => readJsonAt(userFile('sync.json'), null),
-    save: (state) => writeJsonAt(userFile('sync.json'), state),
-    request: syncRequest,
-    onStatus: (st) => { Object.assign(syncStatus, st); pushAll(); },
-  });
-  syncStatus.lastSync = sync.state.lastSync || null;
-}
-
-async function flushSync() {
-  if (syncFlushed || !sync) return;
-  syncFlushed = true;
-  try { await sync.flush(4000); } catch { /* best effort */ }
 }
 
 function prepareSession(id) {
@@ -220,6 +224,40 @@ function createWorkbench(profile) {
   // Before employee numbers, the first window always used this technician ID by default
   if (profile.id === 'main' && !('techId' in savedSettings)) settings.techId = '594351';
   let employeeStatus = ''; // result of the last employee-number lookup, shown in Settings
+
+  // ---------- this person's hours, flags, clock and sync ----------
+  // Each window is one person with their own hours. The first window keeps the original files.
+  const trackFile = profileFile(profile.id, 'tracking.json');
+  const syncStatus = { state: 'off', message: '', lastSync: null };
+  let sync = null;
+  const syncOn = () => !!SYNC_URL && !!settings.syncEnabled;
+  const tracker = new Tracker({
+    load: () => readJsonAt(trackFile, null),
+    save: (data) => { writeJsonAt(trackFile, data); sync?.noteLocalChange(); },
+    deferStartupCheck: syncOn(), // with sync, "forgot to clock out" is checked after hearing from the other computers
+  });
+  sync = new SyncEngine({
+    tracker,
+    identity: () => ({ enabled: !!settings.syncEnabled, storeId: settings.storeId, employeeNumber: settings.employeeNumber }),
+    url: SYNC_URL,
+    load: () => readJsonAt(profileFile(profile.id, 'sync.json'), null),
+    save: (st) => writeJsonAt(profileFile(profile.id, 'sync.json'), st),
+    request: syncRequest,
+    onStatus: (st) => { Object.assign(syncStatus, st); pushState(); },
+  });
+  syncStatus.lastSync = sync.state.lastSync || null;
+  let syncFlushed = false;
+  async function flushSync() {
+    if (syncFlushed) return;
+    syncFlushed = true;
+    try { await sync.flush(4000); } catch { /* best effort */ }
+  }
+  // Closing: record when (for "forgot to clock out"), then send anything not yet synced
+  async function closeOut() {
+    tracker.appClosed();
+    await flushSync();
+  }
+  let heartbeatTimer = null;
   if (settings.prodemandUrl === 'https://www1.prodemand.com/') settings.prodemandUrl = DEFAULT_SETTINGS.prodemandUrl; // old wrong default
   const sidebarWidth = () => Math.min(700, Math.max(260, Number(settings.sidebarWidth) || 380));
 
@@ -348,12 +386,7 @@ function createWorkbench(profile) {
       xtimeViewingRO,
       logins: readLogins().map((l) => ({ host: l.host, username: l.username })), // never the passwords
       canSavePasswords: canEncrypt(),
-      sync: {
-        ...syncStatus,
-        configured: !!SYNC_URL,
-        enabled: profile.id === 'main' ? !!settings.syncEnabled : syncIdentity().enabled,
-        isMain: profile.id === 'main',
-      },
+      sync: { ...syncStatus, configured: !!SYNC_URL, enabled: !!settings.syncEnabled, isMain: true },
       app: { version: app.getVersion(), update: { ...update } },
       profile: { id: profile.id, name: profile.name, xtimeName, displayName: displayName() },
       profiles: profiles.map((p) => ({
@@ -395,6 +428,13 @@ function createWorkbench(profile) {
       }
     }
     for (const v of allContentViews()) v.setVisible(v === visible);
+    visibleView = visible;
+  }
+  let visibleView = null;
+  // Print whatever page is showing (Xtime, or the open tab of a vehicle)
+  function printVisible() {
+    if (visibleView && !visibleView.webContents.isDestroyed()) printPage(visibleView.webContents);
+    else notice('Open a page first, then print it');
   }
 
   // ---------- web views ----------
@@ -407,7 +447,7 @@ function createWorkbench(profile) {
         overrideBrowserWindowOptions: {
           autoHideMenuBar: true, title: `PTS Workbench - ${displayName()}`,
           webPreferences: {
-            partition: PARTITION, sandbox: true, contextIsolation: true,
+            partition: PARTITION, sandbox: true, contextIsolation: true, plugins: true, // plugins = PDF viewer
             preload: path.join(__dirname, 'web-preload.js'), nodeIntegrationInSubFrames: true,
           },
         },
@@ -419,7 +459,7 @@ function createWorkbench(profile) {
   function makeWebView() {
     const view = new WebContentsView({
       webPreferences: {
-        partition: PARTITION, sandbox: true, contextIsolation: true, nodeIntegration: false,
+        partition: PARTITION, sandbox: true, contextIsolation: true, nodeIntegration: false, plugins: true, // plugins = PDF viewer
         preload: path.join(__dirname, 'web-preload.js'), nodeIntegrationInSubFrames: true,
       },
     });
@@ -640,7 +680,7 @@ function createWorkbench(profile) {
     } catch (e) {
       xtimeFailed('Could not read Xtime (still loading?)', false);
     }
-    pushAll(); // lines are shared, so the other window sees them too
+    pushState();
   }
 
   // RO number from an address like /RepairOrder/Details/820367 (built from the RO details path setting)
@@ -909,6 +949,7 @@ function createWorkbench(profile) {
       notice(`Removed saved login for ${host}`);
       pushState();
     },
+    'print-page': () => printVisible(),
     'reload-tab': ({ ro, id }) => {
       const tab = workspaces.get(ro)?.tabs.find((t) => t.id === id);
       tab?.view?.webContents.reload();
@@ -928,7 +969,6 @@ function createWorkbench(profile) {
       }
       const xtimeChanged = clean.xtimeUrl && clean.xtimeUrl !== settings.xtimeUrl;
       const syncWas = !!settings.syncEnabled;
-      if (profile.id !== 'main') delete clean.syncEnabled; // sync follows the main window
       const empChanged = clean.employeeNumber !== undefined && clean.employeeNumber !== settings.employeeNumber;
       const storeChanged = clean.storeId !== undefined && clean.storeId !== settings.storeId;
       // New employee number or store: look the technician ID up again (and don't keep showing the old one's ROs)
@@ -936,8 +976,8 @@ function createWorkbench(profile) {
       const techChanged = (clean.techId && clean.techId !== settings.techId) || empChanged || storeChanged;
       settings = { ...settings, ...clean };
       writeJson('settings.json', settings);
-      if (profile.id === 'main' && sync) {
-        if (settings.syncEnabled && !syncWas) { sync.rejoin(); sync.start(); }       // turned on: join fresh
+      if (sync) {
+        if (settings.syncEnabled && !syncWas) { syncFlushed = false; sync.rejoin(); sync.start(); } // turned on: join fresh
         else if (!settings.syncEnabled && syncWas) { sync.stop(); Object.assign(syncStatus, { state: 'off', message: '' }); }
         else if (settings.syncEnabled && (empChanged || storeChanged)) sync.syncNow(); // new person: their own data
       }
@@ -956,8 +996,7 @@ function createWorkbench(profile) {
     'restart-app': async () => {
       quitting = true;
       saveProfiles();
-      tracker?.appClosed();
-      await flushSync();
+      await closeOutAll();
       app.relaunch();
       app.quit();
     },
@@ -982,6 +1021,16 @@ function createWorkbench(profile) {
   // ---------- window ----------
   function open() {
     loadWorkspaces();
+    tracker.prune(60, [...workspaces.keys()]);
+    // Sync: "forgot to clock out" waits for the first sync (at most 15 s when offline)
+    if (syncOn()) {
+      let checked = false;
+      const check = () => { if (checked) return; checked = true; tracker.startupCheck(); pushState(); };
+      sync.start().finally(check);
+      setTimeout(check, 15 * 1000);
+    }
+    // Heartbeat lets a crash/power loss end an open shift at the right time, and refreshes totals.
+    heartbeatTimer = setInterval(() => { tracker.heartbeat(); pushState(); }, 60 * 1000);
     prepareSession(profile.id);
     win = new BaseWindow({ width: 1500, height: 950, minWidth: 900, minHeight: 600, title: 'PTS Workbench', autoHideMenuBar: true });
     updateTitle();
@@ -992,6 +1041,10 @@ function createWorkbench(profile) {
     win.contentView.addChildView(chrome);
     chrome.webContents.loadFile(path.join(__dirname, 'ui', 'index.html'));
     chrome.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+    appUiContents.add(chrome.webContents);
+    chrome.webContents.on('before-input-event', (ev, input) => {
+      if (isPrintKey(input)) { ev.preventDefault(); printVisible(); }
+    });
 
     xtimeView = makeWebView();
     xtimeView.webContents.loadURL(settings.xtimeUrl);
@@ -1023,6 +1076,9 @@ function createWorkbench(profile) {
     win.on('closed', () => {
       clearInterval(pollTimer);
       clearInterval(watchTimer);
+      clearInterval(heartbeatTimer);
+      if (!closingOut) closeOut().finally(() => sync.stop()); // closing just this window
+      else sync.stop();
       // Web pages inside the window aren't closed automatically; close them so nothing keeps running
       for (const ws of workspaces.values()) for (const t of ws.tabs) { t.vinToken = -1; try { t.view?.webContents.close(); } catch {} }
       try { xtimeView.webContents.close(); } catch {}
@@ -1037,6 +1093,7 @@ function createWorkbench(profile) {
 
   return {
     open,
+    closeOut,
     partition: PARTITION,
     getLogin, saveLogin, rememberUsername,
     pushState,
@@ -1166,26 +1223,6 @@ if (!app.requestSingleInstanceLock()) {
     profiles = Array.isArray(saved?.profiles) && saved.profiles.length ? saved.profiles : [{ id: 'main', name: 'Main' }];
     if (!profiles.some((p) => p.id === 'main')) profiles.unshift({ id: 'main', name: 'Main' });
 
-    const syncOn = !!SYNC_URL && syncIdentity().enabled;
-    tracker = new Tracker({
-      load: () => readJsonAt(userFile('tracking.json'), null),
-      save: (data) => { writeJsonAt(userFile('tracking.json'), data); sync?.noteLocalChange(); },
-      deferStartupCheck: syncOn, // with sync, "forgot to clock out" is checked after hearing from the other computers
-    });
-    initSync();
-    if (syncOn) {
-      let checked = false;
-      const check = () => { if (checked) return; checked = true; tracker.startupCheck(); pushAll(); };
-      sync.start().finally(check);
-      setTimeout(check, 15 * 1000); // offline: don't wait forever
-    }
-    // Keep lines for any RO open in any profile
-    const openEverywhere = profiles.flatMap((p) => (readJsonAt(profileFile(p.id, 'workspaces.json'), {})?.list || []).map((w) => w.ro));
-    tracker.prune(60, openEverywhere);
-
-    // Heartbeat lets a crash/power loss end an open shift at the right time, and refreshes totals.
-    setInterval(() => { tracker.heartbeat(); pushAll(); }, 60 * 1000);
-
     initUpdater();
 
     // Reopen the windows that were open last time (at least the main one)
@@ -1196,16 +1233,20 @@ if (!app.requestSingleInstanceLock()) {
   app.on('before-quit', (event) => {
     quitting = true;
     saveProfiles(); // remember which windows were open
-    // Closing the app doesn't clock you out; it records when, in case you forget to clock out.
-    tracker?.appClosed();
-    // Send anything not yet synced before closing (a few seconds at most)
-    if (!syncFlushed && sync?.keys() && sync.configured()) {
-      event.preventDefault();
-      flushSync().finally(() => app.quit());
-    }
+    // Closing the app doesn't clock anyone out; each window records when it closed (for "forgot to
+    // clock out") and sends unsynced changes first, a few seconds at most.
+    if (closingOut) return;
+    event.preventDefault();
+    closeOutAll().finally(() => app.quit());
   });
 
   app.on('web-contents-created', (_e, wc) => {
+    // Ctrl+P prints the page (the app's own screen handles it itself, to print the page that's showing)
+    wc.on('before-input-event', (ev, input) => {
+      if (appUiContents.has(wc) || !isPrintKey(input)) return;
+      ev.preventDefault();
+      printPage(wc);
+    });
     wc.on('will-navigate', (ev, url) => { if (!/^https?:|^file:/i.test(url)) { ev.preventDefault(); shell.openExternal(url).catch(() => {}); } });
   });
 
