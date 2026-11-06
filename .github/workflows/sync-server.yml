@@ -33,21 +33,47 @@ jobs:
       - name: Install
         run: npm install --no-audit --no-fund
 
+      - name: Check Cloudflare access
+        run: npx wrangler whoami
+
       - name: Create the database (first time only)
         shell: bash
         run: |
-          find_id() {
-            npx wrangler d1 list --json 2>/dev/null | node -e '
-              let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
-                try { const db = JSON.parse(s).find((d) => d.name === "pts-sync"); process.stdout.write(db ? db.uuid : ""); } catch {}
-              });'
+          # Shows wrangler's own error if anything fails, instead of stopping silently
+          list_dbs() {
+            if ! npx wrangler d1 list --json > dbs.json 2> dbs.err; then
+              echo "::error::Couldn't list your Cloudflare D1 databases. wrangler said:"
+              cat dbs.err
+              echo "::error::Usually the API token is missing 'Account · D1 · Edit', or CLOUDFLARE_ACCOUNT_ID is wrong."
+              exit 1
+            fi
           }
+          find_id() {
+            node -e '
+              const fs = require("fs");
+              const text = fs.readFileSync("dbs.json", "utf8");
+              const a = text.indexOf("["), b = text.lastIndexOf("]");
+              let list = [];
+              try { list = JSON.parse(text.slice(a, b + 1)); } catch {}
+              const db = list.find((d) => d.name === "pts-sync");
+              process.stdout.write(db ? (db.uuid || db.id || "") : "");'
+          }
+          list_dbs
           ID="$(find_id)"
           if [ -z "$ID" ]; then
-            npx wrangler d1 create pts-sync
+            echo "Creating the pts-sync database…"
+            if ! npx wrangler d1 create pts-sync; then
+              echo "::error::Couldn't create the database (see wrangler's message above)."
+              exit 1
+            fi
+            list_dbs
             ID="$(find_id)"
           fi
-          if [ -z "$ID" ]; then echo "::error::Couldn't create or find the pts-sync database. Check the API token's D1 permission."; exit 1; fi
+          if [ -z "$ID" ]; then
+            echo "::error::The pts-sync database wasn't found after creating it. wrangler's list output:"
+            cat dbs.json
+            exit 1
+          fi
           sed -i "s/^database_id = .*/database_id = \"$ID\"/" wrangler.toml
           echo "Database: $ID"
 
