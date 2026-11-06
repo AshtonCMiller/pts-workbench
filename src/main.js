@@ -2,7 +2,7 @@
 // Each window runs one profile: its own Xtime/PTS login, settings, open vehicles and hidden ROs.
 // The shift clock and the flag sheet are shared by every window, so all flags land in one set of hours.
 // Every page is loaded from Ford/Cox as normal, so access is recorded under that window's own login.
-const { app, BaseWindow, WebContentsView, ipcMain, session, shell, safeStorage, clipboard, net } = require('electron');
+const { app, BaseWindow, BrowserWindow, WebContentsView, ipcMain, session, shell, safeStorage, clipboard, net, protocol } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
@@ -11,6 +11,10 @@ const XTIME_DETAILS = fs.readFileSync(path.join(__dirname, 'inject', 'xtime-deta
 const XTIME_VEHICLE = fs.readFileSync(path.join(__dirname, 'inject', 'xtime-vehicle.js'), 'utf8').trim();
 const XTIME_EMPLOYEE = fs.readFileSync(path.join(__dirname, 'inject', 'xtime-employee.js'), 'utf8').trim();
 const { Tracker } = require('./tracker');
+const { ManualService, PTS: PTS_ORIGIN } = require('./manual');
+
+// Pictures in the app's own manual viewer come through ptsasset://, fetched with the window's PTS login
+protocol.registerSchemesAsPrivileged([{ scheme: 'ptsasset', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }]);
 const { SyncEngine } = require('./sync');
 // The sync server's address is set in package.json ("ptsWorkbench": { "syncUrl": … })
 const SYNC_URL = (() => { try { return require('../package.json').ptsWorkbench?.syncUrl || ''; } catch { return ''; } })();
@@ -340,7 +344,7 @@ function createWorkbench(profile) {
       xtimeName,
       list: [...workspaces.values()].map((ws) => ({
         ro: ws.ro, vin: ws.vin, ymm: ws.ymm,
-        tabs: ws.tabs.map((t) => ({ kind: t.kind, title: t.title })),
+        tabs: ws.tabs.map((t) => ({ kind: t.kind, title: t.title, ...(t.manualState ? { state: t.manualState } : {}) })),
         activeIndex: Math.max(0, ws.tabs.findIndex((t) => t.id === ws.activeTab)),
       })),
     });
@@ -353,7 +357,7 @@ function createWorkbench(profile) {
     if (!saved?.list) return;
     for (const w of saved.list) {
       const tabs = (w.tabs?.length ? w.tabs : [{ kind: 'pts', title: 'Manual' }])
-        .map((t) => ({ id: nextTabId++, kind: t.kind, title: t.title, view: null, status: '' }));
+        .map((t) => ({ id: nextTabId++, kind: t.kind, title: t.title, view: null, status: '', manualState: t.state || null }));
       const ws = { ro: w.ro, vin: w.vin, ymm: w.ymm || '', tabs, activeTab: tabs[w.activeIndex || 0]?.id ?? tabs[0].id };
       if (!tabs.some((t) => t.kind === 'xtime')) addTab(ws, 'xtime', { activate: false, front: true }); // older saves
       workspaces.set(w.ro, ws);
@@ -476,9 +480,13 @@ function createWorkbench(profile) {
 
   function ensureView(ws, tab) {
     if (tab.view) return;
+    if (tab.kind === 'manual') { tab.view = makeManualView(ws, tab); return; }
+    if (tab.kind === 'oasisview') { tab.view = makeManualView(ws, tab, 'oasis.html'); return; }
     tab.view = makeWebView();
     const wc = tab.view.webContents;
-    if (FORD_LINKS[tab.kind]) {
+    if (tab.kind === 'wiring') {
+      openWiring(ws, tab);
+    } else if (FORD_LINKS[tab.kind]) {
       setupFordTab(ws, tab);
     } else if (tab.kind === 'xtime') {
       tab.status = '';
@@ -550,6 +558,156 @@ function createWorkbench(profile) {
       await sleep(1000);
     }
     if (tab.vinToken === token) { tab.status = 'VIN copied — paste it into ProDemand'; pushState(); }
+  }
+
+  // ---------- the app's own workshop manual ----------
+  const manualSes = session.fromPartition(PARTITION);
+  const manualService = new ManualService(manualSes, profileFile(profile.id, 'manual-cache'), profileFile(profile.id, 'manual.log'));
+  try {
+    if (!manualSes.protocol.isProtocolHandled('ptsasset')) {
+      manualSes.protocol.handle('ptsasset', (req) => {
+        let target = '';
+        try { target = new URL(req.url).searchParams.get('u') || ''; } catch {}
+        return manualService.asset(target);
+      });
+    }
+  } catch (e) { console.error('ptsasset', e); }
+  const manualViews = new Map(); // webContents id -> { ws, tab }
+
+  function makeManualView(ws, tab, page = 'viewer.html') {
+    const view = new WebContentsView({
+      webPreferences: {
+        partition: PARTITION, sandbox: true, contextIsolation: true, nodeIntegration: false,
+        preload: path.join(__dirname, 'manual', 'viewer-preload.js'),
+      },
+    });
+    win.contentView.addChildView(view);
+    view.setVisible(false);
+    hardenWebContents(view.webContents); // links to Ford pages open in a window with your login
+    const id = view.webContents.id;
+    manualViews.set(id, { ws, tab });
+    view.webContents.once('destroyed', () => manualViews.delete(id));
+    // F12: the page inspector, for working out problems with the viewer
+    view.webContents.on('before-input-event', (ev, input) => {
+      if (input.type === 'keyDown' && input.key === 'F12') { ev.preventDefault(); view.webContents.openDevTools({ mode: 'detach' }); }
+    });
+    tab.status = '';
+    view.webContents.loadFile(path.join(__dirname, 'manual', page));
+    return view;
+  }
+
+  // Wiring opens straight to the vehicle (Ford's wiring page works on its own)
+  async function openWiring(ws, tab) {
+    const wc = tab.view.webContents;
+    tab.status = 'Finding the vehicle…'; pushState();
+    try {
+      const book = await manualService.book(ws.vin);
+      if (wc.isDestroyed()) return;
+      tab.status = ''; pushState();
+      wc.loadURL(`${PTS_ORIGIN}/wiring?vin=${encodeURIComponent(ws.vin)}&vehicleId=${encodeURIComponent(book.params.vehicleId)}`);
+    } catch (e) {
+      if (wc.isDestroyed()) return;
+      tab.status = e.needsLogin ? 'Sign in to PTS, then press ↻' : (e.message || "Couldn't open wiring");
+      pushState();
+      wc.loadURL(settings.ptsUrl);
+      if (e.needsLogin) {
+        // once you're signed in, try again
+        const retry = () => {
+          if (hostOf(wc.getURL()) !== hostOf(PTS_ORIGIN)) return;
+          wc.off('did-finish-load', retry);
+          if (tab.view) openWiring(ws, tab);
+        };
+        wc.on('did-finish-load', retry);
+      }
+    }
+  }
+
+  // Sign in to PTS in a small window; resolves once PTS itself has loaded (or the window is closed)
+  let signInWindow = null;
+  function signInToPts() {
+    if (signInWindow && !signInWindow.isDestroyed()) { signInWindow.focus(); return signInWindow.donePromise; }
+    const w = new BrowserWindow({
+      width: 980, height: 760, autoHideMenuBar: true, title: 'Sign in to PTS', parent: undefined,
+      webPreferences: { partition: PARTITION, sandbox: true, contextIsolation: true,
+        preload: path.join(__dirname, 'web-preload.js'), nodeIntegrationInSubFrames: true },
+    });
+    signInWindow = w;
+    w.donePromise = new Promise((resolve) => {
+      let seenLogin = false;
+      const check = () => {
+        if (w.isDestroyed()) return;
+        const host = hostOf(w.webContents.getURL());
+        if (host && host !== hostOf(PTS_ORIGIN)) { seenLogin = true; return; }
+        if (host === hostOf(PTS_ORIGIN)) setTimeout(() => { if (!w.isDestroyed()) w.close(); }, seenLogin ? 800 : 300);
+      };
+      w.webContents.on('did-finish-load', check);
+      w.on('closed', () => { signInWindow = null; resolve(true); });
+    });
+    w.loadURL(settings.ptsUrl);
+    return w.donePromise;
+  }
+
+  async function manualCall(sender, name, payload) {
+    const entry = manualViews.get(sender.id);
+    if (!entry) return undefined;
+    const { ws, tab } = entry;
+    const fail = (e) => ({ error: true, needsLogin: !!e.needsLogin, message: e.message || String(e), detail: e.detail || '' });
+    switch (name) {
+      case 'init': return { vin: ws.vin, ro: ws.ro, ymm: ws.ymm, state: tab.manualState || null };
+      case 'book':
+        try {
+          const b = await manualService.book(ws.vin);
+          return { title: b.title, vehicle: b.vehicle };
+        } catch (e) { return fail(e); }
+      case 'tree':
+        try { return { html: await manualService.tree(ws.vin) }; } catch (e) { return fail(e); }
+      case 'proc':
+        try {
+          const link = payload || {};
+          return await manualService.proc(ws.vin, {
+            searchNumber: String(link.searchNumber || ''), procUid: String(link.procUid || ''),
+            linkType: link.linkType === 'PublicationContent' ? 'PublicationContent' : 'Procedure',
+          });
+        } catch (e) { return fail(e); }
+      case 'oasis':
+        try { return await manualService.oasis(ws.vin); } catch (e) { return fail(e); }
+      case 'cv':
+        try { return await manualService.connectedVehicle(ws.vin); } catch (e) { return fail(e); }
+      case 'copy': try { clipboard.writeText(String(payload || '').slice(0, 500)); } catch {} return true;
+      case 'spa':
+        try { return await manualService.spaSteps(ws.vin, { file: String(payload?.file || ''), procUid: String(payload?.procUid || '') }); } catch (e) { return fail(e); }
+      case 'report':
+        try { return { ok: await manualService.reportPinpoint(ws.vin, payload || {}) }; } catch (e) { return fail(e); }
+      case 'signin': await signInToPts(); return true;
+      case 'open-log': shell.openPath(profileFile(profile.id, 'manual.log')).catch(() => {}); return true;
+      case 'log': manualService.log(`viewer: ${String(payload || '').slice(0, 500)}`); return true;
+      case 'open-pts': {
+        const t = addTab(ws, 'pts');
+        saveWorkspaces(); layout(); pushState();
+        return t.id;
+      }
+      case 'open-url': {
+        let url = String(payload || '');
+        try { url = new URL(url, PTS_ORIGIN).href; } catch { return false; }
+        if (!/^https:/i.test(url)) return false;
+        const w = new BrowserWindow({ width: 1100, height: 800, autoHideMenuBar: true,
+          webPreferences: { partition: PARTITION, sandbox: true, contextIsolation: true, plugins: true,
+            preload: path.join(__dirname, 'web-preload.js'), nodeIntegrationInSubFrames: true } });
+        w.loadURL(url);
+        return true;
+      }
+      default: return undefined;
+    }
+  }
+  function manualSave(sender, state) {
+    const entry = manualViews.get(sender.id);
+    if (!entry || !state || typeof state !== 'object') return false;
+    const json = JSON.stringify(state);
+    if (json.length > 200000) return true; // something's wrong; don't bloat the save file
+    entry.tab.manualState = JSON.parse(json);
+    clearTimeout(manualSave.timer);
+    manualSave.timer = setTimeout(saveWorkspaces, 1000);
+    return true;
   }
 
   function destroyTab(tab) {
@@ -735,7 +893,7 @@ function createWorkbench(profile) {
   }
 
   // ---------- workspaces ----------
-  const TAB_NAMES = { xtime: 'Xtime', pts: 'PTS', ota: 'OTA Updates', cvd: 'Connected Data', prodemand: 'ProDemand', oasis: 'OASIS' };
+  const TAB_NAMES = { xtime: 'Xtime', oasisview: 'OASIS', manual: 'Workshop Manual', wiring: 'Wiring', pts: 'PTS', ota: 'OTA Updates', cvd: 'Connected Data', prodemand: 'ProDemand', oasis: 'OASIS' };
   function addTab(ws, kind, { activate = true, front = false } = {}) {
     const n = ws.tabs.filter((t) => t.kind === kind).length;
     const base = TAB_NAMES[kind] || 'Manual';
@@ -755,10 +913,15 @@ function createWorkbench(profile) {
       ws = { ro, vin, ymm: ymm || '', tabs: [], activeTab: null };
       workspaces.set(ro, ws);
       addTab(ws, 'xtime', { activate: false });
-      addTab(ws, isFordVehicle(vin, ymm) ? 'pts' : 'prodemand');
+      if (isFordVehicle(vin, ymm)) { addTab(ws, 'pts'); addTab(ws, 'manual', { activate: false }); } // Xtime | PTS | Workshop Manual
+      else addTab(ws, 'prodemand');
     } else if (ws.vin !== vin) {
       ws.vin = vin; // VIN corrected in Xtime: re-enter it in open manual tabs
       for (const t of ws.tabs) if (FORD_LINKS[t.kind] && t.view) reopenFordTab(ws, t);
+      for (const t of ws.tabs) {
+        if (t.kind === 'manual') t.manualState = null; // the open procedures were for the old VIN
+        if ((t.kind === 'manual' || t.kind === 'wiring' || t.kind === 'oasisview') && t.view) destroyTab(t); // reopen for the right vehicle
+      }
     }
     activeRO = ro;
     mode = 'manual';
@@ -898,7 +1061,7 @@ function createWorkbench(profile) {
       // "+ Manual" while looking at a PTS tab copies that tab: same vehicle, same page, same scroll.
       const src = ws.tabs.find((t) => t.id === ws.activeTab);
       let snapshot = null;
-      const KINDS = ['pts', 'ota', 'cvd', 'prodemand', 'oasis', 'xtime'];
+      const KINDS = ['oasisview', 'manual', 'wiring', 'pts', 'ota', 'cvd', 'prodemand', 'oasis', 'xtime'];
       kind = KINDS.includes(kind) ? kind : 'pts';
       if (kind === 'pts' && src?.kind === 'pts' && src.view && !src.view.webContents.isDestroyed()) {
         try { snapshot = await snapshotFrames(src.view.webContents); } catch { snapshot = null; }
@@ -1101,6 +1264,7 @@ function createWorkbench(profile) {
     displayName,
     keepROs: () => [...workspaces.keys()],
     owns: (sender) => chrome && sender === chrome.webContents,
+    manualCall, manualSave,
     focus: () => { if (win && !win.isDestroyed()) { if (win.isMinimized()) win.restore(); win.focus(); } },
   };
 }
@@ -1184,6 +1348,18 @@ ipcMain.on('action', (event, name, payload) => {
     if (fn) { try { fn(payload); } catch (e) { console.error(name, e); } }
     return;
   }
+});
+
+// The app's own manual viewer
+ipcMain.handle('manual', async (event, name, payload) => {
+  for (const wb of windows.values()) {
+    const res = await wb.manualCall(event.sender, name, payload);
+    if (res !== undefined) return res;
+  }
+  return { error: true, message: 'This manual tab is no longer open' };
+});
+ipcMain.on('manual-save', (event, state) => {
+  for (const wb of windows.values()) if (wb.manualSave(event.sender, state)) return;
 });
 
 // Login helper messages from inside Xtime/PTS/ProDemand pages.

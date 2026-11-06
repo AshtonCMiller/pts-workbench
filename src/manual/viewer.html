@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: ptsasset:">
+  <title>Workshop Manual</title>
+  <link rel="stylesheet" href="viewer.css">
+</head>
+<body>
+  <aside id="toc">
+    <div class="toc-head">
+      <div class="book" id="book-title">Workshop Manual</div>
+      <input id="search" type="search" placeholder="Search the contents…" autocomplete="off" spellcheck="false">
+    </div>
+    <div id="tree" class="tree"></div>
+    <div id="toc-resize" title="Drag to resize"></div>
+  </aside>
+
+  <section id="main">
+    <div id="doctabs">
+      <button id="btn-toc" class="icon" title="Show or hide the contents">☰</button>
+      <div id="tabs"></div>
+    </div>
+    <div id="doc-bar" hidden>
+      <button id="btn-back" class="ghost small" title="Back to where you were in this procedure" disabled>‹ Back</button>
+      <span id="doc-where" class="where"></span>
+      <button id="btn-expand" class="ghost small" title="Show or hide every pinpoint test step" hidden>Collapse steps</button>
+      <button id="btn-print" class="ghost small" title="Print this procedure">🖨 Print</button>
+    </div>
+    <div id="content"></div>
+  </section>
+
+  <div id="zoom" hidden><img alt=""></div>
+
+  <script src="viewer.js"></script>
+</body>
+</html>

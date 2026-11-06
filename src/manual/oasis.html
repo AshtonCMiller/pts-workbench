@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: ptsasset:">
+  <title>OASIS</title>
+  <link rel="stylesheet" href="viewer.css">
+  <link rel="stylesheet" href="oasis.css">
+</head>
+<body class="oasis">
+  <header class="o-head">
+    <div>
+      <div class="o-title" id="o-title">OASIS</div>
+      <div class="o-sub" id="o-sub"></div>
+    </div>
+    <div class="o-actions">
+      <button id="btn-refresh" class="ghost small" title="Get OASIS again">↻ Refresh</button>
+      <button id="btn-full" class="ghost small" title="Open Ford's full OASIS page in a PTS tab">Full OASIS in PTS</button>
+    </div>
+  </header>
+  <main id="o-body"></main>
+  <div id="o-toast" class="o-toast" hidden></div>
+  <script src="oasis.js"></script>
+</body>
+</html>
