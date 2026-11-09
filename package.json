@@ -18,6 +18,7 @@
   "build": {
     "appId": "local.ptsworkbench",
     "productName": "PTS Workbench",
+    "generateUpdatesFilesForAllChannels": true,
     "files": [
       "src/**/*",
       "package.json"
@@ -26,7 +27,8 @@
       "target": [
         "nsis",
         "portable"
-      ]
+      ],
+      "signAndEditExecutable": false
     },
     "nsis": {
       "oneClick": true,

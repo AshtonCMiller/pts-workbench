@@ -95,6 +95,11 @@ jobs:
         # (Overriding them here on the command line can replace the whole setting and make a draft.)
         run: |
           for try in 1 2 3; do
+            # From the 2nd try on, download build tools from a mirror if GitHub isn't serving them
+            if [ "$try" -gt 1 ]; then
+              export ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-binaries/
+              export ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/
+            fi
             npx electron-builder --win nsis portable --publish always && exit 0
             echo "::warning::Build attempt $try failed (often a download timeout); trying again in 60 s"
             sleep 60
@@ -135,6 +140,11 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           for try in 1 2 3; do
+            # From the 2nd try on, download build tools from a mirror if GitHub isn't serving them
+            if [ "$try" -gt 1 ]; then
+              export ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-binaries/
+              export ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/
+            fi
             npx electron-builder --win nsis --publish always && exit 0
             echo "::warning::Build attempt $try failed (often a download timeout); trying again in 60 s"
             sleep 60
