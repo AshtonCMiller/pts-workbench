@@ -119,7 +119,9 @@ const update = { state: 'idle', version: '', percent: 0, message: '', checkedAt:
 // "Beta updates" (⚙ Settings → Version & updates) lets one computer install beta builds; turning it off
 // goes back to the newest regular version on the next check.
 const IS_BETA = !app.isPackaged || /-/.test(app.getVersion());
-const updatePrefs = { beta: false, ...(readJsonAt(userFile('updates.json'), {}) || {}) };
+// No choice saved yet: a beta version keeps getting betas (it was installed on purpose, e.g. by running a beta
+// installer from GitHub); a regular version keeps getting regular versions
+const updatePrefs = { beta: IS_BETA, ...(readJsonAt(userFile('updates.json'), {}) || {}) };
 function applyUpdateChannel() {
   if (!updater) return;
   if (updatePrefs.beta) {
@@ -270,6 +272,7 @@ function createWorkbench(profile) {
   // Each window is one person with their own hours. The first window keeps the original files.
   const trackFile = profileFile(profile.id, 'tracking.json');
   const syncStatus = { state: 'off', message: '', lastSync: null };
+  let syncChoice = null; // turning sync on: { flags, shifts, ros, updatedAt } while asking restore or overwrite
   let sync = null;
   const syncOn = () => !!SYNC_URL && !!settings.syncEnabled;
   const tracker = new Tracker({
@@ -294,6 +297,47 @@ function createWorkbench(profile) {
     try { await sync.flush(4000); } catch { /* best effort */ }
   }
   // Closing: record when (for "forgot to clock out"), then send anything not yet synced
+  // ---------- turning sync on ----------
+  // If the server already has a copy for this person, ask: restore this computer from it, or overwrite it?
+  async function beginSync() {
+    sync.paused = true;
+    Object.assign(syncStatus, { state: 'syncing', message: 'Checking the sync server…' }); pushState();
+    let info;
+    try { info = await sync.peek(); } catch (e) {
+      sync.paused = false;
+      settings = { ...settings, syncEnabled: false }; writeJson('settings.json', settings);
+      const msg = String(e?.message || e);
+      Object.assign(syncStatus, { state: 'error', message: /employee/i.test(msg) ? msg
+        : `Sync wasn't turned on: ${/fetch|network|ENOTFOUND|ECONN|ETIMEDOUT|net::/i.test(msg) ? "can't reach the sync server" : msg}. Try again.` });
+      pushState();
+      return;
+    }
+    if (!info.exists) { sync.paused = false; sync.rejoin(); sync.start(); return; } // nothing there yet: upload this computer's copy
+    syncChoice = info;
+    Object.assign(syncStatus, { state: 'ok', message: 'Waiting for your choice' });
+    pushState();
+  }
+  async function chooseSync(choice) {
+    if (!syncChoice) return;
+    syncChoice = null;
+    if (choice === 'cancel') {
+      sync.paused = false;
+      settings = { ...settings, syncEnabled: false }; writeJson('settings.json', settings);
+      Object.assign(syncStatus, { state: 'off', message: '' }); pushState();
+      return;
+    }
+    sync.paused = false;
+    Object.assign(syncStatus, { state: 'syncing', message: '' }); pushState();
+    try {
+      if (choice === 'restore') await sync.restoreFromServer();
+      else await sync.overwriteServer();
+      sync.start();
+    } catch (e) {
+      Object.assign(syncStatus, { state: 'error', message: String(e?.message || e).slice(0, 120) });
+    }
+    pushAll();
+  }
+
   async function closeOut() {
     tracker.appClosed();
     await flushSync();
@@ -431,7 +475,7 @@ function createWorkbench(profile) {
       xtimeViewingRO,
       logins: readLogins().map((l) => ({ host: l.host, username: l.username })), // never the passwords
       canSavePasswords: canEncrypt(),
-      sync: { ...syncStatus, configured: !!SYNC_URL, enabled: !!settings.syncEnabled, isMain: true },
+      sync: { ...syncStatus, configured: !!SYNC_URL, enabled: !!settings.syncEnabled, isMain: true, choice: syncChoice },
       app: { version: app.getVersion(), update: { ...update }, beta: IS_BETA, betaUpdates: !!updatePrefs.beta },
       profile: { id: profile.id, name: profile.name, xtimeName, displayName: displayName() },
       profiles: profiles.map((p) => ({
@@ -1070,7 +1114,7 @@ function createWorkbench(profile) {
     }
     try {
       const res = await frame.executeJavaScript(
-        `${XTIME_EXTRACT}(${JSON.stringify(settings.techId)}, ${JSON.stringify(settings.xtimeApiPath)})`, true);
+        `${XTIME_EXTRACT}(${JSON.stringify(settings.techId)}, ${JSON.stringify(settings.xtimeApiPath)}, ${JSON.stringify(String(settings.xtimeEmployeesPath || '').replace('{STORE}', encodeURIComponent(settings.storeId)))})`, true);
       if (!res?.ok) { xtimeFailed(res?.error || 'Could not read Xtime', !!res?.expired); return; }
       xtimeFailures = 0;
       myROs = res.mine;
@@ -1207,6 +1251,42 @@ function createWorkbench(profile) {
     pushState();
   }
 
+  // Messages you've read in the app (Xtime message ids only, no text): shown as read right away,
+  // even before Xtime's own lists catch up. Kept 60 days.
+  const READ_KEEP = 60 * 24 * 60 * 60 * 1000;
+  const readCache = new Map(Object.entries(readJson('chat-read.json', {}) || {}).filter(([, t]) => Date.now() - t < READ_KEEP));
+  const markLocal = (list) => (list || []).map((m) => (m.unread && readCache.has(String(m.id)) ? { ...m, unread: false } : m));
+  const readBusy = new Map(); // channelId -> when a read receipt was last sent
+  // Opening a conversation marks it read, like Xtime does. Xtime is asked which of your messages there are still
+  // unread (it knows best), so this runs on every open (at most every 15 s per conversation).
+  // chat-read.log: what happened (counts and ids only, no message text), for checking it works.
+  const readLog = (line) => {
+    try {
+      const f = userFile('chat-read.log');
+      try { if (fs.statSync(f).size > 256 * 1024) fs.renameSync(f, f + '.old'); } catch {}
+      fs.appendFileSync(f, `${new Date().toISOString()} ${line}\n`);
+    } catch { /* best effort */ }
+  };
+  async function sendReadReceipts(channelId, messages) {
+    if (!IS_BETA || !channelId) return;
+    if (Date.now() - (readBusy.get(channelId) || 0) < 15 * 1000) return; // already done just now
+    readBusy.set(channelId, Date.now());
+    const frame = findXtimeDataFrame();
+    if (!frame || !chatConfig) { readLog(`${channelId} skipped: ${!frame ? 'Xtime not loaded' : 'chat settings not known yet'}`); return; }
+    let r = null;
+    try { r = await frame.executeJavaScript(`${XTIME_CHAT}(${JSON.stringify({ type: 'read', channelId })}, ${chatCfgArg()})`, true); } catch (e) { r = { ok: false, error: e.message }; }
+    const shownUnread = (messages || []).filter((m) => m.unread && !m.mine).length;
+    readLog(`${channelId} unread here ${shownUnread} · Xtime said unread ${r?.tried ?? (r?.ids || []).length} ${r?.shape || ''} · ${r?.ok ? 'receipts sent' + (r.ids?.length ? ` for ${r.ids.join(',')}` : ' (none needed)') : `FAILED: ${r?.error || 'no answer'}`}`);
+    if (!r?.ok) { readBusy.delete(channelId); return; }                 // try again next time it's opened
+    const now = Date.now();
+    // Everything others sent in this conversation counts as read here now
+    for (const id of [...(r.ids || []), ...(messages || []).filter((m) => !m.mine).map((m) => m.id)]) if (id) readCache.set(String(id), now);
+    for (const [id, t] of readCache) if (now - t > READ_KEEP) readCache.delete(id);
+    writeJson('chat-read.json', Object.fromEntries(readCache));
+    if (chrome && !chrome.webContents.isDestroyed()) chrome.webContents.send('chat', { kind: 'read', channelId, ids: [...readCache.keys()] });
+    setTimeout(readMsgCount, 3000); // the unread counter catches up
+  }
+
   async function chatRun(action, kind) {
     const reply = (r) => { if (chrome && !chrome.webContents.isDestroyed()) chrome.webContents.send('chat', { kind, channelId: action.channelId, ...r }); };
     // Chat settings come from Xtime's full page the first time; after that the background page is enough
@@ -1221,8 +1301,11 @@ function createWorkbench(profile) {
         try { fs[loggedChatFields.size === 1 ? 'writeFileSync' : 'appendFileSync'](userFile('xtime-chat-fields.txt'), `${new Date().toISOString()} ${kind}\n${r.fieldNames.join('\n')}\n`); } catch {}
       }
       if (!r?.ok) return reply({ ok: false, error: r?.error || 'Could not read Xtime chat' });
-      if (kind === 'list') reply({ ok: true, conversations: r.conversations });
-      else if (kind === 'history') reply({ ok: true, messages: r.messages });
+      if (kind === 'list') reply({ ok: true, conversations: markLocal(r.conversations) });
+      else if (kind === 'history') {
+        reply({ ok: true, messages: markLocal(r.messages) });
+        sendReadReceipts(action.channelId, markLocal(r.messages)); // you've opened it: mark it read, like Xtime does
+      }
       else if (kind === 'roster') reply({ ok: true, people: r.people });
       else reply({ ok: true });
     } catch (e) { reply({ ok: false, error: e.message || String(e) }); }
@@ -1533,7 +1616,7 @@ function createWorkbench(profile) {
       settings = { ...settings, ...clean };
       writeJson('settings.json', settings);
       if (sync) {
-        if (settings.syncEnabled && !syncWas) { syncFlushed = false; sync.rejoin(); sync.start(); } // turned on: join fresh
+        if (settings.syncEnabled && !syncWas) { syncFlushed = false; beginSync(); } // turned on: ask first if the server has a copy
         else if (!settings.syncEnabled && syncWas) { sync.stop(); Object.assign(syncStatus, { state: 'off', message: '' }); }
         else if (settings.syncEnabled && (empChanged || storeChanged)) sync.syncNow(); // new person: their own data
       }
@@ -1558,6 +1641,7 @@ function createWorkbench(profile) {
     },
     // Sync across computers
     'sync-now': () => { if (sync) sync.syncNow(); },
+    'sync-choice': (choice) => chooseSync(['restore', 'overwrite', 'cancel'].includes(choice) ? choice : 'cancel'),
     // Updates
     'check-update': () => { if (updater) updater.checkForUpdates().catch(() => {}); },
     'set-beta-updates': (on) => setBetaUpdates(on),

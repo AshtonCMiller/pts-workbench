@@ -8,7 +8,8 @@
 //   { type: 'count' }                    → how many dealership messages you haven't read
 //   { type: 'roster' }                   → people you can @mention
 //   { type: 'send', channelId, ro, text } → send one message to an existing conversation (only when you press Send)
-// Nothing is marked as read. Customer chats are left out.
+//   { type: 'read', channelId }          → mark your unread messages in a conversation read (when you open it)
+// Customer chats are left out.
 (async (ACTION, CFG) => {
   // ---- Xtime's chat settings (passed to its React chat components through Angular) ----
   const findConfig = () => {
@@ -184,7 +185,7 @@
       mine: sentByMe,
       ...plain(body),
       time: created && !Number.isNaN(created.getTime()) ? created.getTime() : null,
-      unread: !sentByMe && String(raw.status || '').toLowerCase() !== 'read',
+      unread: !sentByMe && !/^(read|seen)$/i.test(String(raw.status ?? raw.state ?? raw.readStatus ?? '')),
       notification,
     };
   };
@@ -235,42 +236,12 @@
     return { ok: true, config, people: [...people].map(([id, name]) => ({ id, name })).sort((x, y) => x.name.localeCompare(y.name)) };
   }
 
-  // ---- sending one message: a short connection to Xtime's chat server, like Xtime's page makes ----
-  if (a.type === 'send') {
-    const text = String(a.text || '').trim();
-    if (!text) return { ok: false, error: 'Nothing to send' };
-    if (!a.channelId) return { ok: false, error: 'Start this conversation on Xtime’s page first' };
-    const DOMAIN = 'chat.xtime.com';
-    const esc = (v) => String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;');
-    const uuid = () => (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`);
-
-    // The conversation's context, as Xtime does: the latest message's (when it's for this RO), else RO + dealer code
-    let ctx = null;
-    const h = await post(`chatgateway/rest/data/history?uri=/chat/channel/history/pages?dealerCode=${dealerCode}`,
-      encodeURIComponent('&limit=20'),
-      { context: { DEALER_CODE: dealerRaw }, includeNotification: false, channelIds: [a.channelId], chatType: 'dealerChat' });
-    const roNum = String(a.ro || roFromChannel(a.channelId) || '');
-    if (h.ok) {
-      const recs = arrayIn(h.data).filter((x) => x && x.chatmsg)
-        .sort((x, y) => String(x.createdAt || '').localeCompare(String(y.createdAt || '')) || (Number(x.archiveId) || 0) - (Number(y.archiveId) || 0));
-      const last = recs[recs.length - 1];
-      if (last) {
-        const doc = parser.parseFromString(last.chatmsg, 'text/xml').documentElement;
-        const list = [...doc.getElementsByTagName('xtctx')].map((c) => ({ namespace: c.getAttribute('namespace') || '', contextId: c.getAttribute('contextId') || '' }))
-          .filter((c) => c.namespace);
-        const ro = list.find((c) => c.namespace === 'RO');
-        if (ro && (!roNum || ro.contextId === roNum)) ctx = list;
-      }
-    }
-    if (!ctx) ctx = [{ namespace: 'RO', contextId: roNum }, { namespace: 'DEALER_CODE', contextId: dealerRaw }];
-    ctx = ctx.filter((c) => !['CHAT_MSG_ID', 'src_msgid', 'sent_msg_uuid'].includes(c.namespace)).concat([{ namespace: 'sent_msg_uuid', contextId: uuid() }]);
-    const msgId = uuid();
-    const stanza = `<message xmlns="jabber:client" to="${esc(`${a.channelId}+${dealerRaw}@${DOMAIN}`)}" type="chat" id="${msgId}">`
-      + `<body>${esc(text)}</body><xtmsg xmlns="http://www.xtime.com/chat">`
-      + ctx.map((c) => `<xtctx namespace="${esc(c.namespace)}" contextId="${esc(c.contextId)}"/>`).join('')
-      + `<xtchannel xmlns="http://www.xtime.com/channel"><channel dealercode="${esc(dealerRaw)}" channel="${esc(a.channelId)}"/></xtchannel>`
-      + '</xtmsg></message>';
-
+  // ---- a short connection to Xtime's chat server (XMPP over WebSocket), like Xtime's page makes:
+  //      open → sign in (SASL, with the chat token) → bind → send the stanzas → close ----
+  const DOMAIN = 'chat.xtime.com';
+  const esc = (v) => String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;');
+  const uuid = () => (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`);
+  const xmppSend = async (stanzas, watchIds = []) => {
     // Where Xtime's chat server is (Xtime's login service tells its page the same way)
     let server = '';
     try { server = sessionStorage.getItem('xtEjdUrl') || ''; } catch {}
@@ -313,7 +284,7 @@
         },
       };
     };
-    const result = await new Promise((resolve) => {
+    return new Promise((resolve) => {
       let ws;
       let step = 'open';
       let mech = null;
@@ -363,12 +334,12 @@
           if (name === 'iq' && el.getAttribute('id') === 'bind1') {
             if (el.getAttribute('type') !== 'result') { clearTimeout(timer); return finish({ ok: false, error: 'Xtime’s chat server refused the connection' }); }
             step = 'sent';
-            ws.send(stanza);
+            for (const st of stanzas) ws.send(st);
             // Nothing comes back for a good message; an error would come back quickly
             setTimeout(() => { clearTimeout(timer); finish({ ok: true }); }, 2500);
             return;
           }
-          if (name === 'message' && el.getAttribute('type') === 'error' && el.getAttribute('id') === msgId) {
+          if (name === 'message' && el.getAttribute('type') === 'error' && watchIds.includes(el.getAttribute('id'))) {
             clearTimeout(timer);
             const why = el.getElementsByTagName('text')[0]?.textContent || el.getElementsByTagName('error')[0]?.firstElementChild?.localName || 'error';
             return finish({ ok: false, error: `Xtime's chat didn't take the message (${why})` });
@@ -376,7 +347,67 @@
         } catch (e) { clearTimeout(timer); finish({ ok: false, error: `Chat error: ${e.message}` }); }
       };
     });
-    return { ...result, config };
+  };
+
+  // ---- sending one message ----
+  if (a.type === 'send') {
+    const text = String(a.text || '').trim();
+    if (!text) return { ok: false, error: 'Nothing to send' };
+    if (!a.channelId) return { ok: false, error: 'Start this conversation on Xtime’s page first' };
+
+    // The conversation's context, as Xtime does: the latest message's (when it's for this RO), else RO + dealer code
+    let ctx = null;
+    const h = await post(`chatgateway/rest/data/history?uri=/chat/channel/history/pages?dealerCode=${dealerCode}`,
+      encodeURIComponent('&limit=20'),
+      { context: { DEALER_CODE: dealerRaw }, includeNotification: false, channelIds: [a.channelId], chatType: 'dealerChat' });
+    const roNum = String(a.ro || roFromChannel(a.channelId) || '');
+    if (h.ok) {
+      const recs = arrayIn(h.data).filter((x) => x && x.chatmsg)
+        .sort((x, y) => String(x.createdAt || '').localeCompare(String(y.createdAt || '')) || (Number(x.archiveId) || 0) - (Number(y.archiveId) || 0));
+      const last = recs[recs.length - 1];
+      if (last) {
+        const doc = parser.parseFromString(last.chatmsg, 'text/xml').documentElement;
+        const list = [...doc.getElementsByTagName('xtctx')].map((c) => ({ namespace: c.getAttribute('namespace') || '', contextId: c.getAttribute('contextId') || '' }))
+          .filter((c) => c.namespace);
+        const ro = list.find((c) => c.namespace === 'RO');
+        if (ro && (!roNum || ro.contextId === roNum)) ctx = list;
+      }
+    }
+    if (!ctx) ctx = [{ namespace: 'RO', contextId: roNum }, { namespace: 'DEALER_CODE', contextId: dealerRaw }];
+    ctx = ctx.filter((c) => !['CHAT_MSG_ID', 'src_msgid', 'sent_msg_uuid'].includes(c.namespace)).concat([{ namespace: 'sent_msg_uuid', contextId: uuid() }]);
+    const msgId = uuid();
+    const stanza = `<message xmlns="jabber:client" to="${esc(`${a.channelId}+${dealerRaw}@${DOMAIN}`)}" type="chat" id="${msgId}">`
+      + `<body>${esc(text)}</body><xtmsg xmlns="http://www.xtime.com/chat">`
+      + ctx.map((c) => `<xtctx namespace="${esc(c.namespace)}" contextId="${esc(c.contextId)}"/>`).join('')
+      + `<xtchannel xmlns="http://www.xtime.com/channel"><channel dealercode="${esc(dealerRaw)}" channel="${esc(a.channelId)}"/></xtchannel>`
+      + '</xtmsg></message>';
+
+    return { ...(await xmppSend([stanza], [msgId])), config };
+  }
+
+  // ---- read receipts: what Xtime's page sends when you open a conversation ----
+  // Asks Xtime which of your messages in the conversation are still unread, then marks each one read.
+  if (a.type === 'read') {
+    if (!a.channelId) return { ok: false, error: 'No conversation' };
+    const r = await post('chatgateway/rest/data/history?uri=/chat/getUnreadArchiveIds', `?dealerCode=${dealerCode}`,
+      { context: { DEALER_CODE: dealerRaw }, usernames: [escapeNode(userName)], channelIds: [a.channelId], days: Math.max(5, Number(a.days) || 120) });
+    if (!r.ok) return r;
+    // [101, 102] · [{ archiveId: 101, … }] · { channelId: [101, …] } · { data: … }
+    const pickIds = (d) => {
+      if (d == null) return [];
+      if (Array.isArray(d)) return d.flatMap((x) => (x && typeof x === 'object' ? (x.archiveId ?? x.id ?? x.messageId ?? x.archive_id) != null ? [x.archiveId ?? x.id ?? x.messageId ?? x.archive_id] : pickIds(x) : [x]));
+      if (typeof d === 'object') return Object.values(d).flatMap(pickIds);
+      return [d];
+    };
+    const shape = (d) => (Array.isArray(d) ? `[${d.length}${d.length ? ` × ${shape(d[0])}` : ''}]` : d && typeof d === 'object' ? `{${Object.keys(d).slice(0, 8).join(',')}}` : typeof d);
+    const ids = [...new Set(pickIds(r.data).map(String).filter((x) => /^\d+$/.test(x)))];
+    if (!ids.length) return { ok: true, config, ids: [], shape: shape(r.data) };
+    const stanzas = ids.map((id) => '<message xmlns="jabber:client">'
+      + `<xtreceived xmlns="urn:xtime:chatstates" id="${esc(id)}" state="read"/>`
+      + '<xtmsg xmlns="http://www.xtime.com/chat"><xtchannel xmlns="http://www.xtime.com/xtchannel">'
+      + `<channel dealercode="${esc(dealerRaw)}" channel="${esc(a.channelId)}"/></xtchannel></xtmsg></message>`);
+    const res = await xmppSend(stanzas);
+    return { ...res, config, ids: res.ok ? ids : [], tried: ids.length, shape: shape(r.data) };
   }
 
   if (a.type === 'count') {

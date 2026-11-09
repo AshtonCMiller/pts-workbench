@@ -396,7 +396,8 @@ body.xtime.dash #drawer { display: none; }
 .xtable th:nth-child(5), .xtable td:nth-child(5) { width: 40px; }
 .xtable th:nth-child(6), .xtable td:nth-child(6) { width: 34px; }
 .xtable th:nth-child(7), .xtable td:nth-child(7) { width: 22%; }
-.xtable th:nth-child(9), .xtable td:nth-child(9) { width: 56px; }
+.xtable th:nth-child(9), .xtable td:nth-child(9) { width: 110px; }
+.xtable td.adv { overflow: hidden; text-overflow: ellipsis; }
 .xtable th:nth-child(10), .xtable td:nth-child(10), .xtable th:nth-child(11), .xtable td:nth-child(11) { width: 50px; }
 body.xtime.dash #btn-drawer { display: none; }
 /* an RO's lines, expanded under its row */
@@ -515,3 +516,11 @@ body.chat #xdash, body.chat #tabstrip, body.chat #empty { right: var(--chat); }
 .ver.beta::after { content: 'BETA'; margin-left: 5px; font-size: 9.5px; font-weight: 800; letter-spacing: .5px; padding: 1px 5px; border-radius: 4px; background: #7c3aed; color: #fff; vertical-align: 1px; }
 .beta-check { margin-top: 8px; }
 #btn-dash[hidden], #btn-chat[hidden] { display: none; }
+
+/* sync: restore or overwrite */
+.sync-choices { display: flex; flex-direction: column; gap: 10px; margin: 12px 0 4px; }
+.sync-opt { font: inherit; text-align: left; display: flex; flex-direction: column; gap: 3px; padding: 11px 13px; border-radius: 8px;
+  border: 1px solid var(--line); background: var(--bg); color: var(--text); cursor: pointer; }
+.sync-opt:hover { border-color: var(--accent); background: var(--sel); }
+.sync-opt.danger:hover { border-color: var(--danger); background: color-mix(in srgb, var(--danger) 10%, var(--panel)); }
+.sync-opt b { font-size: 13.5px; }

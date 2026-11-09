@@ -190,6 +190,27 @@
     </form>
   </div>
 
+  <!-- Turning sync on when the server already has a copy for you -->
+  <div id="modal-sync-choice" class="modal" hidden>
+    <div class="dialog">
+      <h2>Your data is already on the sync server</h2>
+      <p class="small" id="sync-choice-what"></p>
+      <div class="sync-choices">
+        <button type="button" class="sync-opt" id="btn-sync-restore">
+          <b>Restore from the server</b>
+          <span class="muted small">This computer's hours, flags and clock are replaced with the server's copy. Use this on a new or second computer.</span>
+        </button>
+        <button type="button" class="sync-opt danger" id="btn-sync-overwrite">
+          <b>Overwrite the server</b>
+          <span class="muted small">The server's copy is replaced with this computer's. Anything only on the server is deleted, on every computer.</span>
+        </button>
+      </div>
+      <div class="actions">
+        <button type="button" class="ghost" id="btn-sync-cancel">Cancel (leave sync off)</button>
+      </div>
+    </div>
+  </div>
+
   <div id="modal-add" class="modal" hidden>
     <form class="dialog" id="form-add">
       <h2>Add vehicle</h2>

@@ -234,6 +234,12 @@ api.onChat?.((d) => {
     if (chat.channel) chatAskHistory(chat.channel);
   } else if (d.kind === 'history') {
     chat.hist.set(d.channelId, d.ok ? { messages: d.messages || [] } : { error: d.error, messages: chat.hist.get(d.channelId)?.messages });
+  } else if (d.kind === 'read') {
+    // Read receipts went to Xtime: show those messages as read here too
+    const read = new Set(d.ids || []);
+    const clear = (m) => (m.unread && read.has(String(m.id)) ? { ...m, unread: false } : m);
+    if (chat.list) chat.list = chat.list.map((m) => (m.channelId === d.channelId && !m.mine ? { ...m, unread: false } : clear(m)));
+    for (const [k, h] of chat.hist) if (h.messages) chat.hist.set(k, { ...h, messages: h.messages.map(clear) });
   } else if (d.kind === 'roster') {
     if (d.ok) chat.people = d.people || [];
   } else if (d.kind === 'send') {
@@ -487,7 +493,7 @@ function renderDashboard(s) {
         el('td', { text: String(d.quote || '') }),
         el('td', { class: 'cust', text: String(d.customer || '') }),
         el('td', { class: 'veh', text: ymmOf(r) }),
-        el('td', { text: String(d.advisor || '') }),
+        el('td', { class: 'adv', text: String(d.advisorName || d.advisor || ''), title: d.advisor ? `Advisor ${d.advisor}` : '' }),
         el('td', { text: d.modeTime != null ? since(d.modeTime) : since(d.modeSince) }),
         el('td', { text: d.partsTime != null ? since(d.partsTime) : since(d.partsSince) }));
       return expanded ? [tr, el('tr', { class: 'xlines-row' }, el('td', { colspan: '11' },
@@ -909,6 +915,26 @@ function renderSync() {
 }
 $('btn-sync-now').onclick = () => api.send('sync-now');
 
+// Turning sync on when the server already has a copy: restore from it, or overwrite it
+let syncChoiceShown = false;
+function renderSyncChoice() {
+  const c = state?.sync?.choice;
+  if (!c) { if (syncChoiceShown) { syncChoiceShown = false; closeModal('modal-sync-choice'); } return; }
+  if (syncChoiceShown) return;
+  syncChoiceShown = true;
+  const n = (k, one, many) => `${c[k]} ${c[k] === 1 ? one : many}`;
+  const when = c.updatedAt ? ` Last changed ${new Date(c.updatedAt).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}.` : '';
+  $('sync-choice-what').textContent = `The server has ${n('ros', 'RO', 'ROs')}, ${n('flags', 'flagged line', 'flagged lines')} and ${n('shifts', 'clock entry', 'clock entries')} for employee ${state.settings.employeeNumber}.${when} What should this computer do?`;
+  document.querySelectorAll('.modal:not([hidden])').forEach((m) => { if (m.id !== 'modal-sync-choice') closeModal(m.id); });
+  openModal('modal-sync-choice');
+}
+const syncChoose = (choice) => { syncChoiceShown = false; closeModal('modal-sync-choice'); api.send('sync-choice', choice); };
+$('btn-sync-restore').onclick = () => syncChoose('restore');
+$('btn-sync-overwrite').onclick = () => {
+  if (confirm("Replace the server's copy with this computer's? Anything that's only on the server (on your other computers) will be deleted.")) syncChoose('overwrite');
+};
+$('btn-sync-cancel').onclick = () => syncChoose('cancel');
+
 // ---------- employee number & first-launch setup ----------
 function employeeText() {
   const st = state?.settings || {};
@@ -1056,6 +1082,7 @@ function render() {
   renderPayChip();
   renderVersion();
   renderSync();
+  renderSyncChoice();
   renderXtimeAlert();
 
   const hidden = new Set(s.hidden || []);
@@ -1390,7 +1417,7 @@ function closeModal(id) { $(id).hidden = true; api.send('set-overlay', false); }
 document.querySelectorAll('[data-close]').forEach((b) => { b.onclick = () => closeModal(b.closest('.modal').id); });
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape' || editing) return;
-  document.querySelectorAll('.modal:not([hidden])').forEach((m) => closeModal(m.id));
+  document.querySelectorAll('.modal:not([hidden])').forEach((m) => { if (m.id === 'modal-sync-choice') syncChoose('cancel'); else closeModal(m.id); });
 });
 
 // Windows (profiles): each is one person, with their own logins, settings and hours

@@ -2,7 +2,7 @@
 // Fetches the same dashboard data Xtime's own page loads, using your existing login,
 // and returns ONLY: RO, tag, year/make/model, VIN, mode and waiting flags for ONE technician.
 // Customer information never leaves the page.
-(async (TECH_ID, API_PATH) => {
+(async (TECH_ID, API_PATH, EMPLOYEES_PATH) => {
   const get = (obj, name) => {
     if (!obj || typeof obj !== 'object') return undefined;
     const key = Object.keys(obj).find((k) => k.toLowerCase() === name.toLowerCase());
@@ -52,6 +52,34 @@
     return key ? obj[key] : null;
   };
   const flag = (v) => v === true || v === 1 || /^(true|y|yes|1)$/i.test(String(v ?? ''));
+  // Advisor names, as Xtime shows them: number (or ID) → "First Last", from the store's employee list
+  // (loaded once per page; only names are used)
+  let staff = window.__ptsEmployees;
+  if (!Array.isArray(staff) && Array.isArray(window.Employees)) staff = window.Employees;
+  if (!Array.isArray(staff) && EMPLOYEES_PATH) {
+    try {
+      const res = await fetch(EMPLOYEES_PATH, { credentials: 'include' });
+      const text = res.ok ? await res.text() : '';
+      const a = text.indexOf('['), b = text.lastIndexOf(']');
+      if (a >= 0 && b > a) staff = JSON.parse(text.slice(a, b + 1));
+    } catch { /* numbers only, then */ }
+    if (Array.isArray(staff)) window.__ptsEmployees = staff;
+  }
+  const staffName = new Map();
+  for (const e of Array.isArray(staff) ? staff : []) {
+    const full = [e.FirstName, e.LastName].filter(Boolean).join(' ').trim();
+    if (!full) continue;
+    if (e.Number != null && !staffName.has(String(e.Number))) staffName.set(String(e.Number), full);
+    if (e.ID != null) staffName.set(`id:${e.ID}`, full);
+  }
+  const advisorName = (ro, adv, num) => {
+    const named = pick(ro, /^(service)?advisor_?(full_?)?name$/i) ?? pick(adv, /^(full_?|display_?)?name$/i);
+    if (named) return String(named);
+    const first = pick(adv, /^first_?name$/i), last = pick(adv, /^last_?name$/i);
+    if (first || last) return [first, last].filter(Boolean).join(' ');
+    if (num == null || num === '') return '';
+    return staffName.get(String(num)) || staffName.get(String(num).replace(/^0+(?=\d)/, '')) || staffName.get(`id:${num}`) || '';
+  };
   const dashOf = (ro) => {
     const cust = sub(ro, /^customer$/i);
     const adv = sub(ro, /^(service)?advisor$/i);
@@ -62,6 +90,7 @@
       // Xtime shows the customer's last name; only that is kept, and only on this computer
       customer: pick(ro, /^customer_?last_?name$/i) ?? pick(cust, /^last_?name$/i) ?? pick(ro, /^customer_?name$/i, /^last_?name$/i) ?? pick(cust, /name/i) ?? '',
       advisor: pick(ro, /^(service)?advisor_?(number|id|num|no)$/i) ?? pick(adv, /^(number|id)$/i) ?? '',
+      advisorName: advisorName(ro, adv, pick(ro, /^(service)?advisor_?(number|id|num|no)$/i) ?? pick(adv, /^(number|id)$/i)),
       modeSince: pick(ro, /^(current)?mode_?(start|change[d]?|updated?)?_?(date|time|datetime|on)$/i, /mode.*(date|time)/i) ?? null,
       modeTime: pick(ro, /^mode_?time$/i, /time_?in_?mode/i) ?? null,
       partsSince: pick(ro, /^parts?_?(start|request(ed)?|sent)?_?(date|time|datetime)$/i, /parts?.*(date|time)/i) ?? null,
