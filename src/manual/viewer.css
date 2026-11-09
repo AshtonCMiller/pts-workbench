@@ -13,6 +13,13 @@
           --note-bg: #16263a; --note-line: #4a8fe0; --mark: #5c5200; }
 }
 * { box-sizing: border-box; }
+/* Scrollbars that match the app's light/dark colors */
+/* (Chromium: the ::-webkit-scrollbar rules below; standard scrollbar-* properties would switch these off) */
+:root { color-scheme: light dark; --scroll: color-mix(in srgb, var(--muted) 45%, transparent); --scroll-hover: color-mix(in srgb, var(--muted) 75%, transparent); }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--scroll); border-radius: 10px; border: 2px solid transparent; background-clip: padding-box; }
+::-webkit-scrollbar-thumb:hover { background: var(--scroll-hover); border: 2px solid transparent; background-clip: padding-box; }
 html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); overflow: hidden; }
 button { font: inherit; color: inherit; cursor: pointer; }
 .icon { border: 1px solid var(--line); background: var(--panel); width: 30px; height: 28px; border-radius: 6px; flex: none; }

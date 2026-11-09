@@ -2,11 +2,15 @@
 // Each window runs one profile: its own Xtime/PTS login, settings, open vehicles and hidden ROs.
 // The shift clock and the flag sheet are shared by every window, so all flags land in one set of hours.
 // Every page is loaded from Ford/Cox as normal, so access is recorded under that window's own login.
-const { app, BaseWindow, BrowserWindow, WebContentsView, ipcMain, session, shell, safeStorage, clipboard, net, protocol } = require('electron');
+const { app, BaseWindow, BrowserWindow, WebContentsView, ipcMain, session, shell, safeStorage, clipboard, net, protocol, Notification } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
 const XTIME_EXTRACT = fs.readFileSync(path.join(__dirname, 'inject', 'xtime-extract.js'), 'utf8').trim();
+const XTIME_RO = fs.readFileSync(path.join(__dirname, 'inject', 'xtime-ro.js'), 'utf8').trim();
+const XTIME_CHAT = fs.readFileSync(path.join(__dirname, 'inject', 'xtime-chat.js'), 'utf8').trim();
+const COX_SIGNIN = fs.readFileSync(path.join(__dirname, 'inject', 'cox-signin.js'), 'utf8').trim();
+const COX_SIGNIN_HOST = /(^|\.)signin\.coxautoinc\.com$/i;
 const XTIME_DETAILS = fs.readFileSync(path.join(__dirname, 'inject', 'xtime-details.js'), 'utf8').trim();
 const XTIME_VEHICLE = fs.readFileSync(path.join(__dirname, 'inject', 'xtime-vehicle.js'), 'utf8').trim();
 const XTIME_EMPLOYEE = fs.readFileSync(path.join(__dirname, 'inject', 'xtime-employee.js'), 'utf8').trim();
@@ -22,6 +26,7 @@ const SYNC_URL = (() => { try { return require('../package.json').ptsWorkbench?.
 const TOP_BAR = 48;
 const TAB_STRIP = 38;
 const DRAWER = 360;
+const CHAT_W = 380;   // the read-only Dealership chat panel on the right
 
 const DEFAULT_SETTINGS = {
   employeeNumber: '',  // your employee number; the Xtime technician ID is looked up from it
@@ -45,8 +50,10 @@ const DEFAULT_SETTINGS = {
   autoLogin: true,         // press "Sign in" with a saved password when a site asks you to log in
   syncEnabled: false,      // keep flags, hours and the clock in sync across computers (main window's setting)
   sidebarWidth: 380,
+  xtimeDashboard: false,   // show the app's own Xtime dashboard instead of Xtime's page
+  notifications: true,     // Windows pop-ups: RO assigned, line approved, new Xtime messages
 };
-const BOOLEAN_SETTINGS = ['autoLogin', 'setupDone', 'syncEnabled'];
+const BOOLEAN_SETTINGS = ['autoLogin', 'setupDone', 'syncEnabled', 'xtimeDashboard', 'notifications'];
 // Not shown in Settings (too technical): always the built-in values, updated with the app
 const FIXED_SETTINGS = ['ptsUrl', 'ptsTransportUrl', 'oasisUrl', 'xtimeApiPath', 'xtimeRoUrl', 'xtimeDetailsPath', 'xtimeEmployeesPath'];
 // Ford transport link codes: 704 = OASIS landing page (workshop manual), 702 = Over-the-Air update
@@ -105,6 +112,34 @@ const pushAll = () => { for (const wb of windows.values()) wb.pushState(); };
 // =====================================================================================
 let updater = null;
 const update = { state: 'idle', version: '', percent: 0, message: '', checkedAt: null };
+
+// ---------- beta versions ----------
+// A beta build (version like 0.4.1-beta.12, built from any branch other than main) has the new Xtime
+// features: the app's own dashboard, chat, and running without Xtime's page. Regular builds behave as before.
+// "Beta updates" (⚙ Settings → Version & updates) lets one computer install beta builds; turning it off
+// goes back to the newest regular version on the next check.
+const IS_BETA = !app.isPackaged || /-/.test(app.getVersion());
+const updatePrefs = { beta: false, ...(readJsonAt(userFile('updates.json'), {}) || {}) };
+function applyUpdateChannel() {
+  if (!updater) return;
+  if (updatePrefs.beta) {
+    updater.allowPrerelease = true;
+    updater.channel = 'beta';          // beta.yml: every release (beta or regular) has one
+  } else if (IS_BETA) {
+    updater.allowPrerelease = false;
+    updater.channel = 'latest';        // leaving beta: back to the newest regular version (may be "older")
+  } else {
+    updater.allowPrerelease = false;
+    updater.allowDowngrade = false;
+  }
+}
+function setBetaUpdates(on) {
+  updatePrefs.beta = !!on;
+  writeJsonAt(userFile('updates.json'), updatePrefs);
+  applyUpdateChannel();
+  pushAll();
+  if (updater) updater.checkForUpdates().catch(() => {});
+}
 const setUpdate = (patch) => { Object.assign(update, patch); pushAll(); };
 
 function initUpdater() {
@@ -128,6 +163,7 @@ function initUpdater() {
   updater.logger = { info: log('INFO'), warn: log('WARN'), error: log('ERROR'), debug: () => {} };
   update.logFile = logFile;
   updater.autoDownload = true;
+  applyUpdateChannel();
   updater.autoInstallOnAppQuit = true; // a downloaded update also installs whenever you close the app
   updater.on('checking-for-update', () => setUpdate({ state: 'checking', message: '' }));
   // info.version is the newest version GitHub offered, so a stuck release is easy to spot
@@ -223,6 +259,7 @@ function createWorkbench(profile) {
 
   const savedSettings = readJson('settings.json', {});
   let settings = { ...DEFAULT_SETTINGS, ...savedSettings };
+  if (!IS_BETA) settings.xtimeDashboard = false; // the app's own Xtime dashboard is in beta versions only
   // Addresses that aren't shown in Settings always come from the app itself, so an update can fix them
   for (const k of FIXED_SETTINGS) settings[k] = DEFAULT_SETTINGS[k];
   // Before employee numbers, the first window always used this technician ID by default
@@ -268,6 +305,10 @@ function createWorkbench(profile) {
   let win, chrome, xtimeView;
   let mode = 'xtime';           // 'xtime' | 'manual'
   let drawerOpen = true;
+  let chatOpen = false;          // the app's Dealership chat panel
+  const loggedChatFields = new Set();
+  let loggedXtimeFields = false;
+  let loggedLineFields = false;
   let overlay = false;          // a dialog is open in the app UI; hide web views
   let myROs = [];
   let xtimeStatus = 'Log in to Xtime to load your ROs';
@@ -376,7 +417,7 @@ function createWorkbench(profile) {
       if (s) roInfo[ro] = s;
     }
     chrome.webContents.send('state', {
-      mode, drawerOpen, settings, xtimeStatus, lastPoll, activeRO,
+      mode, drawerOpen, chatOpen, settings, xtimeStatus, lastPoll, activeRO, xtimeSignin, msgCount,
       myROs, roInfo,
       tracking: tracker?.summary() ?? null,
       period: tracker?.period(periodOffset) ?? null,
@@ -391,7 +432,7 @@ function createWorkbench(profile) {
       logins: readLogins().map((l) => ({ host: l.host, username: l.username })), // never the passwords
       canSavePasswords: canEncrypt(),
       sync: { ...syncStatus, configured: !!SYNC_URL, enabled: !!settings.syncEnabled, isMain: true },
-      app: { version: app.getVersion(), update: { ...update } },
+      app: { version: app.getVersion(), update: { ...update }, beta: IS_BETA, betaUpdates: !!updatePrefs.beta },
       profile: { id: profile.id, name: profile.name, xtimeName, displayName: displayName() },
       profiles: profiles.map((p) => ({
         id: p.id, name: p.name, open: windows.has(p.id), current: p.id === profile.id,
@@ -417,8 +458,10 @@ function createWorkbench(profile) {
     chrome.setBounds({ x: 0, y: 0, width, height });
     let visible = null;
     if (!overlay) {
-      if (mode === 'xtime') {
-        xtimeView.setBounds({ x: 0, y: TOP_BAR, width: Math.max(0, width - (drawerOpen ? DRAWER : 0)), height: Math.max(0, height - TOP_BAR) });
+      if (mode === 'xtime' && settings.xtimeDashboard) {
+        visible = null; // the app's own dashboard is drawn in the app's screen
+      } else if (mode === 'xtime') {
+        xtimeView.setBounds({ x: 0, y: TOP_BAR, width: Math.max(0, width - (chatOpen ? CHAT_W : drawerOpen ? DRAWER : 0)), height: Math.max(0, height - TOP_BAR) });
         visible = xtimeView;
       } else if (activeRO && workspaces.has(activeRO)) {
         const ws = workspaces.get(activeRO);
@@ -426,7 +469,7 @@ function createWorkbench(profile) {
         if (tab) {
           ensureView(ws, tab);
           const side = sidebarWidth();
-          tab.view.setBounds({ x: side, y: TOP_BAR + TAB_STRIP, width: Math.max(0, width - side), height: Math.max(0, height - TOP_BAR - TAB_STRIP) });
+          tab.view.setBounds({ x: side, y: TOP_BAR + TAB_STRIP, width: Math.max(0, width - side - (chatOpen ? CHAT_W : 0)), height: Math.max(0, height - TOP_BAR - TAB_STRIP) });
           visible = tab.view;
         }
       }
@@ -719,12 +762,229 @@ function createWorkbench(profile) {
   }
 
   // ---------- Xtime ----------
-  function findXtimeDataFrame() {
+  // ---------- Windows notifications ----------
+  // RO assigned to you, a line approved (with what Xtime says about parts), and new Xtime messages.
+  // Clicking one opens that RO's Xtime page in the Workbench.
+  function notifyUser(title, body, ro) {
+    if (!settings.notifications || !Notification.isSupported()) return;
+    try {
+      const n = new Notification({ title, body, silent: false });
+      n.on('click', () => {
+        try { if (win.isMinimized()) win.restore(); win.show(); win.focus(); } catch {}
+        if (ro) {
+          const r = myROs.find((x) => x.ro === ro);
+          openWorkspace({ ro, vin: r?.vin || '', ymm: r ? [r.year, r.make, r.model].filter(Boolean).join(' ') : '', tab: 'xtime' });
+          layout(); pushState();
+        } else { mode = 'xtime'; layout(); pushState(); }
+      });
+      n.show();
+    } catch { /* notifications are optional */ }
+  }
+  let knownMine = null;            // ROs on your list at the last read (null until the first read)
+  const approvedSeen = new Map();  // ro -> approved line keys at the last read
+  function partsNote(r) {
+    const d = r?.dash || {};
+    if (d.notInStock) return '⚠ Parts not in stock';
+    if (d.partsStatus) return `Parts: ${d.partsStatus}`;
+    if (r?.waitingParts) return 'Waiting for parts';
+    return 'No parts flagged as out of stock';
+  }
+  function noteAssigned(list) {
+    const now = new Set(list.map((r) => r.ro));
+    if (knownMine) {
+      for (const r of list) {
+        if (knownMine.has(r.ro)) continue;
+        const ymm = [r.year, r.make, r.model].filter(Boolean).join(' ');
+        notifyUser(`RO ${r.ro} assigned to you`, [ymm, r.tag && `Tag ${r.tag}`].filter(Boolean).join(' · ') || 'New RO on your list', r.ro);
+      }
+    }
+    knownMine = now;
+  }
+  function noteApprovals(r, lines) {
+    const key = (l) => l.key || l.dms;
+    const approved = new Set((lines || []).filter((l) => l.approved && !l.primary && !l.declined).map(key));
+    const before = approvedSeen.get(r.ro);
+    approvedSeen.set(r.ro, approved);
+    if (!before) return; // first look at this RO: nothing to compare with
+    const fresh = (lines || []).filter((l) => approved.has(key(l)) && !before.has(key(l)));
+    if (!fresh.length) return;
+    const what = fresh.map((l) => `${l.dms || ''} ${l.complaint || l.service || ''}`.trim()).join('; ').slice(0, 140);
+    notifyUser(`RO ${r.ro}: ${fresh.length === 1 ? 'line approved' : `${fresh.length} lines approved`}`, `${what}\n${partsNote(r)}`, r.ro);
+  }
+  // Xtime's unread-messages counter (top right of Xtime's page)
+  let msgCount = null;
+  async function readMsgCount() {
+    const frame = findXtimeDataFrame();
+    if (!frame) return;
+    let n = null;
+    // Unread Dealership messages, from Xtime's chat (works without Xtime's page)
+    if (IS_BETA && (chatConfig || findInspectFrame())) {
+      try {
+        const r = await (chatConfig ? frame : findInspectFrame()).executeJavaScript(`${XTIME_CHAT}({"type":"count"}, ${chatCfgArg()})`, true);
+        if (r?.config) keepChatConfig(r.config);
+        if (r?.ok && Number.isFinite(r.count)) n = r.count;
+      } catch {}
+    }
+    // Otherwise the counter on Xtime's page, when it's loaded
+    const page = findInspectFrame();
+    if (n == null && page) {
+      try { n = await page.executeJavaScript(`(() => { const e = document.querySelector('.messages-count'); return e ? Number(e.getAttribute('data-badge')) || 0 : null; })()`, true); } catch {}
+    }
+    if (n == null) return;
+    if (msgCount != null && n > msgCount) notifyUser('New Xtime message', n - msgCount === 1 ? `1 new message · ${n} unread` : `${n - msgCount} new messages · ${n} unread`, null);
+    if (n !== msgCount) { msgCount = n; pushState(); }
+  }
+  const msgTimer = setInterval(readMsgCount, 20000);
+
+  // ---------- signing in to Xtime from the app's own form ----------
+  // When Xtime sends its page to Cox's sign-in, the app shows its own form and fills in Cox's real page.
+  let xtimeSignin = null; // { step, error, factors, message, buttons, username, busy } while signing in
+  function findSigninFrame() {
+    const main = xtimeView?.webContents?.mainFrame;
+    if (!main) return null;
+    return (main.framesInSubtree || []).find((f) => { try { return COX_SIGNIN_HOST.test(new URL(f.url).hostname); } catch { return false; } }) || null;
+  }
+  async function signinRun(action) {
+    const frame = findSigninFrame();
+    if (!frame) return null;
+    try { return await frame.executeJavaScript(`${COX_SIGNIN}(${JSON.stringify(action || { type: 'state' })})`, true); } catch { return null; }
+  }
+  let signinChecking = false;
+  async function checkSignin() {
+    if (signinChecking || !xtimeView || xtimeView.webContents.isDestroyed()) return;
+    signinChecking = true;
+    try {
+      const frame = findSigninFrame();
+      if (!frame) {
+        // Landed on Scheduling soon after signing in: go to Inspect
+        if (autoInspectUntil > Date.now() && onScheduling() && !xtimeView.webContents.isLoading()) switchToInspect();
+        if (xtimeSignin && xtimeSignin.step !== 'loading') { // signed in: make sure Xtime is on Inspect (it lands on Scheduling), then read it again
+          // The dialog stays up ("Loading Inspect…") until the dashboard has data again
+          xtimeSignin = { step: 'loading', since: Date.now(), busy: false, error: '' }; pushState();
+          autoInspectUntil = Date.now() + 90 * 1000;
+          setTimeout(() => ensureInspect(2), 4000);
+        } else if (xtimeSignin?.step === 'loading' && !xtimeSignin.slow && Date.now() - xtimeSignin.since > 90 * 1000) {
+          xtimeSignin = { ...xtimeSignin, slow: true }; pushState(); // taking long: offer a reload
+        }
+        return;
+      }
+      const st = await signinRun({ type: 'state' });
+      if (!st?.ok) return;
+      let host = '';
+      try { host = new URL(frame.url).hostname; } catch {}
+      const saved = host ? getLogin(host, true) : null;
+      const next = { step: st.step, error: st.error, factors: st.factors, message: st.message, buttons: st.buttons,
+        username: st.username || saved?.username || '', savedPassword: !!(saved && hasSavedPassword(host)), canRemember: canEncrypt(), busy: !!xtimeSignin?.busy, host };
+      if (JSON.stringify(next) !== JSON.stringify(xtimeSignin)) { xtimeSignin = next; pushState(); }
+    } catch { /* checked again shortly */ } finally { signinChecking = false; }
+  }
+  const signinTimer = setInterval(checkSignin, 1500);
+  const hasSavedPassword = (host) => { try { return !!getLogin(host)?.password; } catch { return false; } };
+
+  // After signing in, Xtime opens Scheduling; the app's data comes from Inspect, so go there the same way
+  // Scheduling's top-left menu does ("INSPECT": login.<xtime domain>/?pt=svp&view=svp&StoreID=<store>)
+  let autoInspectUntil = Date.now() + 90 * 1000; // also right after the app starts (it may sign in on its own)
+  let lastInspectSwitch = 0;
+  const onScheduling = () => {
+    try {
+      const u = new URL(xtimeView.webContents.getURL());
+      return /(^|\.)xtime\.app\.coxautoinc\.com$/i.test(u.hostname) && (/^\/panama\//i.test(u.pathname) || /^x\d*\./i.test(u.hostname));
+    } catch { return false; }
+  };
+  function switchToInspect() {
+    if (Date.now() - lastInspectSwitch < 20000) return false; // once at a time
+    let domain = 'xtime.app.coxautoinc.com';
+    try { domain = new URL(xtimeView.webContents.getURL()).hostname.replace(/^[^.]+\./, '') || domain; } catch {}
+    lastInspectSwitch = Date.now();
+    xtimeStatus = 'Opening Xtime Inspect…'; pushState();
+    try { xtimeView.webContents.loadURL(`https://login.${domain}/?pt=svp&view=svp&StoreID=${encodeURIComponent(settings.storeId)}`); } catch {}
+    return true;
+  }
+  function ensureInspect(triesLeft) {
+    if (!xtimeView || xtimeView.webContents.isDestroyed()) return;
+    if (findInspectFrame()) { pollXtime(); return; }
+    if (findSigninFrame()) return; // still signing in (e.g. a verification step)
+    if (xtimeView.webContents.isLoading()) { if (triesLeft > 0) setTimeout(() => ensureInspect(triesLeft), 2000); return; }
+    if (!(onScheduling() && switchToInspect())) reloadXtime('Opening Xtime Inspect…');
+    if (triesLeft > 1) setTimeout(() => ensureInspect(triesLeft - 1), 8000);
+  }
+
+  async function waitForStep(steps, ms = 8000) {
+    const end = Date.now() + ms;
+    while (Date.now() < end) {
+      const st = await signinRun({ type: 'state' });
+      if (st?.ok && (steps.includes(st.step) || st.error)) return st;
+      if (!findSigninFrame()) return { ok: true, step: 'done' };
+      await new Promise((r) => setTimeout(r, 300));
+    }
+    return await signinRun({ type: 'state' });
+  }
+
+  // Xtime's Inspect frame inside the full Xtime page (only there while that page is loaded)
+  function findInspectFrame() {
     const main = xtimeView?.webContents?.mainFrame;
     if (!main) return null;
     return main.framesInSubtree.find((f) => {
       try { return new URL(f.url).hostname === settings.xtimeDataHost; } catch { return false; }
     }) || null;
+  }
+  // Where the app's Xtime requests run: the small background page on the Inspect site when it's ready
+  // (no Xtime page needed), otherwise the full Xtime page's Inspect frame
+  function findXtimeDataFrame() {
+    if (IS_BETA && liteReady()) return xtimeLite.webContents.mainFrame;
+    return findInspectFrame();
+  }
+
+  // ---------- the small background page ----------
+  // A blank-ish page on Xtime's Inspect site (its robots.txt). It shares the window's Xtime login, so the
+  // same requests Xtime's page makes work from it, without loading or running Xtime's page itself.
+  // The full Xtime page is then only loaded to sign in, to show it, or when asked for.
+  let xtimeLite = null;
+  let liteLoading = false;
+  const liteUrl = () => `https://${settings.xtimeDataHost}/robots.txt`;
+  function liteReady() {
+    try {
+      return !!xtimeLite && !xtimeLite.webContents.isDestroyed() && !liteLoading
+        && new URL(xtimeLite.webContents.getURL()).hostname === settings.xtimeDataHost;
+    } catch { return false; }
+  }
+  function startLite() {
+    if (!xtimeLite) {
+      xtimeLite = new WebContentsView({ webPreferences: { partition: PARTITION, sandbox: true, contextIsolation: true, nodeIntegration: false, backgroundThrottling: false } });
+      hardenWebContents(xtimeLite.webContents);
+      xtimeLite.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+      xtimeLite.webContents.on('did-start-loading', () => { liteLoading = true; });
+      xtimeLite.webContents.on('did-stop-loading', () => { liteLoading = false; });
+    }
+    try { xtimeLite.webContents.loadURL(liteUrl()); } catch {}
+  }
+
+  // Xtime's chat settings (dealer code, your Xtime username), saved from the full page so chat
+  // works without it. Nothing about customers.
+  let chatConfig = readJson('xtime-chat.json', null);
+  function keepChatConfig(c) {
+    if (!c || !c.dealerCode || !c.userName) return;
+    const next = { dealerCode: c.dealerCode, userName: c.userName, env: c.env || '', chatgatewayUrl: c.chatgatewayUrl || '', storeId: c.storeId || settings.storeId };
+    if (JSON.stringify(next) !== JSON.stringify(chatConfig)) { chatConfig = next; writeJson('xtime-chat.json', chatConfig); }
+  }
+  const chatCfgArg = () => JSON.stringify(chatConfig || { storeId: settings.storeId });
+
+  // The full Xtime page: put away (blank) while the app's dashboard is in use and everything works without it
+  let xtimeParked = false;
+  let liteTriedAt = Date.now();
+  function unparkXtime(status) {
+    if (!xtimeParked) return;
+    xtimeParked = false;
+    if (status) { xtimeStatus = status; pushState(); }
+    try { xtimeView.webContents.loadURL(settings.xtimeUrl); } catch {}
+  }
+  function parkCheck() {
+    if (xtimeParked || !settings.xtimeDashboard || xtimeSignin || !liteReady() || !chatConfig) return;
+    if (!findInspectFrame() || xtimeView.webContents.isLoading()) return;      // still signing in / getting to Inspect
+    if (!lastPoll || Date.now() - lastPoll > 3 * 60 * 1000 || xtimeFailures) return; // the background page must be working
+    if (Date.now() - xtimeLoadedAt < 30 * 1000) return;
+    xtimeParked = true;
+    try { xtimeView.webContents.loadURL('about:blank'); } catch {}
   }
 
   let polling = false;
@@ -740,6 +1000,7 @@ function createWorkbench(profile) {
     lastRecovery = Date.now();
     xtimeFailures = 0;
     if (status) { xtimeStatus = status; pushState(); }
+    xtimeParked = false;
     try { xtimeView.webContents.loadURL(settings.xtimeUrl); } catch {}
   }
 
@@ -753,6 +1014,7 @@ function createWorkbench(profile) {
 
   function xtimeFailed(message, expired) {
     xtimeFailures++;
+    if (expired && xtimeParked) { reloadXtime('Xtime session expired — reconnecting…'); return; }
     if ((expired || xtimeFailures >= 2) && Date.now() - lastRecovery > 10 * 60 * 1000) {
       reloadXtime('Xtime session expired — reconnecting…');
       return;
@@ -787,6 +1049,7 @@ function createWorkbench(profile) {
   async function pollXtimeOnce() {
     const frame = findXtimeDataFrame();
     if (!frame) {
+      if (xtimeParked) { unparkXtime('Opening Xtime…'); if (!liteLoading) startLite(); return; }
       if (onLoginPage()) {
         // Xtime has sent the page to its sign-in screen; a saved login fills it in
         xtimeStatus = 'Log in to Xtime to load your ROs';
@@ -811,6 +1074,13 @@ function createWorkbench(profile) {
       if (!res?.ok) { xtimeFailed(res?.error || 'Could not read Xtime', !!res?.expired); return; }
       xtimeFailures = 0;
       myROs = res.mine;
+      if (xtimeSignin?.step === 'loading') xtimeSignin = null; // signed in and the data is here: close the sign-in dialog
+      noteAssigned(myROs);
+      // Xtime's field names (names only, no values), so dashboard columns that don't match can be fixed
+      if (res.fieldNames && !loggedXtimeFields) {
+        loggedXtimeFields = true;
+        try { fs.writeFileSync(userFile('xtime-fields.txt'), `${new Date().toISOString()}\n${res.fieldNames.join('\n')}\n`); } catch {}
+      }
       // Move ROs to Review when they go to Pending Review or close (skip an empty dashboard: likely a glitch)
       if (res.total > 0) tracker.syncStatus(settings.techId, myROs);
       lastPoll = Date.now();
@@ -830,7 +1100,10 @@ function createWorkbench(profile) {
         try {
           const d = await frame.executeJavaScript(
             `${XTIME_DETAILS}(${JSON.stringify(r.ro)}, ${JSON.stringify(settings.xtimeDetailsPath)})`, true);
-          if (d?.ok) tracker.updateLines(r.ro, d.lines, r.other ? '' : [r.year, r.make, r.model].filter(Boolean).join(' '));
+          if (d?.ok) {
+            if (!r.other) noteApprovals(r, d.lines);
+            tracker.updateLines(r.ro, d.lines, r.other ? '' : [r.year, r.make, r.model].filter(Boolean).join(' '));
+          }
           else if (!r.other) failed++; // someone else's RO may have closed; don't count it as a problem
         } catch { failed++; }
       }
@@ -903,7 +1176,7 @@ function createWorkbench(profile) {
     return tab;
   }
 
-  function openWorkspace({ ro, vin, ymm }) {
+  function openWorkspace({ ro, vin, ymm, tab }) {
     ro = String(ro).trim();
     vin = String(vin).trim().toUpperCase();
     if (!ro || vin.length !== 17) return;
@@ -923,6 +1196,10 @@ function createWorkbench(profile) {
         if ((t.kind === 'manual' || t.kind === 'wiring' || t.kind === 'oasisview') && t.view) destroyTab(t); // reopen for the right vehicle
       }
     }
+    if (tab) { // e.g. from the dashboard: show the RO's Xtime page
+      const t = ws.tabs.find((x) => x.kind === tab) || (tab === 'xtime' ? addTab(ws, 'xtime', { activate: false }) : null);
+      if (t) ws.activeTab = t.id;
+    }
     activeRO = ro;
     mode = 'manual';
     saveWorkspaces();
@@ -930,15 +1207,131 @@ function createWorkbench(profile) {
     pushState();
   }
 
+  async function chatRun(action, kind) {
+    const reply = (r) => { if (chrome && !chrome.webContents.isDestroyed()) chrome.webContents.send('chat', { kind, channelId: action.channelId, ...r }); };
+    // Chat settings come from Xtime's full page the first time; after that the background page is enough
+    const frame = chatConfig ? findXtimeDataFrame() : (findInspectFrame() || findXtimeDataFrame());
+    if (!frame) return reply({ ok: false, error: 'Xtime is still loading' });
+    try {
+      const r = await frame.executeJavaScript(`${XTIME_CHAT}(${JSON.stringify(action)}, ${chatCfgArg()})`, true);
+      if (r?.config) keepChatConfig(r.config);
+      if (r?.needPage) unparkXtime(); // e.g. the first time: load Xtime's page once to learn its chat settings
+      if (r?.fieldNames?.length && !loggedChatFields.has(kind)) { // field names only, for mapping; no message text
+        loggedChatFields.add(kind);
+        try { fs[loggedChatFields.size === 1 ? 'writeFileSync' : 'appendFileSync'](userFile('xtime-chat-fields.txt'), `${new Date().toISOString()} ${kind}\n${r.fieldNames.join('\n')}\n`); } catch {}
+      }
+      if (!r?.ok) return reply({ ok: false, error: r?.error || 'Could not read Xtime chat' });
+      if (kind === 'list') reply({ ok: true, conversations: r.conversations });
+      else if (kind === 'history') reply({ ok: true, messages: r.messages });
+      else if (kind === 'roster') reply({ ok: true, people: r.people });
+      else reply({ ok: true });
+    } catch (e) { reply({ ok: false, error: e.message || String(e) }); }
+  }
+
   // Shared (tracker) changes refresh every window; window-only changes refresh just this one.
   const handlers = {
     'ui-ready': () => pushState(),
     'set-mode': (m) => { mode = m === 'manual' ? 'manual' : 'xtime'; layout(); pushState(); },
+    // The messages counter: Xtime's chat is on Xtime's own page for now
+    'open-messages': () => {
+      mode = 'xtime';
+      if (settings.xtimeDashboard) { settings = { ...settings, xtimeDashboard: false }; writeJson('settings.json', settings); }
+      unparkXtime('Opening Xtime…');
+      chatOpen = false;
+      layout(); pushState();
+    },
+    // The app's own read-only Dealership chat (Xtime's chat gateway, read through the Inspect page).
+    // Messages are shown and forgotten: never saved to a file, never synced, nothing is sent or marked read.
+    'chat-toggle': ({ open } = {}) => { if (!IS_BETA) open = false; chatOpen = open == null ? !chatOpen : !!open; layout(); pushState(); },
+    // your messages from the last 2 weeks, plus everything (about 4 months back) on ROs assigned to you
+    'chat-list': async () => chatRun({ type: 'list', days: 14, roDays: 120, ros: [...new Set([...myROs.map((r) => r.ro), ...workspaces.keys()])] }, 'list'),
+    'chat-history': async ({ channelId } = {}) => { if (channelId) chatRun({ type: 'history', channelId: String(channelId) }, 'history'); },
+    'chat-roster': async () => chatRun({ type: 'roster' }, 'roster'),
+    // Sends only what you typed, only when you press Send, to a conversation that already exists
+    'chat-send': async ({ channelId, ro, text } = {}) => {
+      if (!IS_BETA) return;
+      text = String(text || '').slice(0, 2000);
+      if (!channelId || !text.trim()) return;
+      await chatRun({ type: 'send', channelId: String(channelId), ro: String(ro || ''), text }, 'send');
+      setTimeout(() => chatRun({ type: 'history', channelId: String(channelId) }, 'history'), 1500);
+    },
+    // The dashboard's expanded RO: its lines, and the Done button
+    'ro-lines': async ({ ro } = {}) => {
+      ro = String(ro || '');
+      const reply = (r) => { if (chrome && !chrome.webContents.isDestroyed()) chrome.webContents.send('ro-lines', { ro, ...r }); };
+      const frame = findXtimeDataFrame();
+      if (!frame) return reply({ ok: false, error: 'Xtime is still loading' });
+      try {
+        const r = await frame.executeJavaScript(`${XTIME_RO}(${JSON.stringify(settings.storeId)}, ${JSON.stringify(ro)}, {"type":"get"})`, true);
+        if (r?.fieldNames && !loggedLineFields) {
+          loggedLineFields = true;
+          try { fs.writeFileSync(userFile('xtime-line-fields.txt'), `${new Date().toISOString()}\n${r.fieldNames.join('\n')}\n`); } catch {}
+        }
+        reply(r?.ok ? { ok: true, lines: r.lines } : { ok: false, error: r?.error || 'Could not read Xtime' });
+      } catch (e) { reply({ ok: false, error: e.message || String(e) }); }
+    },
+    'ro-line-done': async ({ ro, id, value } = {}) => {
+      const frame = findXtimeDataFrame();
+      if (!frame || id == null) return;
+      try {
+        const r = await frame.executeJavaScript(
+          `${XTIME_RO}(${JSON.stringify(settings.storeId)}, ${JSON.stringify(String(ro))}, ${JSON.stringify({ type: 'done', id, value: !!value })})`, true);
+        if (!r?.ok) notice(`Couldn't update the line in Xtime: ${r?.error || 'error'}`);
+      } catch (e) { notice(`Couldn't update the line in Xtime: ${e.message || e}`); }
+      handlers['ro-lines']({ ro });
+    },
+    // The app's "Sign in to Xtime" form: username and password (both steps), a code, a choice, or a page button
+    'xtime-signin': async ({ username, password, remember, code, choose, press } = {}) => {
+      if (!xtimeSignin || xtimeSignin.busy) return;
+      xtimeSignin = { ...xtimeSignin, busy: true, error: '' }; pushState();
+      let res = null;
+      try {
+        if (password != null) {
+          // Left blank with a saved login: use the saved password (it never goes to the screen)
+          if (!password && xtimeSignin?.host) {
+            const saved = getLogin(xtimeSignin.host);
+            if (saved?.password && (!username || !saved.username || saved.username.toLowerCase() === String(username).toLowerCase())) {
+              password = saved.password; username = username || saved.username; remember = false;
+            }
+          }
+          if (!password) { res = { ok: false, error: 'Enter your password' }; return; }
+          let st = await signinRun({ type: 'state' });
+          if (st?.step === 'username') {
+            res = await signinRun({ type: 'username', value: String(username || '') });
+            if (res?.ok !== false) st = await waitForStep(['password', 'code', 'choose', 'other']);
+          }
+          if (st?.step === 'password' && !st.error) {
+            res = await signinRun({ type: 'password', value: String(password) });
+            if (remember && res?.ok !== false && xtimeSignin?.host) saveLogin(xtimeSignin.host, String(username || st.username || ''), String(password));
+            await waitForStep(['code', 'choose', 'eula', 'duplicate', 'other'], 6000);
+          } else if (st?.error) res = st;
+        } else if (code != null) {
+          res = await signinRun({ type: 'code', value: String(code).replace(/\s+/g, '') });
+          await waitForStep(['other', 'eula', 'duplicate'], 6000);
+        } else if (choose != null) {
+          res = await signinRun({ type: 'choose', index: Number(choose) });
+          await waitForStep(['code'], 6000);
+        } else if (press) {
+          res = await signinRun({ type: 'press', text: String(press) });
+        }
+      } finally {
+        if (xtimeSignin) xtimeSignin = { ...xtimeSignin, busy: false, error: res?.ok === false ? res.error : (res?.error || '') };
+        await checkSignin();
+        pushState();
+      }
+    },
+    'toggle-dashboard': () => {
+      if (!IS_BETA) return;
+      settings = { ...settings, xtimeDashboard: !settings.xtimeDashboard };
+      writeJson('settings.json', settings);
+      if (!settings.xtimeDashboard) unparkXtime('Opening Xtime…');
+      layout(); pushState();
+    },
     'toggle-drawer': () => { drawerOpen = !drawerOpen; layout(); pushState(); },
     'set-overlay': (on) => { overlay = !!on; layout(); },
     // ↻: refresh the list; if Xtime has been failing, start the Xtime page fresh instead
     'refresh-ros': () => {
-      if (xtimeFailures > 0 || (!findXtimeDataFrame() && !onLoginPage())) reloadXtime('Reloading Xtime…');
+      if (xtimeFailures > 0 || (!findXtimeDataFrame() && !onLoginPage())) { reloadXtime('Reloading Xtime…'); startLite(); }
       else pollXtime();
     },
     // Review / Completed
@@ -1167,6 +1560,7 @@ function createWorkbench(profile) {
     'sync-now': () => { if (sync) sync.syncNow(); },
     // Updates
     'check-update': () => { if (updater) updater.checkForUpdates().catch(() => {}); },
+    'set-beta-updates': (on) => setBetaUpdates(on),
     'open-update-log': () => { if (update.logFile) shell.openPath(update.logFile).catch(() => {}); },
     'install-update': () => installUpdate(),
     // Windows / profiles
@@ -1210,7 +1604,8 @@ function createWorkbench(profile) {
     });
 
     xtimeView = makeWebView();
-    xtimeView.webContents.loadURL(settings.xtimeUrl);
+    xtimeView.webContents.loadURL(settings.xtimeUrl); // signs in (and shows Xtime) when needed; put away once the app works without it
+    if (IS_BETA) startLite();
     let soon = null;
     xtimeView.webContents.on('did-frame-finish-load', () => {
       clearTimeout(soon);
@@ -1226,11 +1621,14 @@ function createWorkbench(profile) {
     });
     // Watch which RO page is open in Xtime, so a hidden RO can be unhidden from there.
     watchTimer = setInterval(() => {
+      if (IS_BETA) parkCheck();
+      // The background page landed somewhere else (e.g. sent to sign in before Xtime was signed in): try again once Inspect works
+      if (IS_BETA && !liteReady() && !liteLoading && findInspectFrame() && Date.now() - liteTriedAt > 30 * 1000) { liteTriedAt = Date.now(); startLite(); }
       const ro = viewingROFromXtime();
       if (ro !== xtimeViewingRO) { xtimeViewingRO = ro; pushState(); }
       // Refresh Xtime before its session runs out — only while you're not looking at the Xtime tab
       const due = Date.now() - xtimeLoadedAt > Number(settings.xtimeRefreshMinutes || 90) * 60 * 1000;
-      if (due && (mode !== 'xtime' || overlay) && findXtimeDataFrame() && Date.now() - lastRecovery > 5 * 60 * 1000) {
+      if (due && !xtimeParked && (mode !== 'xtime' || overlay) && findInspectFrame() && Date.now() - lastRecovery > 5 * 60 * 1000) {
         reloadXtime('');
       }
     }, 1500);
@@ -1238,6 +1636,8 @@ function createWorkbench(profile) {
     win.on('resize', layout);
     win.on('closed', () => {
       clearInterval(pollTimer);
+      clearInterval(signinTimer);
+      clearInterval(msgTimer);
       clearInterval(watchTimer);
       clearInterval(heartbeatTimer);
       if (!closingOut) closeOut().finally(() => sync.stop()); // closing just this window
@@ -1245,6 +1645,7 @@ function createWorkbench(profile) {
       // Web pages inside the window aren't closed automatically; close them so nothing keeps running
       for (const ws of workspaces.values()) for (const t of ws.tabs) { t.vinToken = -1; try { t.view?.webContents.close(); } catch {} }
       try { xtimeView.webContents.close(); } catch {}
+      try { xtimeLite?.webContents.close(); } catch {}
       try { chrome.webContents.close(); } catch {}
       windows.delete(profile.id);
       if (!quitting) { saveProfiles(); pushAll(); } // other windows' profile lists update
@@ -1395,6 +1796,7 @@ if (!app.requestSingleInstanceLock()) {
   app.on('second-instance', () => { windows.values().next().value?.focus(); });
 
   app.whenReady().then(() => {
+    try { app.setAppUserModelId('local.ptsworkbench'); } catch {} // Windows shows notifications under this app
     const saved = readJsonAt(userFile('profiles.json'), null);
     profiles = Array.isArray(saved?.profiles) && saved.profiles.length ? saved.profiles : [{ id: 'main', name: 'Main' }];
     if (!profiles.some((p) => p.id === 'main')) profiles.unshift({ id: 'main', name: 'Main' });
