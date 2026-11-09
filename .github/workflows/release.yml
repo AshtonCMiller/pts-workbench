@@ -72,7 +72,18 @@ jobs:
 
       - name: Install
         if: steps.version.outputs.exists == 'false'
-        run: npm install --no-audit --no-fund
+        shell: bash
+        env:
+          # The electron package would download Electron here just to run it locally; the build gets its own copy
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+        run: |
+          for try in 1 2 3; do
+            npm install --no-audit --no-fund && exit 0
+            echo "::warning::Install attempt $try failed (often a download timeout); trying again in 30 s"
+            rm -rf node_modules
+            sleep 30
+          done
+          exit 1
 
       # ---------- regular release (main) ----------
       - name: Build and publish release v${{ steps.version.outputs.number }}
