@@ -117,12 +117,15 @@ function renderSignin(s) {
   const key = JSON.stringify([si.step, si.error, si.busy, si.factors, si.message, si.buttons, si.slow]);
   if (key === signinShown && (box.contains(document.activeElement) || si.step === 'loading')) return;
   signinShown = key;
-  // Signed in: stays up until the dashboard has data again
-  if (si.step === 'loading') {
+  // Starting up / signed in: stays up until the dashboard has data (or Xtime really asks to sign in)
+  if (si.step === 'loading' || si.step === 'starting') {
+    const starting = si.step === 'starting';
     box.replaceChildren(el('div', { class: 'si-card si-loading' },
-      el('h3', { text: 'Signed in' }),
-      el('div', { class: 'si-busy big' }, el('span', { class: 'si-spin' }), 'Loading Inspect view…'),
-      el('p', { class: 'muted small', text: si.slow ? 'This is taking longer than usual.' : 'Getting your ROs from Xtime. This usually takes a few seconds.' }),
+      el('h3', { text: starting ? 'Connecting to Xtime' : 'Signed in' }),
+      el('div', { class: 'si-busy big' }, el('span', { class: 'si-spin' }), starting ? 'Loading in the background…' : 'Loading Inspect view…'),
+      el('p', { class: 'muted small', text: si.slow ? 'This is taking longer than usual.'
+        : starting ? 'Xtime usually signs in by itself. If it needs you, the sign-in box appears here.'
+          : 'Getting your ROs from Xtime. This usually takes a few seconds.' }),
       si.slow ? el('div', { class: 'si-row' },
         el('button', { class: 'primary', text: 'Reload Xtime', onclick: () => api.send('reload-xtime') }),
         el('button', { class: 'ghost', text: 'Use Xtime’s own page', onclick: () => api.send('toggle-dashboard') })) : null));

@@ -902,18 +902,28 @@ function createWorkbench(profile) {
       if (!frame) {
         // Landed on Scheduling soon after signing in: go to Inspect
         if (autoInspectUntil > Date.now() && onScheduling() && !xtimeView.webContents.isLoading()) switchToInspect();
-        if (xtimeSignin && xtimeSignin.step !== 'loading') { // signed in: make sure Xtime is on Inspect (it lands on Scheduling), then read it again
+        if (xtimeSignin && !['loading', 'starting'].includes(xtimeSignin.step)) { // signed in: make sure Xtime is on Inspect (it lands on Scheduling), then read it again
           // The dialog stays up ("Loading Inspect…") until the dashboard has data again
           xtimeSignin = { step: 'loading', since: Date.now(), busy: false, error: '' }; pushState();
           autoInspectUntil = Date.now() + 90 * 1000;
           setTimeout(() => ensureInspect(2), 4000);
-        } else if (xtimeSignin?.step === 'loading' && !xtimeSignin.slow && Date.now() - xtimeSignin.since > 90 * 1000) {
+        } else if (['loading', 'starting'].includes(xtimeSignin?.step) && !xtimeSignin.slow && Date.now() - xtimeSignin.since > 90 * 1000) {
           xtimeSignin = { ...xtimeSignin, slow: true }; pushState(); // taking long: offer a reload
         }
         return;
       }
       const st = await signinRun({ type: 'state' });
       if (!st?.ok) return;
+      // Xtime's sign-in page often shows for a moment while Xtime signs in by itself (or a saved login is
+      // filled in), then moves on. Typing into it then gets lost, so the form only shows once the page has
+      // stayed put for a few seconds; until then the dialog says it's connecting.
+      const key = `${String(frame.url).split(/[?#]/)[0]}|${st.step}`;
+      if (key !== signinSettle.key || xtimeView.webContents.isLoading()) signinSettle = { key, since: Date.now() };
+      const settled = Date.now() - signinSettle.since >= 4000 || Date.now() - signinActedAt < 60 * 1000;
+      if (!settled) {
+        if (xtimeSignin?.step !== 'starting') { xtimeSignin = { step: 'starting', since: Date.now(), busy: false, error: '' }; pushState(); }
+        return;
+      }
       let host = '';
       try { host = new URL(frame.url).hostname; } catch {}
       const saved = host ? getLogin(host, true) : null;
@@ -922,6 +932,8 @@ function createWorkbench(profile) {
       if (JSON.stringify(next) !== JSON.stringify(xtimeSignin)) { xtimeSignin = next; pushState(); }
     } catch { /* checked again shortly */ } finally { signinChecking = false; }
   }
+  let signinSettle = { key: '', since: 0 };
+  let signinActedAt = 0; // you pressed something in the sign-in form: show its next steps right away
   const signinTimer = setInterval(checkSignin, 1500);
   const hasSavedPassword = (host) => { try { return !!getLogin(host)?.password; } catch { return false; } };
 
@@ -1108,6 +1120,7 @@ function createWorkbench(profile) {
     }
     await resolveTechId(frame);
     if (!settings.techId) {
+      if (xtimeSignin?.step === 'starting') xtimeSignin = null; // nothing to load until the employee number is set
       xtimeStatus = settings.employeeNumber ? (employeeStatus || 'Looking up your employee number…') : 'Enter your employee number in ⚙ Settings';
       pushState();
       return;
@@ -1118,7 +1131,7 @@ function createWorkbench(profile) {
       if (!res?.ok) { xtimeFailed(res?.error || 'Could not read Xtime', !!res?.expired); return; }
       xtimeFailures = 0;
       myROs = res.mine;
-      if (xtimeSignin?.step === 'loading') xtimeSignin = null; // signed in and the data is here: close the sign-in dialog
+      if (xtimeSignin?.step === 'loading' || xtimeSignin?.step === 'starting') xtimeSignin = null; // the data is here: close the dialog
       noteAssigned(myROs);
       // Xtime's field names (names only, no values), so dashboard columns that don't match can be fixed
       if (res.fieldNames && !loggedXtimeFields) {
@@ -1365,7 +1378,8 @@ function createWorkbench(profile) {
     },
     // The app's "Sign in to Xtime" form: username and password (both steps), a code, a choice, or a page button
     'xtime-signin': async ({ username, password, remember, code, choose, press } = {}) => {
-      if (!xtimeSignin || xtimeSignin.busy) return;
+      if (!xtimeSignin || xtimeSignin.busy || xtimeSignin.step === 'starting' || xtimeSignin.step === 'loading') return;
+      signinActedAt = Date.now();
       xtimeSignin = { ...xtimeSignin, busy: true, error: '' }; pushState();
       let res = null;
       try {
@@ -1687,6 +1701,8 @@ function createWorkbench(profile) {
       if (isPrintKey(input)) { ev.preventDefault(); printVisible(); }
     });
 
+    // The app's dashboard starts with "Connecting to Xtime…" until the first ROs arrive (or Xtime asks to sign in)
+    if (IS_BETA && settings.xtimeDashboard) xtimeSignin = { step: 'starting', since: Date.now(), busy: false, error: '' };
     xtimeView = makeWebView();
     xtimeView.webContents.loadURL(settings.xtimeUrl); // signs in (and shows Xtime) when needed; put away once the app works without it
     if (IS_BETA) startLite();
