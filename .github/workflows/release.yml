@@ -58,6 +58,18 @@ jobs:
         with:
           node-version: 20
 
+      # Electron and electron-builder's helper tools are downloaded from GitHub on every build;
+      # keeping them between builds avoids failures when those downloads time out (e.g. HTTP 504)
+      - name: Reuse downloaded build tools
+        if: steps.version.outputs.exists == 'false'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~\AppData\Local\electron\Cache
+            ~\AppData\Local\electron-builder\Cache
+          key: build-tools-${{ runner.os }}-${{ hashFiles('package.json') }}
+          restore-keys: build-tools-${{ runner.os }}-
+
       - name: Install
         if: steps.version.outputs.exists == 'false'
         run: npm install --no-audit --no-fund
@@ -70,7 +82,13 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         # Owner, repository and "publish as a real release, not a draft" all come from package.json.
         # (Overriding them here on the command line can replace the whole setting and make a draft.)
-        run: npx electron-builder --win nsis portable --publish always
+        run: |
+          for try in 1 2 3; do
+            npx electron-builder --win nsis portable --publish always && exit 0
+            echo "::warning::Build attempt $try failed (often a download timeout); trying again in 60 s"
+            sleep 60
+          done
+          exit 1
 
       # ---------- beta release (any other branch) ----------
       - name: Set the beta version
@@ -91,7 +109,9 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # (a re-run of a failed build reuses the draft it already made)
         run: |
+          gh release view "v${{ steps.version.outputs.number }}" > /dev/null 2>&1 && exit 0
           gh release create "v${{ steps.version.outputs.number }}" --draft --prerelease \
             --target "${{ github.sha }}" \
             --title "v${{ steps.version.outputs.number }} (beta)" \
@@ -102,7 +122,13 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: npx electron-builder --win nsis --publish always
+        run: |
+          for try in 1 2 3; do
+            npx electron-builder --win nsis --publish always && exit 0
+            echo "::warning::Build attempt $try failed (often a download timeout); trying again in 60 s"
+            sleep 60
+          done
+          exit 1
 
       - name: Make sure the beta has both update files
         if: steps.version.outputs.beta == 'true'
@@ -122,3 +148,14 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release edit "v${{ steps.version.outputs.number }}" --draft=false --prerelease
+
+      # A beta that couldn't be built: remove its empty draft so it doesn't pile up (nothing installs drafts)
+      - name: Clean up a failed beta
+        if: failure() && steps.version.outputs.beta == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "v${{ steps.version.outputs.number }}" --json isDraft -q .isDraft 2>/dev/null | grep -q true; then
+            gh release delete "v${{ steps.version.outputs.number }}" --yes
+          fi
