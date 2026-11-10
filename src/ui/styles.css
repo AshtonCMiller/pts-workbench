@@ -536,3 +536,13 @@ body.side-hidden #tabstrip { left: 0; }
 .lines-toggle .chev { width: 12px; color: var(--muted); }
 .lines-toggle .muted { font-weight: 500; }
 .lines-toggle + .lines { margin-top: 2px; }
+
+/* The Service Manual's own row of tabs, under the vehicle's tabs */
+:root { --subtabs: 34px; }
+#subtabs { display: none; position: fixed; top: calc(var(--top) + var(--tabs)); left: var(--side); right: 0; height: var(--subtabs);
+  align-items: flex-end; gap: 2px; padding: 0 8px 0 44px; background: var(--bg); border-bottom: 1px solid var(--line); }
+body.manual.has-sub:not(.no-ws) #subtabs { display: flex; }
+body.side-hidden #subtabs { left: 0; }
+body.chat #subtabs { right: var(--chat); }
+#subtabs .tab { font-size: 12.5px; padding: 4px 8px 6px 11px; }
+#subtabs .tab.on { background: var(--panel); }

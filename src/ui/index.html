@@ -10,8 +10,8 @@
   <header id="topbar">
     <span id="app-version" class="ver" title="Installed version"></span>
     <nav class="seg" role="tablist">
-      <button id="mode-xtime" role="tab">Xtime</button>
-      <button id="mode-manual" role="tab">Workbench <span id="ws-count" class="count"></span></button>
+      <button id="mode-xtime" role="tab" title="Xtime: your dashboard or Xtime's own page">Xtime</button>
+      <button id="mode-manual" role="tab" title="The vehicles you have open">Workbench <span id="ws-count" class="count"></span></button>
     </nav>
     <div id="timer" class="timer" title="Your shift clock"></div>
     <button id="btn-hours" class="today" title="Your flagged hours this pay period"></button>
@@ -93,21 +93,28 @@
     <div id="tabs"></div>
     <select id="add-tab" class="add-select" title="Open another tab for this vehicle">
       <option value="">+ Add tab…</option>
-      <option value="oasisview">OASIS</option>
-      <option value="manual">Workshop manual</option>
-      <option value="diag">Diagnostics (DTC search)</option>
-      <option value="wiring">Wiring</option>
+      <option value="xtime">Xtime RO page</option>
       <option value="pts">PTS</option>
+      <option value="service">Service Manual</option>
+      <option value="wiring">Wiring</option>
       <option value="ota">OTA updates</option>
       <option value="cvd">Connected vehicle data</option>
+      <option value="oasis">Ford's OASIS page</option>
       <option value="prodemand">ProDemand</option>
-      <option value="xtime">Xtime RO page</option>
+      <optgroup label="In the Service Manual">
+        <option value="oasisview">OASIS</option>
+        <option value="diag">Diagnostics (DTC search)</option>
+        <option value="manual">Workshop manual</option>
+        <option value="labor">Labor times</option>
+      </optgroup>
     </select>
     <span id="tab-status" class="tab-status"></span>
     <button id="btn-copy-vin" class="ghost small" title="Copy this vehicle's VIN">Copy VIN</button>
     <button id="btn-reenter" class="ghost small" title="Type this vehicle's VIN in again">Re-enter VIN</button>
     <button id="btn-reload-tab" class="icon" title="Reload this tab">↻</button>
   </div>
+  <!-- The Service Manual's own tabs (OASIS | Diagnostics | Workshop Manual | Labor Times) -->
+  <div id="subtabs"></div>
 
   <main id="empty">
     <div class="empty-card">

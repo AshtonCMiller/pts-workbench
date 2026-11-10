@@ -25,6 +25,7 @@ const SYNC_URL = (() => { try { return require('../package.json').ptsWorkbench?.
 
 const TOP_BAR = 48;
 const TAB_STRIP = 38;
+const SUB_STRIP = 34; // the Service Manual's own tab row
 const DRAWER = 360;
 const CHAT_W = 380;   // the read-only Dealership chat panel on the right
 
@@ -115,8 +116,7 @@ let updater = null;
 const update = { state: 'idle', version: '', percent: 0, message: '', checkedAt: null };
 
 // ---------- beta versions ----------
-// A beta build (version like 0.4.1-beta.12, built from any branch other than main) has the new Xtime
-// features: the app's own dashboard, chat, and running without Xtime's page. Regular builds behave as before.
+// A beta build: version like 0.4.1-beta.12, built from any branch other than main (new features ship there first).
 // "Beta updates" (⚙ Settings → Version & updates) lets one computer install beta builds; turning it off
 // goes back to the newest regular version on the next check.
 const IS_BETA = !app.isPackaged || /-/.test(app.getVersion());
@@ -262,7 +262,6 @@ function createWorkbench(profile) {
 
   const savedSettings = readJson('settings.json', {});
   let settings = { ...DEFAULT_SETTINGS, ...savedSettings };
-  if (!IS_BETA) settings.xtimeDashboard = false; // the app's own Xtime dashboard is in beta versions only
   // Addresses that aren't shown in Settings always come from the app itself, so an update can fix them
   for (const k of FIXED_SETTINGS) settings[k] = DEFAULT_SETTINGS[k];
   // Before employee numbers, the first window always used this technician ID by default
@@ -348,7 +347,7 @@ function createWorkbench(profile) {
   const sidebarWidth = () => Math.min(700, Math.max(260, Number(settings.sidebarWidth) || 380));
 
   let win, chrome, xtimeView;
-  let mode = 'xtime';           // 'xtime' | 'manual'
+  let mode = 'xtime';           // 'xtime' | 'manual' (the Workbench)
   let drawerOpen = true;
   let chatOpen = false;          // the app's Dealership chat panel
   const loggedChatFields = new Set();
@@ -432,6 +431,8 @@ function createWorkbench(profile) {
         ro: ws.ro, vin: ws.vin, ymm: ws.ymm,
         tabs: ws.tabs.map((t) => ({ kind: t.kind, title: t.title, ...(t.manualState ? { state: t.manualState } : {}) })),
         activeIndex: Math.max(0, ws.tabs.findIndex((t) => t.id === ws.activeTab)),
+        svcIndex: ws.tabs.findIndex((t) => t.id === ws.svcTab),
+        layout: 3,
       })),
     });
   }
@@ -442,10 +443,11 @@ function createWorkbench(profile) {
     if (saved?.xtimeName) xtimeName = String(saved.xtimeName);
     if (!saved?.list) return;
     for (const w of saved.list) {
-      const tabs = (w.tabs?.length ? w.tabs : [{ kind: 'pts', title: 'Manual' }])
+      const tabs = (w.tabs?.length ? w.tabs : [{ kind: 'pts', title: 'PTS' }])
         .map((t) => ({ id: nextTabId++, kind: t.kind, title: t.title, view: null, status: '', manualState: t.state || null }));
-      const ws = { ro: w.ro, vin: w.vin, ymm: w.ymm || '', tabs, activeTab: tabs[w.activeIndex || 0]?.id ?? tabs[0].id };
-      if (!tabs.some((t) => t.kind === 'xtime')) addTab(ws, 'xtime', { activate: false, front: true }); // older saves
+      const ws = { ro: w.ro, vin: w.vin, ymm: w.ymm || '', tabs, activeTab: tabs[w.activeIndex || 0]?.id ?? tabs[0].id,
+        svcTab: w.svcIndex >= 0 ? tabs[w.svcIndex]?.id ?? null : null };
+      if (w.layout !== 3) upgradeTabs(ws, ws.activeTab); // saved before Xtime | PTS | Service Manual
       workspaces.set(w.ro, ws);
     }
     if (saved.activeRO && workspaces.has(saved.activeRO)) activeRO = saved.activeRO;
@@ -483,10 +485,15 @@ function createWorkbench(profile) {
         id: p.id, name: p.name, open: windows.has(p.id), current: p.id === profile.id,
         displayName: windows.get(p.id)?.displayName() || p.name,
       })),
-      workspaces: [...workspaces.values()].map((ws) => ({
-        ro: ws.ro, vin: ws.vin, ymm: ws.ymm, activeTab: ws.activeTab,
-        tabs: ws.tabs.map((t) => ({ id: t.id, kind: t.kind, title: t.title, status: t.status })),
-      })),
+      // Each vehicle's top row of tabs, and the Service Manual's own tabs
+      workspaces: [...workspaces.values()].map((ws) => {
+        const pick = (t) => ({ id: t.id, kind: t.kind, title: t.title, status: t.status });
+        return {
+          ro: ws.ro, vin: ws.vin, ymm: ws.ymm, activeTab: topTab(ws)?.id ?? null, viewTab: currentTab(ws)?.id ?? null,
+          tabs: ws.tabs.filter((t) => !inService(t.kind)).map(pick),
+          sub: serviceTab(ws) ? { active: subTab(ws)?.id ?? null, tabs: ws.tabs.filter((t) => inService(t.kind)).map(pick) } : null,
+        };
+      }),
     });
   }
 
@@ -510,11 +517,12 @@ function createWorkbench(profile) {
         visible = xtimeView;
       } else if (activeRO && workspaces.has(activeRO)) {
         const ws = workspaces.get(activeRO);
-        const tab = ws.tabs.find((t) => t.id === ws.activeTab);
-        if (tab) {
+        const tab = currentTab(ws);
+        if (tab && tab.kind !== 'service') {
           ensureView(ws, tab);
           const side = settings.sidebarHidden ? 0 : sidebarWidth(); // the Workbench sidebar can be tucked away
-          tab.view.setBounds({ x: side, y: TOP_BAR + TAB_STRIP, width: Math.max(0, width - side - (chatOpen ? CHAT_W : 0)), height: Math.max(0, height - TOP_BAR - TAB_STRIP) });
+          const top = TOP_BAR + TAB_STRIP + (inService(tab.kind) ? SUB_STRIP : 0);
+          tab.view.setBounds({ x: side, y: top, width: Math.max(0, width - side - (chatOpen ? CHAT_W : 0)), height: Math.max(0, height - top) });
           visible = tab.view;
         }
       }
@@ -567,10 +575,11 @@ function createWorkbench(profile) {
   const hostOf = (url) => { try { return new URL(url).hostname; } catch { return ''; } };
 
   function ensureView(ws, tab) {
-    if (tab.view) return;
+    if (tab.view || tab.kind === 'service') return; // Service Manual is only a row of tabs
     if (tab.kind === 'manual') { tab.view = makeManualView(ws, tab); return; }
     if (tab.kind === 'oasisview') { tab.view = makeManualView(ws, tab, 'oasis.html'); return; }
     if (tab.kind === 'diag') { tab.view = makeManualView(ws, tab, 'diag.html'); return; }
+    if (tab.kind === 'labor') { tab.view = makeManualView(ws, tab, 'labor.html'); return; }
     tab.view = makeWebView();
     const wc = tab.view.webContents;
     if (tab.kind === 'wiring') {
@@ -758,7 +767,7 @@ function createWorkbench(profile) {
       case 'open-diag': { // from the manual's search: search this DTC in the vehicle's Diagnostics tab
         const query = String(payload || '').slice(0, 200);
         const dt = ws.tabs.find((t) => t.kind === 'diag') || addTab(ws, 'diag', { activate: false });
-        ws.activeTab = dt.id;
+        setActive(ws, dt); mode = 'manual';
         dt.manualState = { ...(dt.manualState || {}), query };
         if (dt.view && !dt.view.webContents.isDestroyed() && !dt.view.webContents.isLoading()) dt.view.webContents.send('manual-open', { query });
         saveWorkspaces(); layout(); pushState();
@@ -770,7 +779,7 @@ function createWorkbench(profile) {
           title: String(q.title || '').slice(0, 200), ppt: String(q.ppt || ''), section: 'Diagnostics' };
         if (!link.searchNumber && !link.procUid) return false;
         const mt = ws.tabs.find((t) => t.kind === 'manual') || addTab(ws, 'manual', { activate: false });
-        ws.activeTab = mt.id;
+        setActive(ws, mt); mode = 'manual';
         if (mt.view && !mt.view.webContents.isDestroyed() && !mt.view.webContents.isLoading()) mt.view.webContents.send('manual-open', link);
         else mt.pendingOpen = link;
         saveWorkspaces(); layout(); pushState();
@@ -897,7 +906,7 @@ function createWorkbench(profile) {
     if (!frame) return;
     let n = null;
     // Unread Dealership messages, from Xtime's chat (works without Xtime's page)
-    if (IS_BETA && (chatConfig || findInspectFrame())) {
+    if (chatConfig || findInspectFrame()) {
       try {
         const r = await (chatConfig ? frame : findInspectFrame()).executeJavaScript(`${XTIME_CHAT}({"type":"count"}, ${chatCfgArg()})`, true);
         if (r?.config) keepChatConfig(r.config);
@@ -1022,7 +1031,7 @@ function createWorkbench(profile) {
   // Where the app's Xtime requests run: the small background page on the Inspect site when it's ready
   // (no Xtime page needed), otherwise the full Xtime page's Inspect frame
   function findXtimeDataFrame() {
-    if (IS_BETA && liteReady()) return xtimeLite.webContents.mainFrame;
+    if (liteReady()) return xtimeLite.webContents.mainFrame;
     return findInspectFrame();
   }
 
@@ -1258,13 +1267,75 @@ function createWorkbench(profile) {
   }
 
   // ---------- workspaces ----------
-  const TAB_NAMES = { diag: 'Diagnostics', xtime: 'Xtime', oasisview: 'OASIS', manual: 'Workshop Manual', wiring: 'Wiring', pts: 'PTS', ota: 'OTA Updates', cvd: 'Connected Data', prodemand: 'ProDemand', oasis: 'OASIS' };
+  // A vehicle's tabs: Xtime | PTS | Service Manual (+ any added). "Service Manual" holds its own tabs:
+  // OASIS | Diagnostics | Workshop Manual | Labor Times (the app's own pages).
+  const SVC_KINDS = new Set(['oasisview', 'diag', 'manual', 'labor']);
+  const SVC_DEFAULTS = ['oasisview', 'diag', 'manual', 'labor'];
+  const inService = (kind) => SVC_KINDS.has(kind);
+  const serviceTab = (ws) => ws.tabs.find((t) => t.kind === 'service') || null;
+  // The vehicle's chosen tab in the top row
+  function topTab(ws) {
+    return ws.tabs.find((t) => t.id === ws.activeTab && !inService(t.kind)) || ws.tabs.find((t) => !inService(t.kind)) || null;
+  }
+  // The Service Manual's chosen tab
+  function subTab(ws) {
+    return ws.tabs.find((t) => t.id === ws.svcTab && inService(t.kind)) || ws.tabs.find((t) => inService(t.kind)) || null;
+  }
+  // The page showing for this vehicle
+  function currentTab(ws) {
+    const top = topTab(ws);
+    return top?.kind === 'service' ? subTab(ws) : top;
+  }
+  function ensureService(ws) {
+    let svc = serviceTab(ws);
+    if (svc) return svc;
+    svc = { id: nextTabId++, kind: 'service', title: 'Service Manual', view: null, status: '' };
+    // after Xtime and PTS
+    const after = Math.max(...['xtime', 'pts'].map((k) => ws.tabs.map((t) => t.kind).lastIndexOf(k)));
+    ws.tabs.splice(after + 1, 0, svc);
+    return svc;
+  }
+  function setActive(ws, tab) {
+    if (inService(tab.kind)) { ws.svcTab = tab.id; ws.activeTab = ensureService(ws).id; }
+    else ws.activeTab = tab.id;
+  }
+  // A new vehicle: Xtime | PTS | Service Manual (OASIS | Diagnostics | Workshop Manual | Labor Times);
+  // anything else: Xtime | ProDemand
+  function addDefaultTabs(ws) {
+    addTab(ws, 'xtime', { activate: false });
+    if (isFordVehicle(ws.vin, ws.ymm)) {
+      addTab(ws, 'pts', { activate: false });
+      SVC_DEFAULTS.forEach((k, i) => addTab(ws, k, { activate: i === 0 })); // opens on Service Manual › OASIS
+    } else {
+      addTab(ws, 'prodemand');
+    }
+  }
+  // Saved before this layout: Xtime and PTS first, the app's pages gathered into Service Manual, the rest after
+  function upgradeTabs(ws, wasActive) {
+    ws.tabs = ws.tabs.filter((t) => t.kind !== 'service');
+    if (!ws.tabs.some((t) => t.kind === 'xtime')) addTab(ws, 'xtime', { activate: false, front: true });
+    if (isFordVehicle(ws.vin, ws.ymm)) {
+      if (!ws.tabs.some((t) => t.kind === 'pts')) addTab(ws, 'pts', { activate: false });
+      for (const k of SVC_DEFAULTS) if (!ws.tabs.some((t) => t.kind === k)) addTab(ws, k, { activate: false });
+    }
+    const first = ['xtime', 'pts'].map((k) => ws.tabs.find((t) => t.kind === k)).filter(Boolean);
+    const svc = [...SVC_DEFAULTS.map((k) => ws.tabs.find((t) => t.kind === k)).filter(Boolean), ...ws.tabs.filter((t) => inService(t.kind) && !SVC_DEFAULTS.includes(t.kind))];
+    const rest = ws.tabs.filter((t) => !first.includes(t) && !svc.includes(t));
+    const unique = (list) => list.filter((t, i) => list.indexOf(t) === i);
+    ws.tabs = unique([...first, ...svc, ...rest]);
+    if (svc.length) ensureService(ws);
+    const was = ws.tabs.find((t) => t.id === wasActive);
+    if (was) setActive(ws, was); else ws.activeTab = topTab(ws)?.id ?? null;
+  }
+
+  const TAB_NAMES = { service: 'Service Manual', labor: 'Labor Times', diag: 'Diagnostics', xtime: 'Xtime', oasisview: 'OASIS', manual: 'Workshop Manual', wiring: 'Wiring', pts: 'PTS', ota: 'OTA Updates', cvd: 'Connected Data', prodemand: 'ProDemand', oasis: 'OASIS' };
   function addTab(ws, kind, { activate = true, front = false } = {}) {
     const n = ws.tabs.filter((t) => t.kind === kind).length;
     const base = TAB_NAMES[kind] || 'Manual';
     const tab = { id: nextTabId++, kind, title: n ? `${base} ${n + 1}` : base, view: null, status: '' };
     if (front) ws.tabs.unshift(tab); else ws.tabs.push(tab);
-    if (activate) ws.activeTab = tab.id;
+    if (inService(kind)) ensureService(ws);
+    if (activate) setActive(ws, tab);
     return tab;
   }
 
@@ -1274,12 +1345,9 @@ function createWorkbench(profile) {
     if (!ro || vin.length !== 17) return;
     let ws = workspaces.get(ro);
     if (!ws) {
-      // First tab: the RO in Xtime; then PTS for a Ford/Lincoln/Mercury, ProDemand for anything else
-      ws = { ro, vin, ymm: ymm || '', tabs: [], activeTab: null };
+      ws = { ro, vin, ymm: ymm || '', tabs: [], activeTab: null, svcTab: null };
       workspaces.set(ro, ws);
-      addTab(ws, 'xtime', { activate: false });
-      if (isFordVehicle(vin, ymm)) { addTab(ws, 'pts'); addTab(ws, 'manual', { activate: false }); } // Xtime | PTS | Workshop Manual
-      else addTab(ws, 'prodemand');
+      addDefaultTabs(ws);
     } else if (ws.vin !== vin) {
       ws.vin = vin; // VIN corrected in Xtime: re-enter it in open manual tabs
       for (const t of ws.tabs) if (FORD_LINKS[t.kind] && t.view) reopenFordTab(ws, t);
@@ -1291,7 +1359,7 @@ function createWorkbench(profile) {
     }
     if (tab) { // e.g. from the dashboard: show the RO's Xtime page
       const t = ws.tabs.find((x) => x.kind === tab) || (tab === 'xtime' ? addTab(ws, 'xtime', { activate: false }) : null);
-      if (t) ws.activeTab = t.id;
+      if (t) setActive(ws, t);
     }
     activeRO = ro;
     mode = 'manual';
@@ -1317,7 +1385,7 @@ function createWorkbench(profile) {
     } catch { /* best effort */ }
   };
   async function sendReadReceipts(channelId, messages) {
-    if (!IS_BETA || !channelId) return;
+    if (!channelId) return;
     if (Date.now() - (readBusy.get(channelId) || 0) < 15 * 1000) return; // already done just now
     readBusy.set(channelId, Date.now());
     const frame = findXtimeDataFrame();
@@ -1374,14 +1442,13 @@ function createWorkbench(profile) {
     },
     // The app's own read-only Dealership chat (Xtime's chat gateway, read through the Inspect page).
     // Messages are shown and forgotten: never saved to a file, never synced, nothing is sent or marked read.
-    'chat-toggle': ({ open } = {}) => { if (!IS_BETA) open = false; chatOpen = open == null ? !chatOpen : !!open; layout(); pushState(); },
+    'chat-toggle': ({ open } = {}) => { chatOpen = open == null ? !chatOpen : !!open; layout(); pushState(); },
     // your messages from the last 2 weeks, plus everything (about 4 months back) on ROs assigned to you
     'chat-list': async () => chatRun({ type: 'list', days: 14, roDays: 120, ros: [...new Set([...myROs.map((r) => r.ro), ...workspaces.keys()])] }, 'list'),
     'chat-history': async ({ channelId } = {}) => { if (channelId) chatRun({ type: 'history', channelId: String(channelId) }, 'history'); },
     'chat-roster': async () => chatRun({ type: 'roster' }, 'roster'),
     // Sends only what you typed, only when you press Send, to a conversation that already exists
     'chat-send': async ({ channelId, ro, text } = {}) => {
-      if (!IS_BETA) return;
       text = String(text || '').slice(0, 2000);
       if (!channelId || !text.trim()) return;
       await chatRun({ type: 'send', channelId: String(channelId), ro: String(ro || ''), text }, 'send');
@@ -1454,7 +1521,6 @@ function createWorkbench(profile) {
       }
     },
     'toggle-dashboard': () => {
-      if (!IS_BETA) return;
       settings = { ...settings, xtimeDashboard: !settings.xtimeDashboard };
       writeJson('settings.json', settings);
       if (!settings.xtimeDashboard) unparkXtime('Opening Xtime…');
@@ -1590,14 +1656,22 @@ function createWorkbench(profile) {
       const ws = workspaces.get(ro);
       if (!ws) return;
       // "+ Manual" while looking at a PTS tab copies that tab: same vehicle, same page, same scroll.
-      const src = ws.tabs.find((t) => t.id === ws.activeTab);
+      const src = currentTab(ws);
       let snapshot = null;
-      const KINDS = ['diag', 'oasisview', 'manual', 'wiring', 'pts', 'ota', 'cvd', 'prodemand', 'oasis', 'xtime'];
+      const KINDS = ['service', 'labor', 'diag', 'oasisview', 'manual', 'wiring', 'pts', 'ota', 'cvd', 'prodemand', 'oasis', 'xtime'];
       kind = KINDS.includes(kind) ? kind : 'pts';
       if (kind === 'pts' && src?.kind === 'pts' && src.view && !src.view.webContents.isDestroyed()) {
         try { snapshot = await snapshotFrames(src.view.webContents); } catch { snapshot = null; }
       }
+      if (kind === 'service') { // Service Manual with its standard tabs (only one per vehicle)
+        for (const k of SVC_DEFAULTS) if (!ws.tabs.some((t) => t.kind === k)) addTab(ws, k, { activate: false });
+        setActive(ws, subTab(ws) || ws.tabs.find((t) => inService(t.kind)));
+        mode = 'manual';
+        saveWorkspaces(); layout(); pushState();
+        return;
+      }
       const tab = addTab(ws, kind);
+      mode = 'manual';
       if (snapshot) {
         tab.cloneSnapshot = snapshot;
         tab.title = `${src.title} copy`.slice(0, 40);
@@ -1606,8 +1680,9 @@ function createWorkbench(profile) {
     },
     'select-tab': ({ ro, id }) => {
       const ws = workspaces.get(ro);
-      if (!ws?.tabs.some((t) => t.id === id)) return;
-      ws.activeTab = id;
+      const t = ws?.tabs.find((x) => x.id === id);
+      if (!t) return;
+      setActive(ws, t);
       saveWorkspaces(); layout(); pushState();
     },
     'close-tab': ({ ro, id }) => {
@@ -1615,10 +1690,19 @@ function createWorkbench(profile) {
       if (!ws) return;
       const i = ws.tabs.findIndex((t) => t.id === id);
       if (i < 0) return;
-      destroyTab(ws.tabs[i]);
-      ws.tabs.splice(i, 1);
+      const closing = ws.tabs[i];
+      // Closing Service Manual closes its tabs too; closing its last tab closes Service Manual
+      const gone = closing.kind === 'service' ? ws.tabs.filter((t) => t === closing || inService(t.kind)) : [closing];
+      if (inService(closing.kind) && ws.tabs.filter((t) => inService(t.kind)).length === 1) gone.push(serviceTab(ws));
+      const topBefore = ws.tabs.slice(0, ws.tabs.indexOf(gone.find((t) => t && !inService(t.kind)) || closing)).filter((t) => !inService(t.kind) && !gone.includes(t)).pop();
+      for (const t of gone) if (t) destroyTab(t);
+      ws.tabs = ws.tabs.filter((t) => !gone.includes(t));
       if (!ws.tabs.length) { handlers['close-ro'](ro); return; }
-      if (ws.activeTab === id) ws.activeTab = ws.tabs[Math.max(0, i - 1)].id;
+      if (inService(closing.kind) && ws.svcTab === id) {
+        const before = ws.tabs.slice(0, i).filter((t) => inService(t.kind)).pop();
+        ws.svcTab = (before || ws.tabs.find((t) => inService(t.kind)))?.id ?? null;
+      }
+      if (!ws.tabs.some((t) => t.id === ws.activeTab)) ws.activeTab = (topBefore || ws.tabs.find((t) => !inService(t.kind)))?.id ?? null;
       saveWorkspaces(); layout(); pushState();
     },
     'rename-tab': ({ ro, id, title }) => {
@@ -1743,10 +1827,10 @@ function createWorkbench(profile) {
     });
 
     // The app's dashboard starts with "Connecting to Xtime…" until the first ROs arrive (or Xtime asks to sign in)
-    if (IS_BETA && settings.xtimeDashboard) xtimeSignin = { step: 'starting', since: Date.now(), busy: false, error: '' };
+    if (settings.xtimeDashboard) xtimeSignin = { step: 'starting', since: Date.now(), busy: false, error: '' };
     xtimeView = makeWebView();
     xtimeView.webContents.loadURL(settings.xtimeUrl); // signs in (and shows Xtime) when needed; put away once the app works without it
-    if (IS_BETA) startLite();
+    startLite();
     let soon = null;
     xtimeView.webContents.on('did-frame-finish-load', () => {
       clearTimeout(soon);
@@ -1762,9 +1846,9 @@ function createWorkbench(profile) {
     });
     // Watch which RO page is open in Xtime, so a hidden RO can be unhidden from there.
     watchTimer = setInterval(() => {
-      if (IS_BETA) parkCheck();
+      parkCheck();
       // The background page landed somewhere else (e.g. sent to sign in before Xtime was signed in): try again once Inspect works
-      if (IS_BETA && !liteReady() && !liteLoading && findInspectFrame() && Date.now() - liteTriedAt > 30 * 1000) { liteTriedAt = Date.now(); startLite(); }
+      if (!liteReady() && !liteLoading && findInspectFrame() && Date.now() - liteTriedAt > 30 * 1000) { liteTriedAt = Date.now(); startLite(); }
       const ro = viewingROFromXtime();
       if (ro !== xtimeViewingRO) { xtimeViewingRO = ro; pushState(); }
       // Refresh Xtime before its session runs out — only while you're not looking at the Xtime tab

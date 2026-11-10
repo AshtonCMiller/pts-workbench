@@ -14,6 +14,9 @@ const FLAGS = [
   ['waitingCustomer', 'Waiting on Customer', '#b45309'],
   ['waitingWarranty', 'Waiting on Warranty', '#7c3aed'],
 ];
+// The Workbench shows the vehicle picked in the sidebar
+const inVehicle = (s) => !!s && s.mode === 'manual';
+
 const LINE_STATUS = {
   flagged: { label: 'Flagged', color: '#15803d' },
   done: { label: 'Done in Xtime', color: '#0e7490' },
@@ -366,7 +369,7 @@ function renderChat() {
   document.body.classList.toggle('chat', !!state.chatOpen);
   if (!state.chatOpen) return;
   // In the Workbench, the open vehicle's RO is the one shown
-  const ro = chat.ro || (state.mode === 'manual' ? state.activeRO : null);
+  const ro = chat.ro || (inVehicle(state) ? state.activeRO : null);
   const all = chatConversations();
   const convs = ro ? all.filter((c) => c.ro === String(ro)) : all;
   if (!chat.channel && ro && convs.length === 1 && convs[0].channelId) { chat.channel = convs[0].channelId; chatAskHistory(chat.channel); }
@@ -648,7 +651,7 @@ function linesPanel(ro, info) {
 
 // Folded line lists, per RO (this computer only)
 const foldedLines = new Set((() => { try { return JSON.parse(localStorage.getItem('foldedLines') || '[]'); } catch { return []; } })());
-function toggleLines(ro) {
+function toggleFoldedLines(ro) {
   ro = String(ro);
   if (foldedLines.has(ro)) foldedLines.delete(ro); else foldedLines.add(ro);
   try { localStorage.setItem('foldedLines', JSON.stringify([...foldedLines].slice(-200))); } catch {}
@@ -682,7 +685,7 @@ function compactRow(r, { ws = null } = {}) {
 // ---------- RO cards ----------
 function roCard(r, { inDrawer = false, ws = null } = {}) {
   const info = state.roInfo?.[r.ro];
-  const active = ws && state.activeRO === ws.ro && state.mode === 'manual';
+  const active = ws && state.activeRO === ws.ro && inVehicle(state);
   const card = el('div', { class: 'ro' + (active ? ' sel' : '') },
     el('div', { class: 't' },
       `RO ${r.ro}`, r.tag ? el('span', { class: 'tag', text: `  · Tag ${r.tag}` }) : null,
@@ -729,7 +732,7 @@ function roCard(r, { inDrawer = false, ws = null } = {}) {
       card.append(el('button', {
         class: `lines-toggle${folded ? ' folded' : ''}`, type: 'button',
         title: folded ? 'Show this RO\'s lines' : 'Hide this RO\'s lines',
-        onclick: (e) => { e.stopPropagation(); toggleLines(r.ro); },
+        onclick: (e) => { e.stopPropagation(); toggleFoldedLines(r.ro); },
       }, el('span', { class: 'chev', text: folded ? '▸' : '▾' }), 'Lines',
         hasLines ? el('span', { class: 'muted', text: ` · ${info.flaggedCount}/${info.lines.length} flagged · pays ${fmtH(info.total)}` }) : null));
       if (!folded) card.append(linesPanel(r.ro, info));
@@ -826,7 +829,7 @@ function flagCheck(info) {
 function statusCard(item, kind) {
   const info = state.roInfo?.[item.ro];
   const open = expanded.has(item.ro);
-  const sel = state.mode === 'manual' && state.activeRO === item.ro;
+  const sel = inVehicle(state) && state.activeRO === item.ro;
   const card = el('div', { class: 'ro status-card' + (sel ? ' sel' : '') + (open ? ' open' : '') },
     el('div', { class: 't' },
       el('span', { class: 'chev', text: open ? '▾' : '▸' }),
@@ -1010,7 +1013,7 @@ function renderVersion() {
   $('btn-check-update').disabled = a.update.state === 'off' || a.update.state === 'checking' || a.update.state === 'downloading';
   $('btn-update-log').hidden = !a.update.logFile;
   $('app-version').classList.toggle('beta', !!a.beta);
-  $('app-version').title = a.beta ? 'Beta version: has the new Xtime features' : 'Installed version';
+  $('app-version').title = a.beta ? 'Beta version: new features being tested' : 'Installed version';
   $('beta-updates').checked = !!a.betaUpdates;
   $('beta-note').hidden = !(a.beta !== a.betaUpdates);
   $('beta-note').textContent = a.betaUpdates && !a.beta ? 'The newest beta downloads in the background; restart to install it.'
@@ -1084,9 +1087,6 @@ function render() {
   lastMsgCount = s.msgCount;
   $('btn-chat').classList.toggle('on', !!s.chatOpen);
   renderChat();
-  // The app's own Xtime dashboard and chat are in beta versions only
-  $('btn-dash').hidden = !s.app?.beta;
-  $('btn-chat').hidden = !s.app?.beta;
   $('btn-dash').classList.toggle('on', !!s.settings.xtimeDashboard);
   $('btn-dash').textContent = s.settings.xtimeDashboard ? 'Xtime page' : 'Dashboard';
   if (s.mode === 'xtime' && s.settings.xtimeDashboard) { renderSignin(s); renderDashboard(s); }
@@ -1164,35 +1164,43 @@ function render() {
   if (ws && !editingTab) renderTabs(ws);
 }
 
+// One tab (top row or the Service Manual's row): click to show, double-click to rename, × to close
+function tabEl(ws, t, activeId) {
+  const title = el('span', { text: t.title });
+  const tab = el('div', { class: `tab kind-${t.kind}` + (t.id === activeId ? ' on' : ''), title: 'Double-click to rename' },
+    el('span', { class: 'tab-dot' }),
+    title,
+    el('button', {
+      class: 'close', text: '×', title: t.kind === 'service' ? 'Close the Service Manual and its tabs' : 'Close tab',
+      onclick: (e) => { e.stopPropagation(); api.send('close-tab', { ro: ws.ro, id: t.id }); },
+    }),
+  );
+  tab.addEventListener('click', () => { if (t.id !== activeId) api.send('select-tab', { ro: ws.ro, id: t.id }); });
+  tab.addEventListener('dblclick', () => {
+    const input = el('input', { value: t.title });
+    let finished = false;
+    editingTab = true;
+    const done = (save) => {
+      if (finished) return;
+      finished = true; editingTab = false;
+      if (save) api.send('rename-tab', { ro: ws.ro, id: t.id, title: input.value }); else render();
+    };
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') done(true); if (e.key === 'Escape') done(false); });
+    input.addEventListener('blur', () => done(true));
+    title.replaceWith(input);
+    input.focus(); input.select();
+  });
+  return tab;
+}
+
 function renderTabs(ws) {
-  $('tabs').replaceChildren(...ws.tabs.map((t) => {
-    const title = el('span', { text: t.title });
-    const tab = el('div', { class: `tab kind-${t.kind}` + (t.id === ws.activeTab ? ' on' : ''), title: 'Double-click to rename' },
-      el('span', { class: 'tab-dot' }),
-      title,
-      el('button', {
-        class: 'close', text: '×', title: 'Close tab',
-        onclick: (e) => { e.stopPropagation(); api.send('close-tab', { ro: ws.ro, id: t.id }); },
-      }),
-    );
-    tab.addEventListener('click', () => { if (t.id !== ws.activeTab) api.send('select-tab', { ro: ws.ro, id: t.id }); });
-    tab.addEventListener('dblclick', () => {
-      const input = el('input', { value: t.title });
-      let finished = false;
-      editingTab = true;
-      const done = (save) => {
-        if (finished) return;
-        finished = true; editingTab = false;
-        if (save) api.send('rename-tab', { ro: ws.ro, id: t.id, title: input.value }); else render();
-      };
-      input.addEventListener('keydown', (e) => { if (e.key === 'Enter') done(true); if (e.key === 'Escape') done(false); });
-      input.addEventListener('blur', () => done(true));
-      title.replaceWith(input);
-      input.focus(); input.select();
-    });
-    return tab;
-  }));
-  const active = ws.tabs.find((t) => t.id === ws.activeTab);
+  $('tabs').replaceChildren(...ws.tabs.map((t) => tabEl(ws, t, ws.activeTab)));
+  // Service Manual open: its own row of tabs (OASIS | Diagnostics | Workshop Manual | Labor Times)
+  const top = ws.tabs.find((t) => t.id === ws.activeTab);
+  const showSub = top?.kind === 'service' && !!ws.sub;
+  document.body.classList.toggle('has-sub', showSub);
+  $('subtabs').replaceChildren(...(showSub ? ws.sub.tabs.map((t) => tabEl(ws, t, ws.sub.active)) : []));
+  const active = showSub ? ws.sub.tabs.find((t) => t.id === ws.sub.active) : top;
   $('tab-status').textContent = active?.status || '';
   $('btn-reenter').style.display = ['pts', 'ota', 'cvd', 'prodemand'].includes(active?.kind) ? '' : 'none';
   $('btn-reenter').textContent = active?.kind === 'prodemand' ? 'Re-enter VIN' : 'Reopen vehicle';
@@ -1387,7 +1395,7 @@ applyMineCollapsed();
 // ---------- top bar buttons ----------
 $('mode-xtime').onclick = () => api.send('set-mode', 'xtime');
 $('btn-dash').onclick = () => api.send('toggle-dashboard');
-$('msg-chip').onclick = () => { if (state?.app?.beta) openChat(state?.mode === 'manual' ? state.activeRO : null); else api.send('open-messages'); };
+$('msg-chip').onclick = () => openChat(inVehicle(state) ? state.activeRO : null);
 $('btn-chat').onclick = () => { if (state?.chatOpen) api.send('chat-toggle', { open: false }); else openChat(null); };
 $('xdash-search').addEventListener('input', () => { if (state) renderDashboard(state); });
 $('mode-manual').onclick = () => api.send('set-mode', 'manual');
@@ -1412,8 +1420,8 @@ $('add-tab').onchange = (e) => {
   if (ws && kind) api.send('add-tab', { ro: ws.ro, kind });
 };
 $('btn-copy-vin').onclick = () => { const ws = activeWs(); if (ws) api.send('copy-vin', ws.ro); };
-$('btn-reenter').onclick = () => { const ws = activeWs(); if (ws) api.send('reenter-vin', { ro: ws.ro, id: ws.activeTab }); };
-$('btn-reload-tab').onclick = () => { const ws = activeWs(); if (ws) api.send('reload-tab', { ro: ws.ro, id: ws.activeTab }); };
+$('btn-reenter').onclick = () => { const ws = activeWs(); if (ws) api.send('reenter-vin', { ro: ws.ro, id: ws.viewTab }); };
+$('btn-reload-tab').onclick = () => { const ws = activeWs(); if (ws) api.send('reload-tab', { ro: ws.ro, id: ws.viewTab }); };
 
 // ---------- resizable sidebar ----------
 $('resizer').addEventListener('pointerdown', (e) => {
@@ -1578,7 +1586,7 @@ api.onNotice?.((n) => {
 
 $('btn-side').onclick = () => api.send('toggle-sidebar');
 document.addEventListener('keydown', (e) => {
-  if (e.ctrlKey && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'b' && state?.mode === 'manual' && !document.body.classList.contains('no-ws')) {
+  if (e.ctrlKey && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'b' && inVehicle(state) && !document.body.classList.contains('no-ws')) {
     e.preventDefault(); api.send('toggle-sidebar');
   }
 });
