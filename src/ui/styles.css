@@ -524,3 +524,15 @@ body.chat #xdash, body.chat #tabstrip, body.chat #empty { right: var(--chat); }
 .sync-opt:hover { border-color: var(--accent); background: var(--sel); }
 .sync-opt.danger:hover { border-color: var(--danger); background: color-mix(in srgb, var(--danger) 10%, var(--panel)); }
 .sync-opt b { font-size: 13.5px; }
+
+/* Workbench sidebar tucked away */
+body.side-hidden #sidebar { display: none; }
+body.side-hidden #tabstrip { left: 0; }
+.side-btn { flex: none; font-size: 15px; width: 28px; height: 28px; border-radius: 6px; }
+/* Fold an RO's lines */
+.lines-toggle { display: flex; align-items: center; gap: 6px; width: 100%; margin-top: 6px; padding: 5px 8px; font: inherit; font-size: 12.5px;
+  font-weight: 600; text-align: left; background: none; border: 1px solid transparent; border-radius: 6px; color: var(--text); cursor: pointer; }
+.lines-toggle:hover { background: var(--hover); border-color: var(--line); }
+.lines-toggle .chev { width: 12px; color: var(--muted); }
+.lines-toggle .muted { font-weight: 500; }
+.lines-toggle + .lines { margin-top: 2px; }

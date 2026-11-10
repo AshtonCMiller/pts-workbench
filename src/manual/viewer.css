@@ -161,3 +161,7 @@ body.toc-hidden #main { left: 0; }
   .doc .hide { display: revert !important; }
   .ppt-bar { display: none !important; }
 }
+.diag-offer { display: block; width: calc(100% - 16px); margin: 6px 8px 8px; text-align: left; font: inherit; font-size: 12.5px;
+  padding: 8px 10px; border-radius: 8px; border: 1px solid var(--accent); background: var(--sel); color: var(--text); cursor: pointer; }
+.diag-offer:hover { background: var(--hover); }
+.diag-offer b { font-family: Consolas, ui-monospace, monospace; color: var(--accent); }

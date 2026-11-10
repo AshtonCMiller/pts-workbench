@@ -8,7 +8,6 @@
 </head>
 <body>
   <header id="topbar">
-    <div class="brand" id="brand">PTS Workbench</div>
     <span id="app-version" class="ver" title="Installed version"></span>
     <nav class="seg" role="tablist">
       <button id="mode-xtime" role="tab">Xtime</button>
@@ -90,11 +89,13 @@
   </aside>
 
   <div id="tabstrip">
+    <button id="btn-side" class="icon side-btn" title="Hide the sidebar (Ctrl+B)">⟨</button>
     <div id="tabs"></div>
     <select id="add-tab" class="add-select" title="Open another tab for this vehicle">
       <option value="">+ Add tab…</option>
       <option value="oasisview">OASIS</option>
       <option value="manual">Workshop manual</option>
+      <option value="diag">Diagnostics (DTC search)</option>
       <option value="wiring">Wiring</option>
       <option value="pts">PTS</option>
       <option value="ota">OTA updates</option>

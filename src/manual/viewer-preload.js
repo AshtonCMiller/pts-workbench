@@ -17,4 +17,8 @@ contextBridge.exposeInMainWorld('manual', {
   openLog: () => ipcRenderer.invoke('manual', 'open-log'),
   log: (text) => ipcRenderer.invoke('manual', 'log', text),
   save: (state) => ipcRenderer.send('manual-save', state),
+  onOpen: (fn) => ipcRenderer.on('manual-open', (_e, link) => fn(link)),
+  diag: (q) => ipcRenderer.invoke('manual', 'diag', q),
+  openProc: (link) => ipcRenderer.invoke('manual', 'open-proc', link),
+  openDiag: (query) => ipcRenderer.invoke('manual', 'open-diag', query),
 });

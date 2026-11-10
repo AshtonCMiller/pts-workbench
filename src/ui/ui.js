@@ -646,6 +646,15 @@ function linesPanel(ro, info) {
   return wrap;
 }
 
+// Folded line lists, per RO (this computer only)
+const foldedLines = new Set((() => { try { return JSON.parse(localStorage.getItem('foldedLines') || '[]'); } catch { return []; } })());
+function toggleLines(ro) {
+  ro = String(ro);
+  if (foldedLines.has(ro)) foldedLines.delete(ro); else foldedLines.add(ro);
+  try { localStorage.setItem('foldedLines', JSON.stringify([...foldedLines].slice(-200))); } catch {}
+  render();
+}
+
 function linesSummary(info) {
   if (!info || !info.lines.length) return null;
   return el('div', { class: 'sum' }, `${info.flaggedCount}/${info.lines.length} lines flagged`);
@@ -714,7 +723,16 @@ function roCard(r, { inDrawer = false, ws = null } = {}) {
       onclick: (e) => { e.stopPropagation(); api.send('close-ro', ws.ro); },
     }));
     if (active) {
-      card.append(linesPanel(r.ro, info));
+      // The lines can be folded away (remembered per RO on this computer)
+      const folded = foldedLines.has(String(r.ro));
+      const hasLines = !!info?.lines?.length;
+      card.append(el('button', {
+        class: `lines-toggle${folded ? ' folded' : ''}`, type: 'button',
+        title: folded ? 'Show this RO\'s lines' : 'Hide this RO\'s lines',
+        onclick: (e) => { e.stopPropagation(); toggleLines(r.ro); },
+      }, el('span', { class: 'chev', text: folded ? '▸' : '▾' }), 'Lines',
+        hasLines ? el('span', { class: 'muted', text: ` · ${info.flaggedCount}/${info.lines.length} flagged · pays ${fmtH(info.total)}` }) : null));
+      if (!folded) card.append(linesPanel(r.ro, info));
       card.append(el('div', { class: 'card-actions end' }, el('button', {
         class: 'ghost small', text: 'Mark completed', title: 'Move this RO to Completed (and close its tabs)',
         onclick: (e) => { e.stopPropagation(); markCompleted(r.ro, info); },
@@ -1074,7 +1092,7 @@ function render() {
   if (s.mode === 'xtime' && s.settings.xtimeDashboard) { renderSignin(s); renderDashboard(s); }
   if (!resizing) document.documentElement.style.setProperty('--side', `${s.settings.sidebarWidth || 380}px`);
 
-  if (s.profile) { $('brand').textContent = `PTS Workbench · ${s.profile.displayName}`; document.title = `PTS Workbench - ${s.profile.displayName}`; }
+  if (s.profile) document.title = `PTS Workbench - ${s.profile.displayName}`; // the window's title bar already says who it is
   $('mode-xtime').classList.toggle('on', s.mode === 'xtime');
   $('mode-manual').classList.toggle('on', s.mode === 'manual');
   $('ws-count').textContent = s.workspaces.length ? String(s.workspaces.length) : '';
@@ -1138,6 +1156,11 @@ function render() {
 
   const ws = s.workspaces.find((w) => w.ro === s.activeRO);
   body.classList.toggle('no-ws', !ws);
+  // The Workbench sidebar can be tucked away while a vehicle is open
+  const sideHidden = !!(ws && s.settings.sidebarHidden);
+  body.classList.toggle('side-hidden', sideHidden);
+  $('btn-side').textContent = sideHidden ? '☰' : '⟨';
+  $('btn-side').title = sideHidden ? 'Show the sidebar (Ctrl+B)' : 'Hide the sidebar (Ctrl+B)';
   if (ws && !editingTab) renderTabs(ws);
 }
 
@@ -1553,5 +1576,11 @@ api.onNotice?.((n) => {
   noticeTimer = setTimeout(() => { box.hidden = true; }, n.removeHost ? 15000 : 5000);
 });
 
+$('btn-side').onclick = () => api.send('toggle-sidebar');
+document.addEventListener('keydown', (e) => {
+  if (e.ctrlKey && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'b' && state?.mode === 'manual' && !document.body.classList.contains('no-ws')) {
+    e.preventDefault(); api.send('toggle-sidebar');
+  }
+});
 api.onState((s) => { state = s; render(); renderAddLookup(); maybeShowSetup(); });
 api.send('ui-ready');

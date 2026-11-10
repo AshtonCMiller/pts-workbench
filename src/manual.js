@@ -338,6 +338,121 @@ class ManualService {
     return { country, fuelType, capability: json.capabilityData || null, data: json.connectedVehicleData || null, status: res.status };
   }
 
+  // ---- Diagnostics search (Ford's "Enhanced Search": DTCs or words → TSB/GSB/SSM, pinpoint tests,
+  //      procedures, PC/ED, wiring, videos). The same two requests Ford's Diagnostics tab makes:
+  //   1. /Diagnostics/UnifiedSearch?VIN=… → the vehicle's article numbers and book codes (written into the page)
+  //   2. /Diagnostics/GetAllSearchResults (POST) → the results
+  async diagContext(vin) {
+    const book = await this.book(vin);
+    this.diagCtx ||= new Map();
+    const cached = this.diagCtx.get(book.vin);
+    if (cached && Date.now() - cached.at < 30 * 60 * 1000) return cached;
+    const year = book.vehicle.year || book.params.modelYear || '';
+    const url = `${PTS}/Diagnostics/UnifiedSearch?VIN=${encodeURIComponent(book.vin)}&VID=${encodeURIComponent(book.params.vehicleId)}` +
+      `&BuildDate=${encodeURIComponent(book.vehicle.buildDate || '')}&ModelYear=${encodeURIComponent(year)}`;
+    const html = await this.text(url);
+    const decode = (t) => t.replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&');
+    const str = (name) => { const m = html.match(new RegExp(`var\\s+${name}\\s*=\\s*"([^"]*)"`)); return m ? decode(m[1]) : ''; };
+    // var X = DeserializeJSON("[&quot;…&quot;]")  (or '…')
+    // (the page also has commented-out versions of some of these lines: those are skipped)
+    const list = (name) => {
+      let out = [];
+      for (const m of html.matchAll(new RegExp(`^([^\\n]*?)var\\s+${name}\\s*=\\s*DeserializeJSON\\((["'])([\\s\\S]*?)\\2\\)`, 'gm'))) {
+        if (m[1].includes('//')) continue;
+        try { const v = JSON.parse(decode(m[3]) || '[]'); if (Array.isArray(v)) out = v; } catch { /* not a list */ }
+      }
+      return out;
+    };
+    if (!/GetAllSearchResults|UnifiedSearchBar|ArticleNumbers/i.test(html) && !/var\s+ESVIN/.test(html)) {
+      throw new Error("Ford's diagnostics search didn't load for this vehicle");
+    }
+    const lang = (str('ArticleLanguage') || str('LanguageOdysseyCode') || 'ENUSA').toLowerCase();
+    const ctx = {
+      at: Date.now(), vin: book.vin, url,
+      articles: list('ArticleNumbers').map(String),
+      warranty: list('WarrantyArticleNumbers').map(String),
+      wsmBooks: list('WSMBookCode').map(String),
+      wiringBooks: list('WiringBookCode').map(String),
+      pcedBooks: list('PCEDBookCodes').map(String),
+      wsmTitles: list('WSMBookTitles'),
+      pcedTitles: list('PCEDBookTitles'),
+      buildDate: str('BuildDate') || book.vehicle.buildDate || '',
+      vehicleId: (html.match(/var\s+VehicleID\s*=\s*(\d+)/) || [])[1] || book.params.vehicleId,
+      modelYear: str('ModelYear') || year,
+      lang, wsmLang: (str('WSMLanguage') ? lang : lang), country: str('Country') || book.params.country || 'USA',
+      contentMarket: str('ContentMarket') || 'US', isoLang: str('ISOLanguageCode') || 'EN-US',
+    };
+    this.log(`   diagnostics: ${ctx.articles.length} articles, WSM ${ctx.wsmBooks.join(',')}, wiring ${ctx.wiringBooks.join(',')}, PC/ED ${ctx.pcedBooks.join(',')}`);
+    this.diagCtx.set(book.vin, ctx);
+    return ctx;
+  }
+
+  // Ford narrows results to the vehicle's options with the "FeaturesAttributes" cookie PTS sets when a VIN is
+  // identified; it's only used when it belongs to this vehicle (same build date)
+  async featureAttributes(ctx) {
+    try {
+      const cookies = await this.ses.cookies.get({ name: 'FeaturesAttributes' });
+      const c = cookies.find((x) => /dealerconnection\.com$/i.test(x.domain.replace(/^\./, '')));
+      if (!c) return null;
+      let raw = c.value;
+      try { raw = decodeURIComponent(raw); } catch {}
+      const out = {};
+      for (const pair of raw.split('&')) {
+        const [k, v] = pair.split('=');
+        if (!k || v == null || !/^[A-Za-z0-9_]+$/.test(k)) continue;
+        out[k] = v.includes('|') ? v.split('|') : v;
+      }
+      if (!out.BuildDate || String(out.BuildDate) !== String(ctx.buildDate)) return null;
+      const arr = (v) => (Array.isArray(v) ? v : v ? [v] : []);
+      return {
+        featureCodes: [...arr(out.PrimaryFeatureCodes), ...arr(out.MinorFeatureCodes)].sort().slice(0, 300),
+        vehicleLine: out.VehicleLine ? [String(out.VehicleLine).toLowerCase() + (out.VehicleType || '')] : undefined,
+        buildDate: out.BuildDate,
+      };
+    } catch { return null; }
+  }
+
+  // text: words; dtcs: ["P0420", "U3000:49", …]; sources: ['tsb','gsb','ssm','wsmppt','wsmproc','pced','wiring','tsv']
+  async diagSearch(vin, { text = '', dtcs = [], sources, rows = 50, start = 0, exact = false } = {}) {
+    const ctx = await this.diagContext(vin);
+    const langFor = (type) => (type === 'tsv' ? 'enusa' : ctx.lang);
+    const all = ['tsb', 'gsb', 'ssm', 'wsmppt', 'wsmproc', 'wiring', 'tsv', ...(ctx.pcedBooks.length ? ['pced'] : [])];
+    const params = {
+      searchTerm: String(text || '').trim(),
+      articleNumber: [...new Set([...ctx.articles, ...ctx.wsmBooks, ...ctx.pcedBooks, ...ctx.wiringBooks, ...ctx.warranty]
+        .filter(Boolean).map((x) => String(x).replace(/\//g, '')))],
+      dtc: dtcs,
+      source: (sources || all).filter((t) => all.includes(t)).map((type) => ({ language: langFor(type), type })),
+      start, rows, descriptionFlag: true,
+      symptomCodes: [],
+      modelAndYear: [`${ctx.modelYear} ${(await this.book(vin)).vehicle.name || ''}`.trim()],
+    };
+    if (exact) params.searchType = 'exact';
+    const fa = await this.featureAttributes(ctx);
+    if (fa) { params.featureCodes = fa.featureCodes; if (fa.vehicleLine) params.vehicleLine = fa.vehicleLine; params.buildDate = fa.buildDate; }
+    const res = await this.fetch(`${PTS}/Diagnostics/GetAllSearchResults`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8', Accept: 'application/json, text/javascript, */*; q=0.01',
+        'X-Requested-With': 'XMLHttpRequest', Referer: ctx.url },
+      body: new URLSearchParams({ searchRequest: JSON.stringify(params) }).toString(),
+    });
+    const body = await res.text();
+    let json;
+    try { json = JSON.parse(body); } catch {
+      if (/<form[^>]+(login|signin|sso|adfs)/i.test(body)) throw new NeedsLogin();
+      throw new Error("Ford's diagnostics search didn't answer");
+    }
+    if (!this.loggedDiagFields && Array.isArray(json.data) && json.data[0]) {
+      this.loggedDiagFields = true;
+      this.log(`   search result fields: ${Object.keys(json.data[0]).join(',')} | filter: ${Object.keys(json.filter || {}).join(',')}`);
+    }
+    const counts = {};
+    for (const s of json.filter?.source || []) counts[s.name] = (counts[s.name] || 0) + (Number(s.count) || 0);
+    const dtcInfo = (json.filter?.dtcInfo || []).map((x) => ({ name: x.name, count: x.count, description: x.description || x.desc || '' }));
+    return { ctx: { vehicleId: ctx.vehicleId, wsmTitles: ctx.wsmTitles, pcedTitles: ctx.pcedTitles, country: ctx.country,
+      contentMarket: ctx.contentMarket, isoLang: ctx.isoLang }, counts, dtcInfo, results: (json.data || []).map((r) => diagResult(r, ctx)) };
+  }
+
   // Newer ("SPA") pinpoint tests keep their steps in a separate file, fetched when the test is opened
   async spaSteps(vin, { file, procUid }) {
     const book = await this.book(vin);
@@ -405,6 +520,49 @@ class ManualService {
 }
 
 // Reads `var params = {...}` and the `var …Base = '…'` addresses out of Ford's manual page
+// One search result, trimmed to what the app shows and needs to open it
+function diagResult(r, ctx = {}) {
+  const clean = (t) => String(t || '').replace(/<[^>]*>/g, ' ').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/\s+/g, ' ').trim();
+  const out = { source: r.source || '', type: r.type || '', title: clean(r.title), description: clean(r.description).slice(0, 400),
+    date: r.effectiveDate || r.publicationDate || '', applies: r.qsMatched !== false };
+  if (['wsmppt', 'wsmproc', 'pced'].includes(out.source)) {
+    // As Ford's page works it out: GSI books → procUid = uid, searchNumber = procuid; ODY books ("G…" procuid) the other way round
+    let procUid = r.uid || '', searchNumber = r.procuid || '';
+    if (String(searchNumber).charAt(0).toLowerCase() === 'g') { procUid = r.procuid; searchNumber = r.uid; }
+    if (out.source === 'pced' && !r.uid) { procUid = r.procuid; if (/_s[45]p/.test(procUid)) searchNumber = `spapced_${r.procuid}`; }
+    const bar = out.title.indexOf(' |');
+    if (bar > 0) out.title = `${out.title.slice(0, bar)} ${out.title.slice(out.title.indexOf('|') + 1)}`.replace(/\s+/g, ' ').trim();
+    Object.assign(out, { searchNumber: String(searchNumber || ''), procUid: String(procUid || ''), ppt: r.pptid ? String(r.pptid) : '', book: r.bookCode || r.articleNumber || '' });
+  } else if (['tsb', 'gsb', 'ssm'].includes(out.source)) {
+    out.article = String(r.articleNumber || '');
+    out.url = `/vdirsnet/TSB_SSM/DisplayArticle.aspx?content=/vdirsnet/TSB_SSM/DisplayArticle.aspx&id=${encodeURIComponent(out.article)}` +
+      `&lang=${encodeURIComponent(ctx.isoLang || 'EN-US')}&country=${encodeURIComponent(ctx.country || 'USA')}&market=${encodeURIComponent(ctx.contentMarket || 'US')}`;
+  } else if (out.source === 'tsv') {
+    out.url = /^https:/i.test(String(r.uid || '')) ? r.uid : '';
+  } else if (out.source === 'wiring') {
+    // The same wiring addresses Ford's search builds
+    const book = String(r.articleNumber || ''), conn = String(r.wiringConnector || ''), lang = ctx.lang || 'enusa';
+    const vid = encodeURIComponent(ctx.vehicleId || '1');
+    if (r.type === 'cfc') {
+      out.title = `${conn}: ${out.title}`;
+      out.url = `/wiring/face/?book=${encodeURIComponent(book)}&vehicleId=${vid}&cell=150&page=&item=${encodeURIComponent(book.toLowerCase() + 'cf' + conn.toLowerCase())}&bookType=svg&languageCode=${lang}`;
+    } else {
+      let cell = String(r.wiringCell || ''), base = '/wiring/page';
+      if (r.type === 'celttl') { if (cell === '150') base = '/wiring/connectors'; out.title = `${cell} ${out.title}`; }
+      else if (r.type === 'component_search') out.title = `${out.title}: ${cell}-${r.wiringPage || ''}`;
+      else if (r.type === 'conn_search') out.title = `${conn}: ${cell}-${r.wiringPage || ''} ${out.title}`;
+      else if (/_index$/.test(r.type || '')) cell = '151';
+      out.url = `${base}?book=${encodeURIComponent(book)}&vehicleId=${vid}&cell=${encodeURIComponent(cell)}&page=${encodeURIComponent(r.wiringPage || 1)}` +
+        `&bookType=svg&languageCode=${lang}&wiringBookCode=${encodeURIComponent((ctx.wiringBooks || []).join(','))}&title=${encodeURIComponent(out.title)}` +
+        `${conn ? `&item=${encodeURIComponent(conn)}` : ''}`;
+    }
+    out.url += '&comefrom=enhancesearch';
+    out.description = '';
+  }
+  return out;
+}
+
 function parseBookPage(html) {
   const params = {};
   const start = html.indexOf('var params = {');

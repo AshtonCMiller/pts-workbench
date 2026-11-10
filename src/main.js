@@ -50,10 +50,11 @@ const DEFAULT_SETTINGS = {
   autoLogin: true,         // press "Sign in" with a saved password when a site asks you to log in
   syncEnabled: false,      // keep flags, hours and the clock in sync across computers (main window's setting)
   sidebarWidth: 380,
+  sidebarHidden: false,
   xtimeDashboard: false,   // show the app's own Xtime dashboard instead of Xtime's page
   notifications: true,     // Windows pop-ups: RO assigned, line approved, new Xtime messages
 };
-const BOOLEAN_SETTINGS = ['autoLogin', 'setupDone', 'syncEnabled', 'xtimeDashboard', 'notifications'];
+const BOOLEAN_SETTINGS = ['autoLogin', 'setupDone', 'syncEnabled', 'xtimeDashboard', 'notifications', 'sidebarHidden'];
 // Not shown in Settings (too technical): always the built-in values, updated with the app
 const FIXED_SETTINGS = ['ptsUrl', 'ptsTransportUrl', 'oasisUrl', 'xtimeApiPath', 'xtimeRoUrl', 'xtimeDetailsPath', 'xtimeEmployeesPath'];
 // Ford transport link codes: 704 = OASIS landing page (workshop manual), 702 = Over-the-Air update
@@ -512,7 +513,7 @@ function createWorkbench(profile) {
         const tab = ws.tabs.find((t) => t.id === ws.activeTab);
         if (tab) {
           ensureView(ws, tab);
-          const side = sidebarWidth();
+          const side = settings.sidebarHidden ? 0 : sidebarWidth(); // the Workbench sidebar can be tucked away
           tab.view.setBounds({ x: side, y: TOP_BAR + TAB_STRIP, width: Math.max(0, width - side - (chatOpen ? CHAT_W : 0)), height: Math.max(0, height - TOP_BAR - TAB_STRIP) });
           visible = tab.view;
         }
@@ -569,6 +570,7 @@ function createWorkbench(profile) {
     if (tab.view) return;
     if (tab.kind === 'manual') { tab.view = makeManualView(ws, tab); return; }
     if (tab.kind === 'oasisview') { tab.view = makeManualView(ws, tab, 'oasis.html'); return; }
+    if (tab.kind === 'diag') { tab.view = makeManualView(ws, tab, 'diag.html'); return; }
     tab.view = makeWebView();
     const wc = tab.view.webContents;
     if (tab.kind === 'wiring') {
@@ -740,7 +742,40 @@ function createWorkbench(profile) {
     const { ws, tab } = entry;
     const fail = (e) => ({ error: true, needsLogin: !!e.needsLogin, message: e.message || String(e), detail: e.detail || '' });
     switch (name) {
-      case 'init': return { vin: ws.vin, ro: ws.ro, ymm: ws.ymm, state: tab.manualState || null };
+      case 'init': {
+        const open = tab.pendingOpen || null; // a procedure sent here from the Diagnostics tab before this tab existed
+        tab.pendingOpen = null;
+        return { vin: ws.vin, ro: ws.ro, ymm: ws.ymm, state: tab.manualState || null, open };
+      }
+      case 'diag': // Diagnostics tab: Ford's search for DTCs / words on this vehicle
+        try {
+          const q = payload || {};
+          const dtcs = (Array.isArray(q.dtcs) ? q.dtcs : []).map(String).filter((x) => /^[PBUC][0-9A-F]{4,6}(?:[:|][0-9A-Z]{2,12}){0,2}$/i.test(x)).slice(0, 20);
+          const sources = Array.isArray(q.sources) ? q.sources.map(String) : undefined;
+          return await manualService.diagSearch(ws.vin, { text: String(q.text || '').slice(0, 200), dtcs, sources,
+            rows: Math.min(200, Math.max(1, Number(q.rows) || 50)), start: Math.max(0, Number(q.start) || 0), exact: !!q.exact });
+        } catch (e) { return fail(e); }
+      case 'open-diag': { // from the manual's search: search this DTC in the vehicle's Diagnostics tab
+        const query = String(payload || '').slice(0, 200);
+        const dt = ws.tabs.find((t) => t.kind === 'diag') || addTab(ws, 'diag', { activate: false });
+        ws.activeTab = dt.id;
+        dt.manualState = { ...(dt.manualState || {}), query };
+        if (dt.view && !dt.view.webContents.isDestroyed() && !dt.view.webContents.isLoading()) dt.view.webContents.send('manual-open', { query });
+        saveWorkspaces(); layout(); pushState();
+        return true;
+      }
+      case 'open-proc': { // Diagnostics tab: show a procedure / pinpoint test in this vehicle's Workshop Manual tab
+        const q = payload || {};
+        const link = { searchNumber: String(q.searchNumber || ''), procUid: String(q.procUid || ''), linkType: 'Procedure',
+          title: String(q.title || '').slice(0, 200), ppt: String(q.ppt || ''), section: 'Diagnostics' };
+        if (!link.searchNumber && !link.procUid) return false;
+        const mt = ws.tabs.find((t) => t.kind === 'manual') || addTab(ws, 'manual', { activate: false });
+        ws.activeTab = mt.id;
+        if (mt.view && !mt.view.webContents.isDestroyed() && !mt.view.webContents.isLoading()) mt.view.webContents.send('manual-open', link);
+        else mt.pendingOpen = link;
+        saveWorkspaces(); layout(); pushState();
+        return true;
+      }
       case 'book':
         try {
           const b = await manualService.book(ws.vin);
@@ -1223,7 +1258,7 @@ function createWorkbench(profile) {
   }
 
   // ---------- workspaces ----------
-  const TAB_NAMES = { xtime: 'Xtime', oasisview: 'OASIS', manual: 'Workshop Manual', wiring: 'Wiring', pts: 'PTS', ota: 'OTA Updates', cvd: 'Connected Data', prodemand: 'ProDemand', oasis: 'OASIS' };
+  const TAB_NAMES = { diag: 'Diagnostics', xtime: 'Xtime', oasisview: 'OASIS', manual: 'Workshop Manual', wiring: 'Wiring', pts: 'PTS', ota: 'OTA Updates', cvd: 'Connected Data', prodemand: 'ProDemand', oasis: 'OASIS' };
   function addTab(ws, kind, { activate = true, front = false } = {}) {
     const n = ws.tabs.filter((t) => t.kind === kind).length;
     const base = TAB_NAMES[kind] || 'Manual';
@@ -1250,7 +1285,8 @@ function createWorkbench(profile) {
       for (const t of ws.tabs) if (FORD_LINKS[t.kind] && t.view) reopenFordTab(ws, t);
       for (const t of ws.tabs) {
         if (t.kind === 'manual') t.manualState = null; // the open procedures were for the old VIN
-        if ((t.kind === 'manual' || t.kind === 'wiring' || t.kind === 'oasisview') && t.view) destroyTab(t); // reopen for the right vehicle
+        if (t.kind === 'diag') t.manualState = null;
+        if ((t.kind === 'manual' || t.kind === 'wiring' || t.kind === 'oasisview' || t.kind === 'diag') && t.view) destroyTab(t); // reopen for the right vehicle
       }
     }
     if (tab) { // e.g. from the dashboard: show the RO's Xtime page
@@ -1531,6 +1567,11 @@ function createWorkbench(profile) {
       if (!lookup || lookup.ro !== ro) lookup = { ro, status: 'ok', message: '' };
       pushAll();
     },
+    'toggle-sidebar': (hide) => {
+      settings = { ...settings, sidebarHidden: hide == null ? !settings.sidebarHidden : !!hide };
+      writeJson('settings.json', settings);
+      layout(); pushState();
+    },
     'set-sidebar': (w) => {
       settings.sidebarWidth = Math.round(Number(w) || 380);
       layout();
@@ -1551,7 +1592,7 @@ function createWorkbench(profile) {
       // "+ Manual" while looking at a PTS tab copies that tab: same vehicle, same page, same scroll.
       const src = ws.tabs.find((t) => t.id === ws.activeTab);
       let snapshot = null;
-      const KINDS = ['oasisview', 'manual', 'wiring', 'pts', 'ota', 'cvd', 'prodemand', 'oasis', 'xtime'];
+      const KINDS = ['diag', 'oasisview', 'manual', 'wiring', 'pts', 'ota', 'cvd', 'prodemand', 'oasis', 'xtime'];
       kind = KINDS.includes(kind) ? kind : 'pts';
       if (kind === 'pts' && src?.kind === 'pts' && src.view && !src.view.webContents.isDestroyed()) {
         try { snapshot = await snapshotFrames(src.view.webContents); } catch { snapshot = null; }
@@ -1766,6 +1807,12 @@ function createWorkbench(profile) {
     keepROs: () => [...workspaces.keys()],
     owns: (sender) => chrome && sender === chrome.webContents,
     manualCall, manualSave,
+    // Ctrl+B pressed inside one of this window's pages: show or hide the Workbench sidebar
+    sidebarKey: (wc) => {
+      if (!allContentViews().some((v) => v.webContents === wc) || mode !== 'manual') return false;
+      handlers['toggle-sidebar']();
+      return true;
+    },
     focus: () => { if (win && !win.isDestroyed()) { if (win.isMinimized()) win.restore(); win.focus(); } },
   };
 }
@@ -1921,7 +1968,12 @@ if (!app.requestSingleInstanceLock()) {
   app.on('web-contents-created', (_e, wc) => {
     // Ctrl+P prints the page (the app's own screen handles it itself, to print the page that's showing)
     wc.on('before-input-event', (ev, input) => {
-      if (appUiContents.has(wc) || !isPrintKey(input)) return;
+      if (appUiContents.has(wc)) return;
+      if (input.type === 'keyDown' && input.control && !input.alt && !input.shift && input.key.toLowerCase() === 'b') {
+        for (const wb of windows.values()) if (wb.sidebarKey?.(wc)) { ev.preventDefault(); return; }
+        return;
+      }
+      if (!isPrintKey(input)) return;
       ev.preventDefault();
       printPage(wc);
     });
