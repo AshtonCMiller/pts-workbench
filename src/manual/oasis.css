@@ -89,3 +89,19 @@ button.o-fsa-num:hover { text-decoration: underline; }
 .o-warn { padding: 8px 0; border-top: 1px solid var(--line); font-weight: 600; font-size: 13px; }
 .o-warn:first-child { border-top: 0; }
 @media print { .o-chips, .o-fsa .ghost { display: none !important; } .o-car { mix-blend-mode: normal; box-shadow: none; } }
+
+/* Software validation codes next to each FSA */
+.o-svc { flex: none; display: flex; align-items: center; gap: 6px; }
+.o-svc:empty { display: none; }
+.o-svc .primary.small, .o-svc .ghost.small { padding: 3px 10px; font-size: 12px; }
+.o-svc-code { font-family: Consolas, ui-monospace, monospace; font-weight: 700; font-size: 13px; letter-spacing: .5px; padding: 3px 8px;
+  border-radius: 5px; background: color-mix(in srgb, #16a34a 14%, transparent); border: 1px solid #16a34a; color: var(--text); cursor: copy; user-select: all; }
+.o-svc-bad { font-size: 12px; font-weight: 700; padding: 3px 9px; border-radius: 999px; background: var(--caut-bg); border: 1px solid var(--caut-line); color: var(--caut-line); cursor: help; }
+.o-svc-err { font-size: 12px; font-weight: 600; color: var(--warn-line); cursor: help; }
+.o-svc-wait { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+.o-svc-wait .spinner { margin: 0; width: 14px; height: 14px; border-width: 2px; }
+.o-svc-ask { font-size: 12px; color: var(--muted); }
+.o-svc .o-odo { width: 110px; }
+.o-svc-note { color: var(--warn-line); font-weight: 700; cursor: help; }
+.upper { text-transform: uppercase; }
+@media print { .o-svc button { display: none !important; } }

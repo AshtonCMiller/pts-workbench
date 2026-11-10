@@ -32,6 +32,7 @@ const CHAT_W = 380;   // the read-only Dealership chat panel on the right
 const DEFAULT_SETTINGS = {
   employeeNumber: '',  // your employee number; the Xtime technician ID is looked up from it
   storeId: '3590',
+  dealerCode: '',      // Warranty Dealer Code (e.g. the dealership's PA code), asked at setup; used for FSA software validation codes
   xtimeEmployeesPath: '/JS/Employees?storeID={STORE}',
   techId: '',          // Xtime's internal technician ID (filled in from the employee number)
   techIdFor: '',       // the employee number techId was looked up for
@@ -61,6 +62,8 @@ const FIXED_SETTINGS = ['ptsUrl', 'ptsTransportUrl', 'oasisUrl', 'xtimeApiPath',
 // Ford transport link codes: 704 = OASIS landing page (workshop manual), 702 = Over-the-Air update
 // dashboard, 701 = Connected Vehicle Data
 const FORD_LINKS = { pts: '704', ota: '702', cvd: '701' };
+// Warranty Dealer Code: letters and numbers only, e.g. USA12345
+const cleanDealerCode = (v) => String(v || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 12);
 const NUMBER_SETTINGS = { pollSeconds: [15, 3600], sidebarWidth: [260, 700], xtimeRefreshMinutes: [20, 600] };
 
 // Ford, Lincoln and Mercury get PTS; anything else gets ProDemand.
@@ -804,6 +807,32 @@ function createWorkbench(profile) {
         try { return await manualService.oasis(ws.vin); } catch (e) { return fail(e); }
       case 'cv':
         try { return await manualService.connectedVehicle(ws.vin); } catch (e) { return fail(e); }
+      case 'slts': // Labor Times tab: Ford's SLTS pages for this vehicle
+        try {
+          const q = payload || {};
+          if (q.op === 'start') return await manualService.sltsStart(ws.vin);
+          return await manualService.sltsRequest({ url: String(q.url || ''), method: q.method === 'POST' ? 'POST' : 'GET',
+            fields: q.fields && typeof q.fields === 'object' ? q.fields : {} });
+        } catch (e) { return fail(e); }
+      case 'svc-list': // which FSAs need a software validation code, and codes already retrieved
+        try {
+          const form = await manualService.svcForm(ws.vin);
+          return { fsas: form.fsas, jv: form.jv, saved: manualService.svcSaved(form.vin), dealerCode: settings.dealerCode || '' };
+        } catch (e) { return fail(e); }
+      case 'svc': {
+        const fsa = String(payload?.fsa || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 12);
+        if (!fsa) return { status: 'error', message: 'No FSA number' };
+        if (!settings.dealerCode) return { status: 'needs-dealer' };
+        try { return await manualService.svc(ws.vin, fsa, settings.dealerCode); } catch (e) { return fail(e); }
+      }
+      case 'set-dealer-code': {
+        const code = cleanDealerCode(payload);
+        if (!code) return false;
+        settings = { ...settings, dealerCode: code };
+        writeJson('settings.json', settings);
+        pushState();
+        return true;
+      }
       case 'copy': try { clipboard.writeText(String(payload || '').slice(0, 500)); } catch {} return true;
       case 'spa':
         try { return await manualService.spaSteps(ws.vin, { file: String(payload?.file || ''), procUid: String(payload?.procUid || '') }); } catch (e) { return fail(e); }
@@ -1745,6 +1774,7 @@ function createWorkbench(profile) {
           clean[k] = Math.min(hi, Math.max(lo, Number(next[k]) || DEFAULT_SETTINGS[k]));
         } else clean[k] = String(next[k]).trim();
       }
+      if (clean.dealerCode !== undefined) clean.dealerCode = cleanDealerCode(clean.dealerCode);
       const xtimeChanged = clean.xtimeUrl && clean.xtimeUrl !== settings.xtimeUrl;
       const syncWas = !!settings.syncEnabled;
       const empChanged = clean.employeeNumber !== undefined && clean.employeeNumber !== settings.employeeNumber;

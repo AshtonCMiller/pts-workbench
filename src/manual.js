@@ -356,6 +356,149 @@ class ManualService {
     return { country, fuelType, capability: json.capabilityData || null, data: json.connectedVehicleData || null, status: res.status };
   }
 
+  // ---- Labor times (Ford SLTS WebView: an ASP.NET page that works by posting its form back to itself).
+  //      The Labor Times tab drives the form; this side only fetches pages inside SLTS for it. ----
+  sltsUrl(path) {
+    let u;
+    try { u = new URL(path, `${PTS}/vdirsnet/SLTSVinWebView/`); } catch { return null; }
+    if (u.origin !== PTS || !/^\/vdirsnet\/sltsvinwebview\//i.test(u.pathname)) return null;
+    return u.href;
+  }
+
+  isSltsPage(html, vin) {
+    return /DropDownList_SearchType/.test(html) && (!vin || html.toUpperCase().includes(vin.toUpperCase()));
+  }
+
+  // Opens SLTS for this VIN. Ford's own menu goes through Generate.aspx, which works out the
+  // vehicle's SLTS model code (e.g. "A8") and moves on to GenerateT.aspx; that code is remembered per VIN.
+  async sltsStart(vin) {
+    const book = await this.book(vin);
+    const p = book.params;
+    const known = this.sltsCodes?.get(book.vin);
+    const query = (code) => new URLSearchParams({ strVin: book.vin, strYear: book.vehicle.year || p.modelYear || '',
+      strModelDesc: book.vehicle.name || '', strGsltsVehCode: code || '', usercountry: p.country || 'USA',
+      isolang: p.isoLang || p.isolang || 'EN-US', masterid: p.vehicleId || '' }).toString();
+    const tries = [];
+    if (known) tries.push(`GenerateT.aspx?${query(known)}`);
+    tries.push(`Generate.aspx?${query('')}`, `Generate.aspx?vin=${encodeURIComponent(book.vin)}`, `GenerateT.aspx?${query('')}`);
+    let last = '';
+    for (const t of tries) {
+      const url = this.sltsUrl(t);
+      let res, html;
+      try {
+        res = await this.fetch(url, { headers: { Accept: 'text/html,*/*' }, referrer: `${PTS}/` });
+        html = await res.text();
+      } catch (e) {
+        if (e.needsLogin) throw e;
+        last = e.message; this.log(`   SLTS: ${t.split('?')[0]} failed: ${e.message}`); continue;
+      }
+      if (this.isSltsPage(html, book.vin)) {
+        const code = (res.url.match(/strGsltsVehCode=([^&]+)/i) || [])[1] || (html.match(/id="hidden_VinInfo"[^>]*value="\d{4}\|([^|"]+)\|/) || [])[1];
+        if (code) { if (!this.sltsCodes) this.sltsCodes = new Map(); this.sltsCodes.set(book.vin, decodeURIComponent(code)); }
+        this.log(`   SLTS opened with ${t.split('?')[0]} (model code ${code || '?'})`);
+        return { html, url: res.url || url };
+      }
+      last = html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200);
+      this.log(`   SLTS: ${t.split('?')[0]} gave something else (${res.url}): ${last}`);
+    }
+    throw new Error(`Couldn't open SLTS for this vehicle${last ? ` (${last.slice(0, 120)})` : ''}`);
+  }
+
+  // One SLTS page: a GET (parts list, print pages) or the form posted back (a search)
+  async sltsRequest({ url, fields, method } = {}) {
+    const href = this.sltsUrl(url);
+    if (!href) throw new Error('Not an SLTS address');
+    const opts = { headers: { Accept: 'text/html,*/*' }, referrer: href };
+    if (method === 'POST') {
+      const body = new URLSearchParams();
+      for (const [k, v] of Object.entries(fields || {})) body.append(k, v == null ? '' : String(v));
+      Object.assign(opts, { method: 'POST', body: body.toString() });
+      opts.headers['Content-Type'] = 'application/x-www-form-urlencoded';
+    }
+    const res = await this.fetch(href, opts);
+    const html = await res.text();
+    this.log(`   ${html.length} characters`);
+    if (/<form[^>]+(login|signin|sso|adfs)/i.test(html) && !/SLTS|Labor/i.test(html)) throw new NeedsLogin();
+    return { html, url: res.url || href };
+  }
+
+  // ---- Software validation codes (SVC) for field service actions: the same requests Ford's
+  //      "FSA Software Verification Form" makes ----
+  // The form page lists the FSAs that need an SVC for this VIN ("**" = some vehicles in the FSA don't)
+  async svcForm(vin) {
+    const book = await this.book(vin);
+    const hit = this.svcForms?.get(book.vin);
+    if (hit && Date.now() - hit.at < 10 * 60 * 1000) return hit;
+    const url = `${PTS}/FSASoftwareVerification?vin=${encodeURIComponent(book.vin)}&vid=${encodeURIComponent(book.params.vehicleId || '')}` +
+      `&modelYear=${encodeURIComponent(book.vehicle.year || book.params.modelYear || '')}`;
+    const html = await this.text(url);
+    const list = (name) => {
+      const m = html.match(new RegExp(`var\\s+${name}\\s*=\\s*\\[([^\\]]*)\\]`));
+      return m ? [...m[1].matchAll(/["']([^"']+)["']/g)].map((x) => x[1].toUpperCase()) : [];
+    };
+    const fsas = [];
+    for (const m of html.matchAll(/<li\b[^>]*class=["'][^"']*custom-dropdown-item[^"']*["'][^>]*>([\s\S]*?)<\/li>/gi)) {
+      const value = (m[0].match(/data-value=["']([^"']*)["']/i)?.[1] || '').trim();
+      const text = m[1].replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+      const num = (value || text).replace(/\*+$/, '').trim().toUpperCase();
+      if (num) fsas.push({ num, some: /\*\*$/.test(value || text) });
+    }
+    const out = { at: Date.now(), vin: book.vin, url, fsas, ids: list('IDS_array'), jv: list('JV_FSA_array') };
+    this.log(`   SVC form: ${fsas.map((f) => f.num + (f.some ? '**' : '')).join(', ') || 'no FSAs need an SVC'}`);
+    if (!this.svcForms) this.svcForms = new Map();
+    this.svcForms.set(book.vin, out);
+    return out;
+  }
+
+  // Codes already retrieved, kept on this computer so they show straight away next time
+  svcSaved(vin) {
+    const all = this.readSvcFile();
+    const out = {};
+    for (const [k, v] of Object.entries(all)) if (k.startsWith(`${vin}|`)) out[k.slice(vin.length + 1)] = v;
+    return out;
+  }
+  readSvcFile() {
+    if (!this.cacheDir) return {};
+    try { return JSON.parse(fs.readFileSync(path.join(this.cacheDir, 'svc.json'), 'utf8')) || {}; } catch { return {}; }
+  }
+  saveSvc(vin, fsa, code) {
+    if (!this.cacheDir) return;
+    const all = this.readSvcFile();
+    const cutoff = Date.now() - 180 * 24 * 3600 * 1000;
+    for (const [k, v] of Object.entries(all)) if (!v || v.at < cutoff) delete all[k];
+    all[`${vin}|${fsa}`] = { code, at: Date.now() };
+    try { fs.mkdirSync(this.cacheDir, { recursive: true }); fs.writeFileSync(path.join(this.cacheDir, 'svc.json'), JSON.stringify(all)); } catch {}
+  }
+
+  // Ask Ford for the SVC: { status: 'ok', code } | { status: 'incomplete', modules } | { status: 'error', message }
+  async svc(vin, fsa, dealerCode) {
+    const book = await this.book(vin);
+    const form = await this.svcForm(vin);
+    fsa = String(fsa || '').toUpperCase().replace(/\*+$/, '');
+    if (form.jv.includes(fsa)) return { status: 'error', message: 'This FSA is checked a different way. Use the form in PTS.', usePts: true, url: form.url };
+    const q = new URLSearchParams({ vin: book.vin, data: fsa, vid: book.params.vehicleId || '', modelYear: book.vehicle.year || book.params.modelYear || '',
+      language: 'EN', dealerCode, idsFlag: form.ids.includes(fsa) ? 'true' : 'false' });
+    const res = await this.fetch(`${PTS}/FSASoftwareVerification/FsaVerificationFunc?${q}`, {
+      headers: { Accept: 'application/json, text/javascript, */*; q=0.01', 'X-Requested-With': 'XMLHttpRequest' } });
+    const text = await res.text();
+    this.log(`   SVC ${fsa}: ${text.replace(/\s+/g, ' ').slice(0, 300)}`);
+    let d;
+    try { d = JSON.parse(text); } catch {
+      if (/<form[^>]+(login|signin|sso|adfs)/i.test(text)) throw new NeedsLogin();
+      return { status: 'error', message: "Ford's answer couldn't be read" };
+    }
+    if (!Array.isArray(d)) return { status: 'error', message: "Ford's answer couldn't be read" };
+    const str = (x) => (x == null ? '' : typeof x === 'string' ? x : JSON.stringify(x));
+    if (d[0] === true || d[0] === 'true') {
+      const code = str(d[4]).trim();
+      if (!code || code === 'null' || code === 'undefined') return { status: 'error', message: 'Ford said the updates are done but sent no code' };
+      this.saveSvc(book.vin, fsa, code);
+      return { status: 'ok', code };
+    }
+    if (d[0] === false || d[0] === 'false') return { status: 'incomplete', modules: str(d[1]), detail: str(d[2]) };
+    return { status: 'error', message: [str(d[1]), str(d[2])].filter((x) => x && x !== 'null').join(' — ') || 'Ford returned an error', code: str(d[3]) };
+  }
+
   // ---- Diagnostics search (Ford's "Enhanced Search": DTCs or words → TSB/GSB/SSM, pinpoint tests,
   //      procedures, PC/ED, wiring, videos). The same two requests Ford's Diagnostics tab makes:
   //   1. /Diagnostics/UnifiedSearch?VIN=… → the vehicle's article numbers and book codes (written into the page)

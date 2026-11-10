@@ -546,3 +546,4 @@ body.side-hidden #subtabs { left: 0; }
 body.chat #subtabs { right: var(--chat); }
 #subtabs .tab { font-size: 12.5px; padding: 4px 8px 6px 11px; }
 #subtabs .tab.on { background: var(--panel); }
+.upper { text-transform: uppercase; }

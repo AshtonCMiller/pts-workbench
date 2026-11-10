@@ -977,6 +977,7 @@ function maybeShowSetup() {
   f.elements.profileName.value = state.profile?.name && state.profile.name !== 'Main' ? state.profile.name : (state.profile?.xtimeName || '');
   f.elements.employeeNumber.value = state.settings.employeeNumber || '';
   f.elements.storeId.value = state.settings.storeId || '';
+  f.elements.dealerCode.value = state.settings.dealerCode || '';
   openModal('modal-setup');
   setTimeout(() => (f.elements.profileName.value ? f.elements.employeeNumber : f.elements.profileName).focus(), 50);
 }
@@ -984,7 +985,7 @@ $('form-setup').onsubmit = (e) => {
   e.preventDefault();
   const d = Object.fromEntries(new FormData(e.target));
   api.send('save-settings', {
-    profileName: d.profileName.trim(), employeeNumber: d.employeeNumber.trim(), storeId: d.storeId.trim(), setupDone: true,
+    profileName: d.profileName.trim(), employeeNumber: d.employeeNumber.trim(), storeId: d.storeId.trim(), dealerCode: (d.dealerCode || '').trim(), setupDone: true,
   });
   closeModal('modal-setup');
 };
