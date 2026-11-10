@@ -1,0 +1,44 @@
+/* Diagnostics tab (Ford's DTC / word search for this vehicle) */
+body.diag { overflow: auto; }
+.d-search { display: flex; gap: 8px; align-items: center; padding: 14px 20px 6px; max-width: 1200px; flex-wrap: wrap; }
+.d-search input[type="search"] { flex: 1; min-width: 260px; font: inherit; font-size: 14px; padding: 9px 12px; border-radius: 8px;
+  border: 1px solid var(--line); background: var(--panel); color: var(--text); }
+.d-search input[type="search"]:focus { outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent); outline-offset: -1px; }
+.d-exact { display: flex; align-items: center; gap: 5px; font-size: 12px; color: var(--muted); white-space: nowrap; cursor: pointer; }
+.d-chips { display: flex; flex-wrap: wrap; gap: 6px; padding: 4px 20px 2px; max-width: 1200px; align-items: center; }
+.d-chips[hidden] { display: none; }
+.d-chips .lbl { font-size: 12px; color: var(--muted); margin-right: 2px; }
+.d-chip { font: inherit; font-size: 12px; font-family: Consolas, ui-monospace, monospace; font-weight: 700; padding: 3px 9px; border-radius: 999px;
+  border: 1px solid var(--line); background: var(--panel); color: var(--text); cursor: pointer; }
+.d-chip:hover { border-color: var(--accent); color: var(--accent); }
+.d-chip small { font-family: inherit; font-weight: 400; color: var(--muted); margin-left: 4px; }
+
+.d-tabs { display: flex; gap: 2px; padding: 10px 20px 0; border-bottom: 1px solid var(--line); max-width: 1200px; overflow-x: auto; }
+.d-tabs[hidden] { display: none; }
+.d-tab { font: inherit; font-size: 13px; background: none; border: 0; border-bottom: 2px solid transparent; padding: 7px 12px 8px; color: var(--muted);
+  cursor: pointer; white-space: nowrap; display: flex; align-items: center; gap: 6px; }
+.d-tab:hover { color: var(--text); }
+.d-tab.on { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+.d-tab .n { font-size: 11px; font-weight: 700; background: var(--hover); color: var(--text); border-radius: 999px; padding: 0 7px; min-width: 20px; text-align: center; }
+.d-tab.empty { opacity: .55; }
+
+#d-body { padding: 12px 20px 60px; max-width: 1200px; }
+.d-dtcinfo { margin: 0 0 12px; display: flex; flex-direction: column; gap: 4px; }
+.d-dtcinfo div { font-size: 13px; }
+.d-dtcinfo b { font-family: Consolas, ui-monospace, monospace; margin-right: 6px; }
+.d-list { display: flex; flex-direction: column; gap: 8px; }
+.d-item { text-align: left; font: inherit; display: block; width: 100%; background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+  padding: 10px 14px; cursor: pointer; color: var(--text); }
+.d-item:hover { border-color: var(--accent); }
+.d-item .t { font-weight: 600; font-size: 13.5px; display: flex; gap: 8px; align-items: baseline; }
+.d-item .t .kind { flex: none; font-size: 10.5px; font-weight: 800; letter-spacing: .4px; padding: 1px 6px; border-radius: 4px; background: var(--hover); color: var(--muted); }
+.d-item .t .kind.tsb { background: #1d4ed8; color: #fff; } .d-item .t .kind.ssm { background: #7c3aed; color: #fff; } .d-item .t .kind.gsb { background: #0f766e; color: #fff; }
+.d-item .t .kind.ppt { background: #b45309; color: #fff; }
+.d-item .desc { color: var(--muted); font-size: 12.5px; margin-top: 4px; line-height: 1.4; }
+.d-item .meta { color: var(--muted); font-size: 11.5px; margin-top: 4px; display: flex; gap: 12px; }
+.d-item .meta .warn { color: #b45309; }
+.d-item .go { margin-left: auto; color: var(--accent); font-size: 12px; font-weight: 600; white-space: nowrap; }
+.d-more { margin-top: 10px; }
+.d-empty { color: var(--muted); padding: 16px 2px; }
+.d-hint { color: var(--muted); font-size: 13px; line-height: 1.5; padding: 10px 2px; max-width: 760px; }
+.d-hint b { color: var(--text); }

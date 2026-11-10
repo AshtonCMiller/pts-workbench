@@ -1,17 +1,21 @@
-# Builds PTS Workbench on Windows and publishes it as a GitHub release whenever you push a
-# new version number in package.json. Pushes that keep the same version just skip the build.
+# Builds PTS Workbench on Windows and publishes it as a GitHub release.
+#
+#   main branch  → a regular release, whenever package.json has a new version number
+#                  (pushes that keep the same version just skip the build). Everyone gets it.
+#   other branch → a BETA release on every push: version like 0.4.1-beta.57, marked "Pre-release"
+#                  on GitHub. Only computers with ⚙ Settings → "Beta updates" turned on install it.
 name: Build and release
 
 on:
   push:
-    branches: [main]
+    branches: ['**']
   workflow_dispatch: # "Run workflow" button on GitHub, for a manual retry
 
 permissions:
   contents: write # create releases and upload the installers
 
 concurrency:
-  group: release
+  group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -20,39 +24,159 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Read version from package.json
+      - name: Work out the version
         id: version
-        shell: bash
-        run: echo "number=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
-
-      - name: Skip if this version is already released
-        id: check
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if gh release view "v${{ steps.version.outputs.number }}" > /dev/null 2>&1; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "::notice::v${{ steps.version.outputs.number }} is already released. Raise the version in package.json to publish a new one."
+          BASE="$(node -p "require('./package.json').version")"
+          if [ "${{ github.ref_name }}" = "main" ]; then
+            echo "number=$BASE" >> "$GITHUB_OUTPUT"
+            echo "beta=false" >> "$GITHUB_OUTPUT"
+            if gh release view "v$BASE" > /dev/null 2>&1; then
+              echo "exists=true" >> "$GITHUB_OUTPUT"
+              echo "::notice::v$BASE is already released. Raise the version in package.json to publish a new one."
+            else
+              echo "exists=false" >> "$GITHUB_OUTPUT"
+            fi
           else
+            # A beta must count as newer than the regular version it's based on:
+            # if v$BASE is already out, the beta is for the next patch (0.4.0 out → 0.4.1-beta.N)
+            if gh release view "v$BASE" > /dev/null 2>&1; then
+              BASE="$(node -p "const [a,b,c]=require('./package.json').version.split('-')[0].split('.').map(Number); [a,b,c+1].join('.')")"
+            fi
+            NUMBER="$BASE-beta.${{ github.run_number }}"
+            echo "number=$NUMBER" >> "$GITHUB_OUTPUT"
+            echo "beta=true" >> "$GITHUB_OUTPUT"
             echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Beta build v$NUMBER from branch ${{ github.ref_name }}"
           fi
 
       - uses: actions/setup-node@v4
-        if: steps.check.outputs.exists == 'false'
+        if: steps.version.outputs.exists == 'false'
         with:
           node-version: 20
 
-      - name: Install
-        if: steps.check.outputs.exists == 'false'
-        run: npm install --no-audit --no-fund
+      # Electron and electron-builder's helper tools are downloaded from GitHub on every build;
+      # keeping them between builds avoids failures when those downloads time out (e.g. HTTP 504)
+      - name: Reuse downloaded build tools
+        if: steps.version.outputs.exists == 'false'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~\AppData\Local\electron\Cache
+            ~\AppData\Local\electron-builder\Cache
+          key: build-tools-${{ runner.os }}-${{ hashFiles('package.json') }}
+          restore-keys: build-tools-${{ runner.os }}-
 
+      - name: Install
+        if: steps.version.outputs.exists == 'false'
+        shell: bash
+        env:
+          # The electron package would download Electron here just to run it locally; the build gets its own copy
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+        run: |
+          for try in 1 2 3; do
+            npm install --no-audit --no-fund && exit 0
+            echo "::warning::Install attempt $try failed (often a download timeout); trying again in 30 s"
+            rm -rf node_modules
+            sleep 30
+          done
+          exit 1
+
+      # ---------- regular release (main) ----------
       - name: Build and publish release v${{ steps.version.outputs.number }}
-        if: steps.check.outputs.exists == 'false'
-        shell: bash # PowerShell (the Windows default) mangles the --config.x=y options
+        if: steps.version.outputs.exists == 'false' && steps.version.outputs.beta == 'false'
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: >
-          npx electron-builder --win nsis portable --publish always
-          --config.publish.owner="${{ github.repository_owner }}"
-          --config.publish.repo="${{ github.event.repository.name }}"
+        # Owner, repository and "publish as a real release, not a draft" all come from package.json.
+        # (Overriding them here on the command line can replace the whole setting and make a draft.)
+        run: |
+          for try in 1 2 3; do
+            # From the 2nd try on, download build tools from a mirror if GitHub isn't serving them
+            if [ "$try" -gt 1 ]; then
+              export ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-binaries/
+              export ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/
+            fi
+            npx electron-builder --win nsis portable --publish always && exit 0
+            echo "::warning::Build attempt $try failed (often a download timeout); trying again in 60 s"
+            sleep 60
+          done
+          exit 1
+
+      # ---------- beta release (any other branch) ----------
+      - name: Set the beta version
+        if: steps.version.outputs.beta == 'true'
+        shell: bash
+        # Only for this build (not committed): the beta version number, and upload into the draft made below
+        run: |
+          node -e "
+            const fs = require('fs');
+            const p = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            p.version = '${{ steps.version.outputs.number }}';
+            p.build.publish.releaseType = 'draft';
+            p.build.publish.channel = 'beta';
+            fs.writeFileSync('package.json', JSON.stringify(p, null, 2));"
+
+      - name: Create the beta release (draft until the installer is uploaded)
+        if: steps.version.outputs.beta == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # (a re-run of a failed build reuses the draft it already made)
+        run: |
+          gh release view "v${{ steps.version.outputs.number }}" > /dev/null 2>&1 && exit 0
+          gh release create "v${{ steps.version.outputs.number }}" --draft --prerelease \
+            --target "${{ github.sha }}" \
+            --title "v${{ steps.version.outputs.number }} (beta)" \
+            --notes "Beta build from branch \`${{ github.ref_name }}\` (${{ github.sha }}). Installed only by computers with **Beta updates** turned on in Settings."
+
+      - name: Build and upload beta v${{ steps.version.outputs.number }}
+        if: steps.version.outputs.beta == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for try in 1 2 3; do
+            # From the 2nd try on, download build tools from a mirror if GitHub isn't serving them
+            if [ "$try" -gt 1 ]; then
+              export ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-binaries/
+              export ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/
+            fi
+            npx electron-builder --win nsis --publish always && exit 0
+            echo "::warning::Build attempt $try failed (often a download timeout); trying again in 60 s"
+            sleep 60
+          done
+          exit 1
+
+      - name: Make sure the beta has both update files
+        if: steps.version.outputs.beta == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # Beta computers read beta.yml; latest.yml is a harmless spare (regular computers never look at pre-releases)
+        run: |
+          cd dist
+          [ -f beta.yml ] || cp latest.yml beta.yml
+          [ -f latest.yml ] || cp beta.yml latest.yml
+          gh release upload "v${{ steps.version.outputs.number }}" beta.yml latest.yml --clobber
+
+      - name: Publish the beta release
+        if: steps.version.outputs.beta == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release edit "v${{ steps.version.outputs.number }}" --draft=false --prerelease
+
+      # A beta that couldn't be built: remove its empty draft so it doesn't pile up (nothing installs drafts)
+      - name: Clean up a failed beta
+        if: failure() && steps.version.outputs.beta == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "v${{ steps.version.outputs.number }}" --json isDraft -q .isDraft 2>/dev/null | grep -q true; then
+            gh release delete "v${{ steps.version.outputs.number }}" --yes
+          fi

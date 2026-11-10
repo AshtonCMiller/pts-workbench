@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: ptsasset:">
+  <title>Diagnostics</title>
+  <link rel="stylesheet" href="viewer.css">
+  <link rel="stylesheet" href="oasis.css">
+  <link rel="stylesheet" href="diag.css">
+</head>
+<body class="oasis diag">
+  <header class="o-head">
+    <div>
+      <div class="o-title">Diagnostics</div>
+      <div class="o-sub" id="d-sub"></div>
+    </div>
+    <div class="o-actions">
+      <button id="btn-cv" class="ghost small" title="Get the DTCs this vehicle last reported over its modem (connected vehicle data)">DTCs from the vehicle</button>
+    </div>
+  </header>
+
+  <form id="d-form" class="d-search" autocomplete="off">
+    <input id="d-q" type="search" spellcheck="false"
+      placeholder="DTC or words — e.g. P0420, U3000:49, B10D7 or “no crank”">
+    <label class="d-exact"><input id="d-exact" type="checkbox"> Exact matches only</label>
+    <button id="d-go" type="submit" class="primary">Search</button>
+  </form>
+  <div id="d-chips" class="d-chips" hidden></div>
+
+  <nav id="d-tabs" class="d-tabs" hidden></nav>
+  <main id="d-body"></main>
+  <div id="o-toast" class="o-toast" hidden></div>
+  <script src="diag.js"></script>
+</body>
+</html>

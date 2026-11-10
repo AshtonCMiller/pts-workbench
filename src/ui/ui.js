@@ -14,6 +14,9 @@ const FLAGS = [
   ['waitingCustomer', 'Waiting on Customer', '#b45309'],
   ['waitingWarranty', 'Waiting on Warranty', '#7c3aed'],
 ];
+// The Workbench shows the vehicle picked in the sidebar
+const inVehicle = (s) => !!s && s.mode === 'manual';
+
 const LINE_STATUS = {
   flagged: { label: 'Flagged', color: '#15803d' },
   done: { label: 'Done in Xtime', color: '#0e7490' },
@@ -24,6 +27,7 @@ let state = null;
 let editingTab = false;   // don't redraw the tab strip while a tab is being renamed
 let editing = false;      // don't redraw lists while hours are being typed
 let resizing = false;
+let lastMsgCount = null;
 const $ = (id) => document.getElementById(id);
 
 function el(tag, props = {}, ...children) {
@@ -75,6 +79,441 @@ function badgesFor(r) {
   }
   for (const [key, label, color] of FLAGS) if (r[key]) wrap.append(badge(label, color));
   return wrap.childElementCount ? wrap : null;
+}
+
+// ---------- the app's own Xtime dashboard ----------
+// Same sections and columns as Xtime's dashboard, from the data the app already reads every poll.
+const DASH_SECTIONS = [
+  [[2], 'I', 'Awaiting Dispatch'], [[3], 'II', 'In Inspection'], [[4, 5], 'III', 'Pending Approval'],
+  [[6], 'IV', 'In Repair'], [[7], 'V', 'Pending Review'],
+];
+const DASH_SKIP = new Set([9]); // PreRO: Xtime's own dashboard doesn't show these
+const dashClosed = new Set();
+function since(v) {
+  if (v == null || v === '') return '';
+  if (typeof v === 'number' && v < 100000) return `${Math.round(v)}d`;
+  const m = String(v).match(/\/Date\((\d+)/);
+  const d = m ? new Date(Number(m[1])) : new Date(v);
+  if (isNaN(d)) return String(v);
+  const mins = (Date.now() - d) / 60000;
+  if (mins < 60) return `${Math.max(0, Math.round(mins))}m`;
+  if (mins < 1440) return `${Math.round(mins / 60)}h`;
+  return `${Math.floor(mins / 1440)}d`;
+}
+function dashDate(v) {
+  if (!v) return '';
+  const m = String(v).match(/\/Date\((\d+)/);
+  const d = m ? new Date(Number(m[1])) : new Date(v);
+  if (isNaN(d)) return String(v);
+  return d.toLocaleDateString([], { month: '2-digit', day: '2-digit', year: '2-digit' });
+}
+// ---------- signing in to Xtime from the dashboard ----------
+// The app fills in Cox's real sign-in page behind the scenes; this is just the form you type into.
+let signinShown = '';
+function renderSignin(s) {
+  const box = $('xsignin');
+  const si = s.xtimeSignin;
+  box.hidden = !si;
+  $('xdash-body').classList.toggle('dim', !!si);
+  if (!si) { signinShown = ''; box.replaceChildren(); return; }
+  // Don't redraw while you're typing in this step (keeps what you've typed)
+  const key = JSON.stringify([si.step, si.error, si.busy, si.factors, si.message, si.buttons, si.slow]);
+  if (key === signinShown && (box.contains(document.activeElement) || si.step === 'loading')) return;
+  signinShown = key;
+  // Starting up / signed in: stays up until the dashboard has data (or Xtime really asks to sign in)
+  if (si.step === 'loading' || si.step === 'starting') {
+    const starting = si.step === 'starting';
+    box.replaceChildren(el('div', { class: 'si-card si-loading' },
+      el('h3', { text: starting ? 'Connecting to Xtime' : 'Signed in' }),
+      el('div', { class: 'si-busy big' }, el('span', { class: 'si-spin' }), starting ? 'Loading in the background…' : 'Loading Inspect view…'),
+      el('p', { class: 'muted small', text: si.slow ? 'This is taking longer than usual.'
+        : starting ? 'Xtime usually signs in by itself. If it needs you, the sign-in box appears here.'
+          : 'Getting your ROs from Xtime. This usually takes a few seconds.' }),
+      si.slow ? el('div', { class: 'si-row' },
+        el('button', { class: 'primary', text: 'Reload Xtime', onclick: () => api.send('reload-xtime') }),
+        el('button', { class: 'ghost', text: 'Use Xtime’s own page', onclick: () => api.send('toggle-dashboard') })) : null));
+    return;
+  }
+  const send = (payload) => api.send('xtime-signin', payload);
+  const err = si.error ? el('div', { class: 'si-err', text: si.error }) : null;
+  const busy = si.busy ? el('div', { class: 'si-busy' }, el('span', { class: 'si-spin' }), 'Signing in…') : null;
+  let body;
+  if (si.step === 'username' || si.step === 'password') {
+    const user = el('input', { id: 'si-user', autocomplete: 'username', value: si.username || '', placeholder: 'Username' });
+    // With a saved login the password box can stay empty: the app uses the saved one (it never comes to the screen)
+    const pass = el('input', { id: 'si-pass', type: 'password', autocomplete: 'current-password',
+      placeholder: si.savedPassword ? '•••••••• saved: just press Sign in' : 'Password' });
+    const remember = el('input', { type: 'checkbox', id: 'si-remember' });
+    if (si.canRemember) remember.checked = true;
+    const form = el('form', { class: 'si-form', onsubmit: (e) => {
+      e.preventDefault();
+      if (!user.value.trim() || (!pass.value && !si.savedPassword)) return;
+      send({ username: user.value.trim(), password: pass.value, remember: remember.checked });
+    } },
+      el('label', {}, 'Username', user), el('label', {}, 'Password', pass),
+      si.canRemember ? el('label', { class: 'check' }, remember, ' Remember on this computer (encrypted with your Windows account)') : null,
+      el('button', { class: 'primary', type: 'submit', ...(si.busy ? { disabled: 'disabled' } : {}), text: 'Sign in' }));
+    body = form;
+    setTimeout(() => { if (!si.busy) (si.username ? (si.savedPassword ? form.querySelector('button.primary') : pass) : user).focus(); }, 0);
+  } else if (si.step === 'code') {
+    const code = el('input', { id: 'si-code', inputmode: 'numeric', autocomplete: 'one-time-code', placeholder: 'Verification code' });
+    body = el('form', { class: 'si-form', onsubmit: (e) => { e.preventDefault(); if (code.value.trim()) send({ code: code.value.trim() }); } },
+      si.message ? el('p', { class: 'muted small', text: si.message }) : null,
+      el('label', {}, 'Code', code),
+      el('button', { class: 'primary', type: 'submit', ...(si.busy ? { disabled: 'disabled' } : {}), text: 'Verify' }));
+    setTimeout(() => code.focus(), 0);
+  } else if (si.step === 'choose') {
+    body = el('div', { class: 'si-form' }, el('p', { class: 'muted small', text: 'Xtime wants to verify it’s you. Where should the code go?' }),
+      ...si.factors.map((f, i) => el('button', { class: 'ghost', text: f, ...(si.busy ? { disabled: 'disabled' } : {}), onclick: () => send({ choose: i }) })));
+  } else {
+    // A step the app doesn't handle itself (user agreement, another session…): show what the page says and its buttons
+    body = el('div', { class: 'si-form' }, el('p', { class: 'small', text: si.message || 'Xtime is asking for something the app can’t show here.' }),
+      el('div', { class: 'si-row' }, ...(si.buttons || []).map((b) => el('button', { class: 'ghost', text: b, onclick: () => send({ press: b }) }))));
+  }
+  box.replaceChildren(el('div', { class: 'si-card' },
+    el('h3', { text: 'Sign in to Xtime' }),
+    el('p', { class: 'muted small', text: 'Your Xtime session has ended. Sign in here, the same as on Xtime’s page.' }),
+    err, busy, body,
+    el('button', { class: 'link-like small', text: 'Use Xtime’s own page instead', onclick: () => api.send('toggle-dashboard') })));
+}
+
+// ---------- an RO's lines, under its row ----------
+const dashOpenROs = new Set();
+const roLines = new Map(); // ro -> { loading, error, lines }
+function toggleLines(ro) {
+  if (dashOpenROs.has(ro)) dashOpenROs.delete(ro);
+  else { dashOpenROs.add(ro); roLines.set(ro, { ...(roLines.get(ro) || {}), loading: true }); api.send('ro-lines', { ro }); }
+  if (state) renderDashboard(state);
+}
+api.onLines?.((data) => {
+  roLines.set(data.ro, data.ok ? { lines: data.lines } : { error: data.error, lines: roLines.get(data.ro)?.lines });
+  if (state && dashOpenROs.has(data.ro)) renderDashboard(state);
+});
+
+// ---------- Dealership chat (Xtime's Dealership tab; customer chats are left out) ----------
+// Messages live only in this screen: never saved, never synced, and nothing is marked read.
+// A message is sent only when you press Send, and only to a conversation that already exists.
+const chat = { list: null, listError: '', listLoading: false, hist: new Map(), channel: null, ro: null, lastAsk: 0,
+  people: null, sending: false, sendError: '', drafts: new Map(), picked: new Map() };
+const chatTime = (t) => {
+  if (t == null || t === '') return null;
+  const d = new Date(typeof t === 'string' && /^\d+$/.test(t) ? Number(t) : t);
+  return Number.isNaN(d.getTime()) ? null : d;
+};
+const chatWhen = (t) => {
+  const d = chatTime(t);
+  if (!d) return '';
+  const today = new Date().toDateString() === d.toDateString();
+  return today ? d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+    : d.toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+};
+// One entry per conversation: the newest message of each channel
+function chatConversations() {
+  const by = new Map();
+  for (const m of chat.list || []) {
+    const k = m.channelId || `ro:${m.ro}`;
+    const cur = by.get(k);
+    if (!cur || (chatTime(m.time)?.getTime() || 0) > (chatTime(cur.time)?.getTime() || 0)) by.set(k, { ...m, unread: m.unread || cur?.unread });
+    else if (m.unread) cur.unread = true;
+  }
+  return [...by.values()].sort((a, b) => (chatTime(b.time)?.getTime() || 0) - (chatTime(a.time)?.getTime() || 0));
+}
+const chatROs = () => new Set(chatConversations().map((c) => c.ro).filter(Boolean));
+function chatAskList() { chat.listLoading = true; chat.lastAsk = Date.now(); api.send('chat-list'); }
+function chatAskHistory(channelId) {
+  chat.hist.set(channelId, { ...(chat.hist.get(channelId) || {}), loading: true });
+  api.send('chat-history', { channelId });
+}
+// Open the panel: everything, or one RO's conversation
+function openChat(ro) {
+  chat.ro = ro || null;
+  chat.channel = null;
+  api.send('chat-toggle', { open: true });
+  chatAskList();
+  if (!chat.people) api.send('chat-roster');
+  renderChat();
+}
+api.onChat?.((d) => {
+  if (d.kind === 'list') {
+    chat.listLoading = false;
+    if (d.ok) { chat.list = d.conversations || []; chat.listError = ''; } else chat.listError = d.error;
+    if (chat.channel) chatAskHistory(chat.channel);
+  } else if (d.kind === 'history') {
+    chat.hist.set(d.channelId, d.ok ? { messages: d.messages || [] } : { error: d.error, messages: chat.hist.get(d.channelId)?.messages });
+  } else if (d.kind === 'read') {
+    // Read receipts went to Xtime: show those messages as read here too
+    const read = new Set(d.ids || []);
+    const clear = (m) => (m.unread && read.has(String(m.id)) ? { ...m, unread: false } : m);
+    if (chat.list) chat.list = chat.list.map((m) => (m.channelId === d.channelId && !m.mine ? { ...m, unread: false } : clear(m)));
+    for (const [k, h] of chat.hist) if (h.messages) chat.hist.set(k, { ...h, messages: h.messages.map(clear) });
+  } else if (d.kind === 'roster') {
+    if (d.ok) chat.people = d.people || [];
+  } else if (d.kind === 'send') {
+    chat.sending = false;
+    chat.sendError = d.ok ? '' : (d.error || "Couldn't send");
+    if (d.ok) { chat.drafts.delete(d.channelId); if (composer.channel === d.channelId) composer.input.value = ''; }
+    composer.update();
+    return;
+  }
+  renderChat();
+  if (state?.mode === 'xtime' && state.settings.xtimeDashboard) renderDashboard(state);
+});
+// Keep it current while it's open
+setInterval(() => { if (state?.chatOpen) chatAskList(); }, 30000);
+
+// Text with @mentions highlighted, the way Xtime shows them
+function withMentions(text, mentions) {
+  const names = [...new Set((mentions || []).filter(Boolean))].sort((x, y) => y.length - x.length);
+  if (!names.length) return [text];
+  const esc = (n) => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return String(text).split(new RegExp(`(@(?:${names.map(esc).join('|')}))`, 'g'))
+    .map((part, i) => (i % 2 ? el('span', { class: 'chat-mention', text: part }) : part)).filter((p) => p !== '');
+}
+function chatMessages(channelId) {
+  const h = chat.hist.get(channelId) || {};
+  if (h.loading && !h.messages) return el('div', { class: 'chat-note', text: 'Loading the conversation…' });
+  if (h.error && !h.messages) return el('div', { class: 'chat-note bad', text: `Couldn't load the conversation: ${h.error}` });
+  const msgs = [...(h.messages || [])].filter((m) => m.text).sort((a, b) => (chatTime(a.time)?.getTime() || 0) - (chatTime(b.time)?.getTime() || 0));
+  if (!msgs.length) return el('div', { class: 'chat-note', text: 'No messages in this conversation yet.' });
+  const out = el('div', { class: 'chat-msgs' },
+    h.error ? el('div', { class: 'chat-note bad', text: `Couldn't refresh: ${h.error}` }) : null,
+    ...msgs.map((m) => el('div', { class: `chat-msg${m.notification ? ' note' : ''}${m.mine ? ' mine' : ''}` },
+      el('div', { class: 'chat-meta' }, el('b', { text: m.sender || (m.notification ? 'Xtime' : '') }), el('span', { text: chatWhen(m.time) })),
+      el('div', { class: 'chat-text' }, ...withMentions(m.text, m.mentions)))));
+  setTimeout(() => { out.scrollTop = out.scrollHeight; }, 0);
+  return out;
+}
+
+// The message box stays put while the rest of the panel redraws, so typing isn't interrupted
+const composer = (() => {
+  const input = el('textarea', { class: 'chat-input', rows: '2', placeholder: 'Message… (@ to mention someone)' });
+  const pop = el('div', { class: 'chat-pop', hidden: 'hidden' });
+  const status = el('div', { class: 'chat-status small' });
+  const sendBtn = el('button', { class: 'primary small', text: 'Send' });
+  const box = el('div', { class: 'chat-compose' }, pop, input, el('div', { class: 'chat-compose-row' }, status, sendBtn));
+  const c = { box, input, channel: null, ro: null, choices: [], active: 0 };
+  const mentionAt = () => {
+    const before = input.value.slice(0, input.selectionStart);
+    const m = /(^|\s)@([A-Za-z][A-Za-z.'-]*(?: [A-Za-z.'-]*)?)$/.exec(before) || /(^|\s)@$/.exec(before);
+    return m ? { start: before.lastIndexOf('@'), q: (m[2] || '').toLowerCase() } : null;
+  };
+  const showPop = () => {
+    const at = mentionAt();
+    const people = chat.people || [];
+    c.choices = at ? people.filter((p) => !at.q || p.name.toLowerCase().split(/\s+/).some((w, i, ws) => ws.slice(i).join(' ').startsWith(at.q))).slice(0, 6) : [];
+    c.active = Math.min(c.active, Math.max(0, c.choices.length - 1));
+    pop.hidden = !c.choices.length;
+    pop.replaceChildren(...c.choices.map((p, i) => el('button', { class: `chat-pick${i === c.active ? ' on' : ''}`, text: p.name,
+      onmousedown: (e) => { e.preventDefault(); pick(p); } })));
+  };
+  const pick = (p) => {
+    const at = mentionAt();
+    if (!at) return;
+    const caret = input.selectionStart;
+    input.value = `${input.value.slice(0, at.start)}@${p.name} ${input.value.slice(caret)}`;
+    const pos = at.start + p.name.length + 2;
+    input.setSelectionRange(pos, pos);
+    chat.picked.set(p.name, p.id);
+    pop.hidden = true; c.choices = [];
+    input.focus();
+  };
+  // "@Brenton Skeeters" → Xtime's mention markup, for names picked from the list
+  const toMarkup = (text) => {
+    let out = text;
+    for (const [name, id] of [...chat.picked].sort((x, y) => y[0].length - x[0].length)) out = out.split(`@${name}`).join(`[${name}](${id})`);
+    return out;
+  };
+  const send = () => {
+    const text = input.value.trim();
+    if (!text || chat.sending || !c.channel) return;
+    chat.sending = true; chat.sendError = '';
+    api.send('chat-send', { channelId: c.channel, ro: c.ro, text: toMarkup(text) });
+    c.update();
+  };
+  input.addEventListener('input', () => { if (c.channel) chat.drafts.set(c.channel, input.value); showPop(); });
+  input.addEventListener('keydown', (e) => {
+    if (c.choices.length && ['ArrowDown', 'ArrowUp', 'Enter', 'Tab', 'Escape'].includes(e.key)) {
+      e.preventDefault();
+      if (e.key === 'ArrowDown') c.active = (c.active + 1) % c.choices.length;
+      else if (e.key === 'ArrowUp') c.active = (c.active - 1 + c.choices.length) % c.choices.length;
+      else if (e.key === 'Escape') { pop.hidden = true; c.choices = []; return; }
+      else { pick(c.choices[c.active]); return; }
+      showPop();
+      return;
+    }
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+  });
+  input.addEventListener('blur', () => setTimeout(() => { pop.hidden = true; }, 150));
+  sendBtn.onclick = send;
+  c.set = (channel, ro) => {
+    if (channel === c.channel) return;
+    c.channel = channel; c.ro = ro;
+    input.value = (channel && chat.drafts.get(channel)) || '';
+    chat.sendError = '';
+    c.update();
+  };
+  c.update = () => {
+    input.disabled = chat.sending || !c.channel;
+    sendBtn.disabled = chat.sending || !c.channel;
+    sendBtn.textContent = chat.sending ? 'Sending…' : 'Send';
+    status.className = `chat-status small${chat.sendError ? ' bad' : ''}`;
+    status.textContent = chat.sendError || (chat.sending ? 'Sending to Xtime…' : 'Enter to send · Shift+Enter for a new line');
+  };
+  c.update();
+  return c;
+})();
+
+function renderChat() {
+  const box = $('chat-panel');
+  if (!box || !state) return;
+  document.body.classList.toggle('chat', !!state.chatOpen);
+  if (!state.chatOpen) return;
+  // In the Workbench, the open vehicle's RO is the one shown
+  const ro = chat.ro || (inVehicle(state) ? state.activeRO : null);
+  const all = chatConversations();
+  const convs = ro ? all.filter((c) => c.ro === String(ro)) : all;
+  if (!chat.channel && ro && convs.length === 1 && convs[0].channelId) { chat.channel = convs[0].channelId; chatAskHistory(chat.channel); }
+  const open = chat.channel ? all.find((c) => c.channelId === chat.channel) || { channelId: chat.channel, ro } : null;
+
+  const head = el('div', { class: 'chat-head' },
+    open || ro ? el('button', { class: 'ghost small', text: '‹ All', title: 'All dealership conversations',
+      onclick: () => { chat.channel = null; chat.ro = null; renderChat(); } }) : null,
+    el('div', { class: 'chat-title' }, open?.ro || ro ? `RO ${open?.ro || ro}` : 'Dealership chat'),
+    el('button', { class: 'icon', text: '↻', title: 'Refresh', onclick: () => { chatAskList(); renderChat(); } }),
+    el('button', { class: 'icon', text: '✕', title: 'Close chat', onclick: () => api.send('chat-toggle', { open: false }) }));
+
+  let body;
+  if (open) {
+    body = el('div', { class: 'chat-conv' },
+      el('div', { class: 'chat-sub muted small', text: [open.vehicle, open.customer, open.tech && `Tech: ${open.tech}`].filter(Boolean).join(' · ') }),
+      chatMessages(open.channelId));
+  } else if (chat.list == null) {
+    body = el('div', { class: `chat-note${chat.listError ? ' bad' : ''}`, text: chat.listError ? `Couldn't load Xtime chat: ${chat.listError}` : 'Loading Xtime chat…' });
+  } else if (!convs.length) {
+    body = el('div', { class: 'chat-note', text: ro ? `No dealership messages on RO ${ro}.` : 'No dealership messages in the last 2 weeks.' });
+  } else {
+    body = el('div', { class: 'chat-list' },
+      chat.listError ? el('div', { class: 'chat-note bad', text: `Couldn't refresh: ${chat.listError}` }) : null,
+      ...convs.map((c) => el('button', { class: `chat-item${c.unread ? ' unread' : ''}`,
+        onclick: () => { chat.channel = c.channelId; if (c.channelId) chatAskHistory(c.channelId); renderChat(); } },
+        el('div', { class: 'chat-meta' }, el('b', { text: c.ro ? `RO ${c.ro}` : 'Conversation' }),
+          c.customer ? el('span', { text: c.customer }) : null, el('span', { class: 'when', text: chatWhen(c.time) })),
+        el('div', { class: 'chat-prev' }, c.sender ? el('b', { text: `${c.sender}: ` }) : null, ...withMentions(c.text || '', c.mentions)))));
+  }
+  // The message box: under an open conversation only (new conversations start on Xtime's page)
+  composer.set(open?.channelId || null, open?.ro || ro || '');
+  const foot = open ? composer.box
+    : el('button', { class: 'link-like small chat-foot', text: ro && !convs.length ? "Start a conversation on Xtime's page" : "Open Xtime's message center",
+      onclick: () => api.send('open-messages') });
+  let main = box.querySelector(':scope > .chat-main');
+  if (!main) { main = el('div', { class: 'chat-main' }); box.replaceChildren(main); }
+  main.replaceChildren(head, body);
+  if (box.lastChild !== foot) { [...box.children].forEach((n) => { if (n !== main) n.remove(); }); box.append(foot); }
+}
+const usd = (n) => (n == null ? '' : n.toLocaleString([], { style: 'currency', currency: 'USD' }));
+function linesTable(r) {
+  const info = roLines.get(r.ro) || {};
+  if (info.loading && !info.lines) return el('div', { class: 'xlines-note' }, 'Loading the lines from Xtime…');
+  if (info.error && !info.lines) return el('div', { class: 'xlines-note bad' }, `Couldn't load the lines: ${info.error}`);
+  // Keep each letter together: the diag first, then the repair lines that run under it
+  const order = [];
+  const groups = new Map();
+  for (const l of info.lines || []) {
+    const k = l.dms || `#${l.id}`;
+    if (!groups.has(k)) { groups.set(k, []); order.push(k); }
+    groups.get(k).push(l);
+  }
+  const lines = order.flatMap((k) => {
+    const g = groups.get(k);
+    const diag = g.filter((l) => l.primary);
+    const rest = g.filter((l) => !l.primary);
+    const under = diag.length > 0 && rest.length > 0;
+    return [...diag.map((l) => ({ ...l, groupHead: under })),
+      ...rest.map((l, i) => ({ ...l, sub: under, lastSub: under && i === rest.length - 1 }))];
+  });
+  if (!lines.length) return el('div', { class: 'xlines-note' }, 'No lines on this RO.');
+  const head = el('tr', {}, ...['Line', 'Concern', 'Approval', 'Done', 'Labor type', 'Hours', 'Labor', 'Parts', 'Total', 'Added by', ''].map((h) => el('th', { text: h })));
+  const rows = lines.map((l) => {
+    const approval = l.approved ? ['ok', 'Approved'] : l.declined ? ['no', 'Declined'] : ['wait', 'Pending'];
+    const done = el('button', { class: `xdone${l.completed ? ' on' : ''}`, text: l.completed ? '✓ Done' : 'Mark done',
+      title: l.completed ? 'Done in Xtime: click to undo' : 'Mark this line done in Xtime',
+      onclick: (e) => {
+        e.stopPropagation();
+        e.target.disabled = true; e.target.textContent = 'Saving…';
+        api.send('ro-line-done', { ro: r.ro, id: l.id, value: !l.completed });
+      } });
+    return el('tr', { class: [l.declined && 'declined', l.groupHead && 'ghead', l.sub && 'gsub', l.lastSub && 'glast'].filter(Boolean).join(' ') },
+      el('td', { class: 'ln' }, l.sub ? el('span', { class: 'xsub', text: '↳ Repair' }) : `${l.dms || ''}${l.primary ? ' · Diag' : ''}`),
+      el('td', { class: 'concern', text: l.concern, title: l.concern }),
+      // Primary lines are the customer's original concerns: approved from the start, so no badge
+      el('td', {}, l.primary ? null : el('span', { class: `xappr ${approval[0]}`, text: approval[1] })),
+      el('td', {}, l.declined ? null : done), // a declined line isn't being done
+      el('td', { text: l.payType }),
+      el('td', { class: 'num', text: l.hours == null ? '' : String(l.hours) }),
+      el('td', { class: 'num', text: usd(l.labor) }),
+      el('td', { class: 'num', text: usd(l.parts) }),
+      el('td', { class: 'num', text: usd(l.total) }),
+      el('td', { text: l.addedBy }),
+      el('td', {}, el('button', { class: 'ghost small', text: 'Edit', title: "Edit this line on the RO's Xtime page",
+        onclick: (e) => { e.stopPropagation(); api.send('open-ro', { ro: r.ro, vin: r.vin, ymm: ymmOf(r), tab: 'xtime' }); } })));
+  });
+  return el('div', { class: 'xlines', onclick: (e) => e.stopPropagation() },
+    info.error ? el('div', { class: 'xlines-note bad' }, `Couldn't update from Xtime: ${info.error}`) : null,
+    el('table', { class: 'xlt' }, el('thead', {}, head), el('tbody', {}, ...rows)));
+}
+
+// Xtime's parts status square (P column): 2 waiting at parts, 3 working, 4 complete
+function partsDot(v) {
+  const t = String(v ?? '').toLowerCase();
+  const k = t === '2' || t.startsWith('wait') ? 'waiting' : t === '3' || t.startsWith('work') ? 'working' : t === '4' || t.startsWith('complete') ? 'complete' : '';
+  return k ? el('span', { class: `pstat ${k}`, title: { waiting: 'Waiting at parts', working: 'Parts is working on it', complete: 'Parts info complete' }[k] }) : null;
+}
+function renderDashboard(s) {
+  const q = ($('xdash-search').value || '').trim().toLowerCase();
+  const rows = (s.myROs || []).filter((r) => !DASH_SKIP.has(r.mode)).filter((r) => !q || [r.ro, r.tag, r.dash?.customer, r.year, r.make, r.model].join(' ').toLowerCase().includes(q));
+  $('xdash-total').textContent = `· ${rows.length} RO${rows.length === 1 ? '' : 's'}${s.lastPoll ? ` · updated ${new Date(s.lastPoll).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}` : ''}`;
+  const known = new Set(DASH_SECTIONS.flatMap(([m]) => m));
+  const sections = [...DASH_SECTIONS, [[], '', 'Other']];
+  const head = el('tr', {}, ...['', 'RO', 'Tag', 'Promised', 'M', 'Q', 'Customer', 'Vehicle', 'Adv', 'MT', 'PT'].map((h) => el('th', { text: h })));
+  const out = sections.map(([modes, num, title]) => {
+    const list = rows.filter((r) => (modes.length ? modes.includes(r.mode) : !known.has(r.mode)));
+    if (!modes.length && !list.length) return null;
+    const key = title;
+    const open = !dashClosed.has(key);
+    const body = list.map((r) => {
+      const d = r.dash || {};
+      const cls = ['xrow', (d.notInStock || r.waitingParts) && 'parts', r.waitingWarranty && 'warranty', r.waitingCustomer && 'customer', d.isNew && 'new'].filter(Boolean).join(' ');
+      const flags = [(r.waitingParts || d.notInStock) && 'Parts not in stock', r.waitingWarranty && 'Waiting warranty', r.waitingCustomer && 'Waiting customer'].filter(Boolean);
+      const expanded = dashOpenROs.has(r.ro);
+      const tr = el('tr', { class: `${cls}${expanded ? ' expanded' : ''}`, title: flags.join(' · ') || "Open the RO's Xtime page in the Workbench",
+        onclick: () => api.send('open-ro', { ro: r.ro, vin: r.vin, ymm: ymmOf(r), tab: 'xtime' }) },
+        el('td', { class: 'p' }, el('button', { class: 'xexp', text: expanded ? '▾' : '▸', title: expanded ? 'Hide the lines' : 'Show the lines',
+          onclick: (e) => { e.stopPropagation(); toggleLines(r.ro); } }), d.waiter ? el('b', { class: 'w', text: 'W', title: 'Customer is waiting in the store' }) : null,
+          chatROs().has(String(r.ro)) ? el('button', { class: 'xchat', text: '💬', title: 'Dealership chat on this RO',
+            onclick: (e) => { e.stopPropagation(); openChat(r.ro); } }) : null,
+          partsDot(d.partsStatus)),
+        el('td', { class: 'ro', text: r.ro }),
+        el('td', { text: r.tag }),
+        el('td', {}, d.express ? el('b', { text: 'E ' }) : null, dashDate(d.promised)),
+        el('td', { text: String(d.media || '') }),
+        el('td', { text: String(d.quote || '') }),
+        el('td', { class: 'cust', text: String(d.customer || '') }),
+        el('td', { class: 'veh', text: ymmOf(r) }),
+        el('td', { class: 'adv', text: String(d.advisorName || d.advisor || ''), title: d.advisor ? `Advisor ${d.advisor}` : '' }),
+        el('td', { text: d.modeTime != null ? since(d.modeTime) : since(d.modeSince) }),
+        el('td', { text: d.partsTime != null ? since(d.partsTime) : since(d.partsSince) }));
+      return expanded ? [tr, el('tr', { class: 'xlines-row' }, el('td', { colspan: '11' },
+        el('div', { class: 'xlines-tools' }, el('button', { class: 'ghost small', text: chatROs().has(String(r.ro)) ? '💬 Chat on this RO' : '💬 Chat',
+          title: "This RO's dealership chat", onclick: (e) => { e.stopPropagation(); openChat(r.ro); } })),
+        linesTable(r)))] : [tr];
+    }).flat();
+    return el('section', { class: `xsec${open ? '' : ' closed'}` },
+      el('h3', { onclick: () => { if (dashClosed.has(key)) dashClosed.delete(key); else dashClosed.add(key); renderDashboard(state); } },
+        el('span', { class: 'tw', text: open ? '▾' : '▸' }), `${num ? `${num} - ` : ''}${title}`, el('span', { class: 'count', text: `(${list.length})` })),
+      open ? (list.length ? el('table', { class: 'xtable' }, el('thead', {}, head.cloneNode(true)), el('tbody', {}, ...body))
+        : el('div', { class: 'muted small xnone', text: 'None' })) : null);
+  }).filter(Boolean);
+  $('xdash-body').replaceChildren(...(rows.length || !q ? out : [el('div', { class: 'empty-note', text: 'No ROs match that.' })]));
 }
 
 function sortROs(list) {
@@ -210,6 +649,15 @@ function linesPanel(ro, info) {
   return wrap;
 }
 
+// Folded line lists, per RO (this computer only)
+const foldedLines = new Set((() => { try { return JSON.parse(localStorage.getItem('foldedLines') || '[]'); } catch { return []; } })());
+function toggleFoldedLines(ro) {
+  ro = String(ro);
+  if (foldedLines.has(ro)) foldedLines.delete(ro); else foldedLines.add(ro);
+  try { localStorage.setItem('foldedLines', JSON.stringify([...foldedLines].slice(-200))); } catch {}
+  render();
+}
+
 function linesSummary(info) {
   if (!info || !info.lines.length) return null;
   return el('div', { class: 'sum' }, `${info.flaggedCount}/${info.lines.length} lines flagged`);
@@ -237,7 +685,7 @@ function compactRow(r, { ws = null } = {}) {
 // ---------- RO cards ----------
 function roCard(r, { inDrawer = false, ws = null } = {}) {
   const info = state.roInfo?.[r.ro];
-  const active = ws && state.activeRO === ws.ro && state.mode === 'manual';
+  const active = ws && state.activeRO === ws.ro && inVehicle(state);
   const card = el('div', { class: 'ro' + (active ? ' sel' : '') },
     el('div', { class: 't' },
       `RO ${r.ro}`, r.tag ? el('span', { class: 'tag', text: `  · Tag ${r.tag}` }) : null,
@@ -278,7 +726,16 @@ function roCard(r, { inDrawer = false, ws = null } = {}) {
       onclick: (e) => { e.stopPropagation(); api.send('close-ro', ws.ro); },
     }));
     if (active) {
-      card.append(linesPanel(r.ro, info));
+      // The lines can be folded away (remembered per RO on this computer)
+      const folded = foldedLines.has(String(r.ro));
+      const hasLines = !!info?.lines?.length;
+      card.append(el('button', {
+        class: `lines-toggle${folded ? ' folded' : ''}`, type: 'button',
+        title: folded ? 'Show this RO\'s lines' : 'Hide this RO\'s lines',
+        onclick: (e) => { e.stopPropagation(); toggleFoldedLines(r.ro); },
+      }, el('span', { class: 'chev', text: folded ? '▸' : '▾' }), 'Lines',
+        hasLines ? el('span', { class: 'muted', text: ` · ${info.flaggedCount}/${info.lines.length} flagged · pays ${fmtH(info.total)}` }) : null));
+      if (!folded) card.append(linesPanel(r.ro, info));
       card.append(el('div', { class: 'card-actions end' }, el('button', {
         class: 'ghost small', text: 'Mark completed', title: 'Move this RO to Completed (and close its tabs)',
         onclick: (e) => { e.stopPropagation(); markCompleted(r.ro, info); },
@@ -372,7 +829,7 @@ function flagCheck(info) {
 function statusCard(item, kind) {
   const info = state.roInfo?.[item.ro];
   const open = expanded.has(item.ro);
-  const sel = state.mode === 'manual' && state.activeRO === item.ro;
+  const sel = inVehicle(state) && state.activeRO === item.ro;
   const card = el('div', { class: 'ro status-card' + (sel ? ' sel' : '') + (open ? ' open' : '') },
     el('div', { class: 't' },
       el('span', { class: 'chev', text: open ? '▾' : '▸' }),
@@ -482,6 +939,26 @@ function renderSync() {
 }
 $('btn-sync-now').onclick = () => api.send('sync-now');
 
+// Turning sync on when the server already has a copy: restore from it, or overwrite it
+let syncChoiceShown = false;
+function renderSyncChoice() {
+  const c = state?.sync?.choice;
+  if (!c) { if (syncChoiceShown) { syncChoiceShown = false; closeModal('modal-sync-choice'); } return; }
+  if (syncChoiceShown) return;
+  syncChoiceShown = true;
+  const n = (k, one, many) => `${c[k]} ${c[k] === 1 ? one : many}`;
+  const when = c.updatedAt ? ` Last changed ${new Date(c.updatedAt).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}.` : '';
+  $('sync-choice-what').textContent = `The server has ${n('ros', 'RO', 'ROs')}, ${n('flags', 'flagged line', 'flagged lines')} and ${n('shifts', 'clock entry', 'clock entries')} for employee ${state.settings.employeeNumber}.${when} What should this computer do?`;
+  document.querySelectorAll('.modal:not([hidden])').forEach((m) => { if (m.id !== 'modal-sync-choice') closeModal(m.id); });
+  openModal('modal-sync-choice');
+}
+const syncChoose = (choice) => { syncChoiceShown = false; closeModal('modal-sync-choice'); api.send('sync-choice', choice); };
+$('btn-sync-restore').onclick = () => syncChoose('restore');
+$('btn-sync-overwrite').onclick = () => {
+  if (confirm("Replace the server's copy with this computer's? Anything that's only on the server (on your other computers) will be deleted.")) syncChoose('overwrite');
+};
+$('btn-sync-cancel').onclick = () => syncChoose('cancel');
+
 // ---------- employee number & first-launch setup ----------
 function employeeText() {
   const st = state?.settings || {};
@@ -500,6 +977,7 @@ function maybeShowSetup() {
   f.elements.profileName.value = state.profile?.name && state.profile.name !== 'Main' ? state.profile.name : (state.profile?.xtimeName || '');
   f.elements.employeeNumber.value = state.settings.employeeNumber || '';
   f.elements.storeId.value = state.settings.storeId || '';
+  f.elements.dealerCode.value = state.settings.dealerCode || '';
   openModal('modal-setup');
   setTimeout(() => (f.elements.profileName.value ? f.elements.employeeNumber : f.elements.profileName).focus(), 50);
 }
@@ -507,7 +985,7 @@ $('form-setup').onsubmit = (e) => {
   e.preventDefault();
   const d = Object.fromEntries(new FormData(e.target));
   api.send('save-settings', {
-    profileName: d.profileName.trim(), employeeNumber: d.employeeNumber.trim(), storeId: d.storeId.trim(), setupDone: true,
+    profileName: d.profileName.trim(), employeeNumber: d.employeeNumber.trim(), storeId: d.storeId.trim(), dealerCode: (d.dealerCode || '').trim(), setupDone: true,
   });
   closeModal('modal-setup');
 };
@@ -535,6 +1013,12 @@ function renderVersion() {
   $('about-update').textContent = updateText(a.update);
   $('btn-check-update').disabled = a.update.state === 'off' || a.update.state === 'checking' || a.update.state === 'downloading';
   $('btn-update-log').hidden = !a.update.logFile;
+  $('app-version').classList.toggle('beta', !!a.beta);
+  $('app-version').title = a.beta ? 'Beta version: new features being tested' : 'Installed version';
+  $('beta-updates').checked = !!a.betaUpdates;
+  $('beta-note').hidden = !(a.beta !== a.betaUpdates);
+  $('beta-note').textContent = a.betaUpdates && !a.beta ? 'The newest beta downloads in the background; restart to install it.'
+    : !a.betaUpdates && a.beta ? 'This computer goes back to the newest regular version with the next update.' : '';
   const btn = $('btn-update');
   const ready = a.update.state === 'ready';
   btn.hidden = !ready && a.update.state !== 'downloading';
@@ -549,6 +1033,7 @@ $('btn-update').onclick = () => {
 };
 $('btn-check-update').onclick = () => api.send('check-update');
 $('btn-update-log').onclick = () => api.send('open-update-log');
+$('beta-updates').onchange = (e) => api.send('set-beta-updates', e.target.checked);
 
 // ---------- top bar ----------
 function renderTimer() {
@@ -596,9 +1081,19 @@ function render() {
   body.classList.toggle('xtime', s.mode === 'xtime');
   body.classList.toggle('manual', s.mode === 'manual');
   body.classList.toggle('drawer-closed', !s.drawerOpen);
+  body.classList.toggle('dash', !!s.settings.xtimeDashboard);
+  $('msg-chip').hidden = !(s.msgCount > 0);
+  $('msg-chip').textContent = `💬 ${s.msgCount || 0}`;
+  if (s.chatOpen && s.msgCount !== lastMsgCount && Date.now() - chat.lastAsk > 3000) chatAskList();
+  lastMsgCount = s.msgCount;
+  $('btn-chat').classList.toggle('on', !!s.chatOpen);
+  renderChat();
+  $('btn-dash').classList.toggle('on', !!s.settings.xtimeDashboard);
+  $('btn-dash').textContent = s.settings.xtimeDashboard ? 'Xtime page' : 'Dashboard';
+  if (s.mode === 'xtime' && s.settings.xtimeDashboard) { renderSignin(s); renderDashboard(s); }
   if (!resizing) document.documentElement.style.setProperty('--side', `${s.settings.sidebarWidth || 380}px`);
 
-  if (s.profile) { $('brand').textContent = `PTS Workbench · ${s.profile.displayName}`; document.title = `PTS Workbench - ${s.profile.displayName}`; }
+  if (s.profile) document.title = `PTS Workbench - ${s.profile.displayName}`; // the window's title bar already says who it is
   $('mode-xtime').classList.toggle('on', s.mode === 'xtime');
   $('mode-manual').classList.toggle('on', s.mode === 'manual');
   $('ws-count').textContent = s.workspaces.length ? String(s.workspaces.length) : '';
@@ -609,6 +1104,7 @@ function render() {
   renderPayChip();
   renderVersion();
   renderSync();
+  renderSyncChoice();
   renderXtimeAlert();
 
   const hidden = new Set(s.hidden || []);
@@ -661,38 +1157,51 @@ function render() {
 
   const ws = s.workspaces.find((w) => w.ro === s.activeRO);
   body.classList.toggle('no-ws', !ws);
+  // The Workbench sidebar can be tucked away while a vehicle is open
+  const sideHidden = !!(ws && s.settings.sidebarHidden);
+  body.classList.toggle('side-hidden', sideHidden);
+  $('btn-side').textContent = sideHidden ? '☰' : '⟨';
+  $('btn-side').title = sideHidden ? 'Show the sidebar (Ctrl+B)' : 'Hide the sidebar (Ctrl+B)';
   if (ws && !editingTab) renderTabs(ws);
 }
 
+// One tab (top row or the Service Manual's row): click to show, double-click to rename, × to close
+function tabEl(ws, t, activeId) {
+  const title = el('span', { text: t.title });
+  const tab = el('div', { class: `tab kind-${t.kind}` + (t.id === activeId ? ' on' : ''), title: 'Double-click to rename' },
+    el('span', { class: 'tab-dot' }),
+    title,
+    el('button', {
+      class: 'close', text: '×', title: t.kind === 'service' ? 'Close the Service Manual and its tabs' : 'Close tab',
+      onclick: (e) => { e.stopPropagation(); api.send('close-tab', { ro: ws.ro, id: t.id }); },
+    }),
+  );
+  tab.addEventListener('click', () => { if (t.id !== activeId) api.send('select-tab', { ro: ws.ro, id: t.id }); });
+  tab.addEventListener('dblclick', () => {
+    const input = el('input', { value: t.title });
+    let finished = false;
+    editingTab = true;
+    const done = (save) => {
+      if (finished) return;
+      finished = true; editingTab = false;
+      if (save) api.send('rename-tab', { ro: ws.ro, id: t.id, title: input.value }); else render();
+    };
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') done(true); if (e.key === 'Escape') done(false); });
+    input.addEventListener('blur', () => done(true));
+    title.replaceWith(input);
+    input.focus(); input.select();
+  });
+  return tab;
+}
+
 function renderTabs(ws) {
-  $('tabs').replaceChildren(...ws.tabs.map((t) => {
-    const title = el('span', { text: t.title });
-    const tab = el('div', { class: `tab kind-${t.kind}` + (t.id === ws.activeTab ? ' on' : ''), title: 'Double-click to rename' },
-      el('span', { class: 'tab-dot' }),
-      title,
-      el('button', {
-        class: 'close', text: '×', title: 'Close tab',
-        onclick: (e) => { e.stopPropagation(); api.send('close-tab', { ro: ws.ro, id: t.id }); },
-      }),
-    );
-    tab.addEventListener('click', () => { if (t.id !== ws.activeTab) api.send('select-tab', { ro: ws.ro, id: t.id }); });
-    tab.addEventListener('dblclick', () => {
-      const input = el('input', { value: t.title });
-      let finished = false;
-      editingTab = true;
-      const done = (save) => {
-        if (finished) return;
-        finished = true; editingTab = false;
-        if (save) api.send('rename-tab', { ro: ws.ro, id: t.id, title: input.value }); else render();
-      };
-      input.addEventListener('keydown', (e) => { if (e.key === 'Enter') done(true); if (e.key === 'Escape') done(false); });
-      input.addEventListener('blur', () => done(true));
-      title.replaceWith(input);
-      input.focus(); input.select();
-    });
-    return tab;
-  }));
-  const active = ws.tabs.find((t) => t.id === ws.activeTab);
+  $('tabs').replaceChildren(...ws.tabs.map((t) => tabEl(ws, t, ws.activeTab)));
+  // Service Manual open: its own row of tabs (OASIS | Diagnostics | Workshop Manual | Labor Times)
+  const top = ws.tabs.find((t) => t.id === ws.activeTab);
+  const showSub = top?.kind === 'service' && !!ws.sub;
+  document.body.classList.toggle('has-sub', showSub);
+  $('subtabs').replaceChildren(...(showSub ? ws.sub.tabs.map((t) => tabEl(ws, t, ws.sub.active)) : []));
+  const active = showSub ? ws.sub.tabs.find((t) => t.id === ws.sub.active) : top;
   $('tab-status').textContent = active?.status || '';
   $('btn-reenter').style.display = ['pts', 'ota', 'cvd', 'prodemand'].includes(active?.kind) ? '' : 'none';
   $('btn-reenter').textContent = active?.kind === 'prodemand' ? 'Re-enter VIN' : 'Reopen vehicle';
@@ -886,6 +1395,10 @@ applyMineCollapsed();
 
 // ---------- top bar buttons ----------
 $('mode-xtime').onclick = () => api.send('set-mode', 'xtime');
+$('btn-dash').onclick = () => api.send('toggle-dashboard');
+$('msg-chip').onclick = () => openChat(inVehicle(state) ? state.activeRO : null);
+$('btn-chat').onclick = () => { if (state?.chatOpen) api.send('chat-toggle', { open: false }); else openChat(null); };
+$('xdash-search').addEventListener('input', () => { if (state) renderDashboard(state); });
 $('mode-manual').onclick = () => api.send('set-mode', 'manual');
 $('btn-refresh').onclick = () => api.send('refresh-ros');
 $('btn-drawer').onclick = () => api.send('toggle-drawer');
@@ -908,8 +1421,8 @@ $('add-tab').onchange = (e) => {
   if (ws && kind) api.send('add-tab', { ro: ws.ro, kind });
 };
 $('btn-copy-vin').onclick = () => { const ws = activeWs(); if (ws) api.send('copy-vin', ws.ro); };
-$('btn-reenter').onclick = () => { const ws = activeWs(); if (ws) api.send('reenter-vin', { ro: ws.ro, id: ws.activeTab }); };
-$('btn-reload-tab').onclick = () => { const ws = activeWs(); if (ws) api.send('reload-tab', { ro: ws.ro, id: ws.activeTab }); };
+$('btn-reenter').onclick = () => { const ws = activeWs(); if (ws) api.send('reenter-vin', { ro: ws.ro, id: ws.viewTab }); };
+$('btn-reload-tab').onclick = () => { const ws = activeWs(); if (ws) api.send('reload-tab', { ro: ws.ro, id: ws.viewTab }); };
 
 // ---------- resizable sidebar ----------
 $('resizer').addEventListener('pointerdown', (e) => {
@@ -939,7 +1452,7 @@ function closeModal(id) { $(id).hidden = true; api.send('set-overlay', false); }
 document.querySelectorAll('[data-close]').forEach((b) => { b.onclick = () => closeModal(b.closest('.modal').id); });
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape' || editing) return;
-  document.querySelectorAll('.modal:not([hidden])').forEach((m) => closeModal(m.id));
+  document.querySelectorAll('.modal:not([hidden])').forEach((m) => { if (m.id === 'modal-sync-choice') syncChoose('cancel'); else closeModal(m.id); });
 });
 
 // Windows (profiles): each is one person, with their own logins, settings and hours
@@ -1072,5 +1585,11 @@ api.onNotice?.((n) => {
   noticeTimer = setTimeout(() => { box.hidden = true; }, n.removeHost ? 15000 : 5000);
 });
 
+$('btn-side').onclick = () => api.send('toggle-sidebar');
+document.addEventListener('keydown', (e) => {
+  if (e.ctrlKey && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'b' && inVehicle(state) && !document.body.classList.contains('no-ws')) {
+    e.preventDefault(); api.send('toggle-sidebar');
+  }
+});
 api.onState((s) => { state = s; render(); renderAddLookup(); maybeShowSetup(); });
 api.send('ui-ready');

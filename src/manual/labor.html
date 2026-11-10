@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:">
+  <title>Labor Times</title>
+  <link rel="stylesheet" href="viewer.css">
+  <link rel="stylesheet" href="oasis.css">
+  <link rel="stylesheet" href="diag.css">
+  <link rel="stylesheet" href="labor.css">
+</head>
+<!-- Labor times from Ford's SLTS for this vehicle, with a tray that adds up the operations picked -->
+<body class="oasis labor">
+  <header class="o-head">
+    <div>
+      <div class="o-title">Labor Times</div>
+      <div class="o-sub" id="l-sub">Ford SLTS</div>
+    </div>
+    <div class="o-actions">
+      <button id="btn-tray" class="ghost small l-tray-btn" title="Show the operations you've added">Selected <b id="tray-count">0</b></button>
+    </div>
+  </header>
+
+  <form id="l-form" class="d-search l-search" autocomplete="off">
+    <select id="l-type" title="Search type"></select>
+    <select id="l-pick" hidden></select>
+    <input id="l-q" type="search" spellcheck="false" hidden>
+    <button id="l-go" type="submit" class="primary">Search</button>
+  </form>
+  <div id="l-quick" class="d-chips"></div>
+
+  <div class="l-wrap">
+    <main id="l-body"></main>
+    <aside id="l-tray" class="l-tray"></aside>
+  </div>
+
+  <div id="l-modal" class="l-modal" hidden>
+    <div class="l-dialog">
+      <div class="l-dialog-head"><b id="l-modal-title"></b><span class="l-grow"></span>
+        <button class="ghost small" id="l-modal-print">Print</button>
+        <button class="ghost small" id="l-modal-close" title="Close">✕</button></div>
+      <div id="l-modal-body"></div>
+    </div>
+  </div>
+
+  <div id="l-print" class="l-print"></div>
+  <div id="o-toast" class="o-toast" hidden></div>
+  <script src="labor.js"></script>
+</body>
+</html>

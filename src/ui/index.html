@@ -8,15 +8,15 @@
 </head>
 <body>
   <header id="topbar">
-    <div class="brand" id="brand">PTS Workbench</div>
     <span id="app-version" class="ver" title="Installed version"></span>
     <nav class="seg" role="tablist">
-      <button id="mode-xtime" role="tab">Xtime</button>
-      <button id="mode-manual" role="tab">Workbench <span id="ws-count" class="count"></span></button>
+      <button id="mode-xtime" role="tab" title="Xtime: your dashboard or Xtime's own page">Xtime</button>
+      <button id="mode-manual" role="tab" title="The vehicles you have open">Workbench <span id="ws-count" class="count"></span></button>
     </nav>
     <div id="timer" class="timer" title="Your shift clock"></div>
     <button id="btn-hours" class="today" title="Your flagged hours this pay period"></button>
     <span id="sync-chip" class="sync-chip" hidden></span>
+    <button id="msg-chip" class="msg-chip" hidden title="Unread Xtime messages: opens the dealership chat"></button>
     <div class="right">
       <span id="xtime-alert" class="xtime-alert" hidden>
         <span id="xtime-alert-text"></span>
@@ -27,8 +27,10 @@
       <button id="btn-unhide" class="primary small-btn" hidden></button>
       <span id="notice" class="notice" hidden></span>
       <span id="xtime-status" class="muted"></span>
+      <button id="btn-chat" class="ghost" title="Xtime dealership chat (read only)">💬 Chat</button>
       <button id="btn-print" class="icon" title="Print this page (Ctrl+P)">🖨</button>
       <button id="btn-refresh" class="icon" title="Refresh my ROs">↻</button>
+      <button id="btn-dash" class="ghost" title="Switch between Xtime's page and the app's own dashboard">Dashboard</button>
       <button id="btn-drawer" class="ghost" title="Show or hide My ROs">My ROs</button>
       <button id="btn-settings" class="icon" title="Settings">⚙</button>
     </div>
@@ -42,6 +44,23 @@
     </div>
     <div id="drawer-list" class="list"></div>
   </aside>
+
+  <!-- Xtime mode: the app's own dashboard (instead of Xtime's page) -->
+  <main id="xdash">
+    <div class="xdash-head">
+      <div class="xdash-title">My dashboard <span id="xdash-total" class="muted small"></span></div>
+      <input id="xdash-search" type="search" placeholder="Find RO, tag, customer…" autocomplete="off">
+      <div class="xdash-legend">
+        <span class="chip parts">Parts not in stock</span><span class="chip warranty">Waiting warranty</span>
+        <span class="chip customer">Waiting customer</span><span class="chip waiter">W Waiter</span>
+      </div>
+    </div>
+    <div id="xsignin" hidden></div>
+    <div id="xdash-body"></div>
+  </main>
+
+  <!-- Xtime's Dealership chat, read only (either mode) -->
+  <aside id="chat-panel"></aside>
 
   <!-- Workbench mode -->
   <aside id="sidebar">
@@ -70,23 +89,32 @@
   </aside>
 
   <div id="tabstrip">
+    <button id="btn-side" class="icon side-btn" title="Hide the sidebar (Ctrl+B)">⟨</button>
     <div id="tabs"></div>
     <select id="add-tab" class="add-select" title="Open another tab for this vehicle">
       <option value="">+ Add tab…</option>
-      <option value="oasisview">OASIS</option>
-      <option value="manual">Workshop manual</option>
-      <option value="wiring">Wiring</option>
+      <option value="xtime">Xtime RO page</option>
       <option value="pts">PTS</option>
+      <option value="service">Service Manual</option>
+      <option value="wiring">Wiring</option>
       <option value="ota">OTA updates</option>
       <option value="cvd">Connected vehicle data</option>
+      <option value="oasis">Ford's OASIS page</option>
       <option value="prodemand">ProDemand</option>
-      <option value="xtime">Xtime RO page</option>
+      <optgroup label="In the Service Manual">
+        <option value="oasisview">OASIS</option>
+        <option value="diag">Diagnostics (DTC search)</option>
+        <option value="manual">Workshop manual</option>
+        <option value="labor">Labor times</option>
+      </optgroup>
     </select>
     <span id="tab-status" class="tab-status"></span>
     <button id="btn-copy-vin" class="ghost small" title="Copy this vehicle's VIN">Copy VIN</button>
     <button id="btn-reenter" class="ghost small" title="Type this vehicle's VIN in again">Re-enter VIN</button>
     <button id="btn-reload-tab" class="icon" title="Reload this tab">↻</button>
   </div>
+  <!-- The Service Manual's own tabs (OASIS | Diagnostics | Workshop Manual | Labor Times) -->
+  <div id="subtabs"></div>
 
   <main id="empty">
     <div class="empty-card">
@@ -107,6 +135,8 @@
           <button type="button" class="ghost small push" id="btn-check-update">Check now</button>
           <button type="button" class="ghost small" id="btn-update-log" hidden>Open update log</button>
         </div>
+        <label class="check beta-check"><input id="beta-updates" type="checkbox"> Beta updates: try new features early on this computer (they may have rough edges)</label>
+        <p class="muted small" id="beta-note" hidden></p>
       </div>
       <div class="profiles-box">
         <div class="profiles-head">Windows</div>
@@ -121,6 +151,8 @@
       <label>Employee number <input name="employeeNumber" inputmode="numeric" autocomplete="off"></label>
       <p class="muted small employee-status" id="employee-status"></p>
       <label>Store ID <input name="storeId" required inputmode="numeric"></label>
+      <label>Warranty Dealer Code (WDC) <input name="dealerCode" placeholder="USA12345" autocomplete="off" maxlength="12" class="upper"></label>
+      <p class="muted small">Used to get software validation codes (SVCs) for recalls. Ask your service manager if you don't know it.</p>
       <label>Xtime start page <input name="xtimeUrl" required></label>
       <label>Xtime data host <input name="xtimeDataHost" required></label>
       <div class="sync-box" id="sync-box">
@@ -137,6 +169,7 @@
         <p class="muted small" id="logins-note">Logins are saved when you sign in to Xtime, PTS or ProDemand in this window, encrypted with your Windows account.</p>
         <div id="logins-list"></div>
         <label class="check"><input name="autoLogin" type="checkbox"> Sign in automatically with a saved login (e.g. when Xtime's session expires)</label>
+        <label class="check"><input name="notifications" type="checkbox"> Windows notifications when an RO is assigned to me, a line is approved, or I get an Xtime message</label>
       </div>
       <label>ProDemand start page <input name="prodemandUrl" required placeholder="https://prodemand.com/"></label>
       <label>Refresh Xtime in the background every (minutes) <input name="xtimeRefreshMinutes" type="number" min="20" max="600" required></label>
@@ -159,12 +192,35 @@
       <label>Your name <input name="profileName" required maxlength="40" autocomplete="off"></label>
       <label>Employee number <input name="employeeNumber" required inputmode="numeric" autocomplete="off"></label>
       <label>Store ID <input name="storeId" required inputmode="numeric"></label>
+      <label>Warranty Dealer Code (WDC) <input name="dealerCode" placeholder="USA12345" autocomplete="off" maxlength="12" class="upper"></label>
+      <p class="muted small">Used to get software validation codes (SVCs) for recalls. Ask your service manager if you don't know it.</p>
       <p class="muted small">Your ROs show up once you've logged in to Xtime.</p>
       <div class="actions">
         <button type="button" class="ghost" id="btn-setup-later">Later</button>
         <button type="submit" class="primary">Save</button>
       </div>
     </form>
+  </div>
+
+  <!-- Turning sync on when the server already has a copy for you -->
+  <div id="modal-sync-choice" class="modal" hidden>
+    <div class="dialog">
+      <h2>Your data is already on the sync server</h2>
+      <p class="small" id="sync-choice-what"></p>
+      <div class="sync-choices">
+        <button type="button" class="sync-opt" id="btn-sync-restore">
+          <b>Restore from the server</b>
+          <span class="muted small">This computer's hours, flags and clock are replaced with the server's copy. Use this on a new or second computer.</span>
+        </button>
+        <button type="button" class="sync-opt danger" id="btn-sync-overwrite">
+          <b>Overwrite the server</b>
+          <span class="muted small">The server's copy is replaced with this computer's. Anything only on the server is deleted, on every computer.</span>
+        </button>
+      </div>
+      <div class="actions">
+        <button type="button" class="ghost" id="btn-sync-cancel">Cancel (leave sync off)</button>
+      </div>
+    </div>
   </div>
 
   <div id="modal-add" class="modal" hidden>

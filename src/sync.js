@@ -195,6 +195,7 @@ class SyncEngine {
     this.running = null;
     this.again = false;
     this.timer = null;
+    this.paused = false; // while you choose between restoring from the server and overwriting it
   }
 
   configured() { return !!this.url; }
@@ -250,7 +251,7 @@ class SyncEngine {
 
   // Called after every tracker save
   noteLocalChange() {
-    if (this.applying || !this.keys() || !this.configured()) return;
+    if (this.applying || this.paused || !this.keys() || !this.configured()) return;
     this.stamp();
     this.persist();
     if (this.state.dirty) { clearTimeout(this.soon); this.soon = setTimeout(() => this.syncNow(), 3000); }
@@ -272,6 +273,64 @@ class SyncEngine {
     this.persist();
   }
 
+  // Turning sync on: is there already a copy on the server for this person? (counts only, for the question
+  // "restore from the server or overwrite it?"). → { exists, flags, shifts, ros, updatedAt } or throws.
+  async peek() {
+    if (!this.configured()) throw new Error('No sync server is set up in this version');
+    if (!String(this.identity().employeeNumber || '').trim()) throw new Error('Enter your employee number first');
+    const keys = deriveKeys(this.identity().storeId, this.identity().employeeNumber);
+    const got = await this.request('GET', `${this.url}/v1/store/${keys.id}`);
+    if (got?.status === 404) return { exists: false };
+    if (!got || got.status !== 200) throw new Error(`server said ${got?.status}`);
+    if (!got.body?.data) return { exists: false };
+    const recs = decrypt(keys.key, got.body.data).records || {};
+    const live = Object.entries(recs).filter(([, r]) => !r.del);
+    const count = (p) => live.filter(([k]) => k.startsWith(p)).length;
+    const newest = Math.max(0, ...live.map(([, r]) => (r.t > 1 ? r.t : 0)));
+    return { exists: live.length > 0, flags: count('f/'), shifts: count('s/'), ros: count('r/'), updatedAt: newest || null };
+  }
+
+  // "Restore": replace this computer's hours, flags and clock with the server's copy
+  async restoreFromServer() {
+    const keys = this.keys();
+    if (!keys) throw new Error('Sync is off');
+    const got = await this.request('GET', `${this.url}/v1/store/${keys.id}`);
+    if (!got || got.status !== 200) throw new Error(`server said ${got?.status}`);
+    const remote = got.body?.data ? (decrypt(keys.key, got.body.data).records || {}) : {};
+    this.applying = true;
+    try {
+      applyRecords(this.tracker.data, remote);
+      const journal = {};
+      let maxT = this.state.maxT || 0;
+      for (const [k, r] of Object.entries(remote)) {
+        journal[k] = r.del ? { t: r.t, d: r.d, del: 1 } : { t: r.t, d: r.d, h: hashOf(r.v) };
+        if (r.t > maxT) maxT = r.t;
+      }
+      this.state = { ...this.state, who: keys.id, version: got.body.version || 0, journal, maxT, joining: false, dirty: false };
+      this.tracker.save();
+    } finally { this.applying = false; }
+    this.persist();
+    return this.syncNow(); // anything restore tidied up (e.g. joined shifts) goes back, and status updates
+  }
+
+  // "Overwrite": this computer's copy replaces the server's (what's only on the server is deleted there)
+  async overwriteServer() {
+    const keys = this.keys();
+    if (!keys) throw new Error('Sync is off');
+    const got = await this.request('GET', `${this.url}/v1/store/${keys.id}`);
+    if (!got || (got.status !== 200 && got.status !== 404)) throw new Error(`server said ${got?.status}`);
+    const remote = got.status === 200 && got.body?.data ? (decrypt(keys.key, got.body.data).records || {}) : {};
+    // Newer than anything on the server, so every local record wins and every server-only record is deleted
+    const top = Math.max(this.now(), this.state.maxT || 0, ...Object.values(remote).map((r) => r.t || 0));
+    this.state = { ...this.state, who: keys.id, version: 0, journal: {}, maxT: top, joining: false, dirty: true };
+    this.stamp();
+    for (const k of Object.keys(remote)) {
+      if (!this.state.journal[k]) this.state.journal[k] = { t: this.stampT(), d: this.state.deviceId, del: 1 };
+    }
+    this.persist();
+    return this.syncNow();
+  }
+
   syncNow() {
     if (this.running) { this.again = true; return this.running; }
     this.running = this.run().finally(() => {
@@ -282,6 +341,7 @@ class SyncEngine {
   }
 
   async run() {
+    if (this.paused) return;
     if (!this.configured()) { this.setStatus({ state: 'unconfigured', message: 'No sync server is set up in this version' }); return; }
     const keys = this.keys();
     if (!keys) {

@@ -2,11 +2,15 @@
 // Each window runs one profile: its own Xtime/PTS login, settings, open vehicles and hidden ROs.
 // The shift clock and the flag sheet are shared by every window, so all flags land in one set of hours.
 // Every page is loaded from Ford/Cox as normal, so access is recorded under that window's own login.
-const { app, BaseWindow, BrowserWindow, WebContentsView, ipcMain, session, shell, safeStorage, clipboard, net, protocol } = require('electron');
+const { app, BaseWindow, BrowserWindow, WebContentsView, ipcMain, session, shell, safeStorage, clipboard, net, protocol, Notification } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
 const XTIME_EXTRACT = fs.readFileSync(path.join(__dirname, 'inject', 'xtime-extract.js'), 'utf8').trim();
+const XTIME_RO = fs.readFileSync(path.join(__dirname, 'inject', 'xtime-ro.js'), 'utf8').trim();
+const XTIME_CHAT = fs.readFileSync(path.join(__dirname, 'inject', 'xtime-chat.js'), 'utf8').trim();
+const COX_SIGNIN = fs.readFileSync(path.join(__dirname, 'inject', 'cox-signin.js'), 'utf8').trim();
+const COX_SIGNIN_HOST = /(^|\.)signin\.coxautoinc\.com$/i;
 const XTIME_DETAILS = fs.readFileSync(path.join(__dirname, 'inject', 'xtime-details.js'), 'utf8').trim();
 const XTIME_VEHICLE = fs.readFileSync(path.join(__dirname, 'inject', 'xtime-vehicle.js'), 'utf8').trim();
 const XTIME_EMPLOYEE = fs.readFileSync(path.join(__dirname, 'inject', 'xtime-employee.js'), 'utf8').trim();
@@ -21,11 +25,14 @@ const SYNC_URL = (() => { try { return require('../package.json').ptsWorkbench?.
 
 const TOP_BAR = 48;
 const TAB_STRIP = 38;
+const SUB_STRIP = 34; // the Service Manual's own tab row
 const DRAWER = 360;
+const CHAT_W = 380;   // the read-only Dealership chat panel on the right
 
 const DEFAULT_SETTINGS = {
   employeeNumber: '',  // your employee number; the Xtime technician ID is looked up from it
   storeId: '3590',
+  dealerCode: '',      // Warranty Dealer Code (e.g. the dealership's PA code), asked at setup; used for FSA software validation codes
   xtimeEmployeesPath: '/JS/Employees?storeID={STORE}',
   techId: '',          // Xtime's internal technician ID (filled in from the employee number)
   techIdFor: '',       // the employee number techId was looked up for
@@ -45,13 +52,18 @@ const DEFAULT_SETTINGS = {
   autoLogin: true,         // press "Sign in" with a saved password when a site asks you to log in
   syncEnabled: false,      // keep flags, hours and the clock in sync across computers (main window's setting)
   sidebarWidth: 380,
+  sidebarHidden: false,
+  xtimeDashboard: false,   // show the app's own Xtime dashboard instead of Xtime's page
+  notifications: true,     // Windows pop-ups: RO assigned, line approved, new Xtime messages
 };
-const BOOLEAN_SETTINGS = ['autoLogin', 'setupDone', 'syncEnabled'];
+const BOOLEAN_SETTINGS = ['autoLogin', 'setupDone', 'syncEnabled', 'xtimeDashboard', 'notifications', 'sidebarHidden'];
 // Not shown in Settings (too technical): always the built-in values, updated with the app
 const FIXED_SETTINGS = ['ptsUrl', 'ptsTransportUrl', 'oasisUrl', 'xtimeApiPath', 'xtimeRoUrl', 'xtimeDetailsPath', 'xtimeEmployeesPath'];
 // Ford transport link codes: 704 = OASIS landing page (workshop manual), 702 = Over-the-Air update
 // dashboard, 701 = Connected Vehicle Data
 const FORD_LINKS = { pts: '704', ota: '702', cvd: '701' };
+// Warranty Dealer Code: letters and numbers only, e.g. USA12345
+const cleanDealerCode = (v) => String(v || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 12);
 const NUMBER_SETTINGS = { pollSeconds: [15, 3600], sidebarWidth: [260, 700], xtimeRefreshMinutes: [20, 600] };
 
 // Ford, Lincoln and Mercury get PTS; anything else gets ProDemand.
@@ -105,6 +117,35 @@ const pushAll = () => { for (const wb of windows.values()) wb.pushState(); };
 // =====================================================================================
 let updater = null;
 const update = { state: 'idle', version: '', percent: 0, message: '', checkedAt: null };
+
+// ---------- beta versions ----------
+// A beta build: version like 0.4.1-beta.12, built from any branch other than main (new features ship there first).
+// "Beta updates" (⚙ Settings → Version & updates) lets one computer install beta builds; turning it off
+// goes back to the newest regular version on the next check.
+const IS_BETA = !app.isPackaged || /-/.test(app.getVersion());
+// No choice saved yet: a beta version keeps getting betas (it was installed on purpose, e.g. by running a beta
+// installer from GitHub); a regular version keeps getting regular versions
+const updatePrefs = { beta: IS_BETA, ...(readJsonAt(userFile('updates.json'), {}) || {}) };
+function applyUpdateChannel() {
+  if (!updater) return;
+  if (updatePrefs.beta) {
+    updater.allowPrerelease = true;
+    updater.channel = 'beta';          // beta.yml: every release (beta or regular) has one
+  } else if (IS_BETA) {
+    updater.allowPrerelease = false;
+    updater.channel = 'latest';        // leaving beta: back to the newest regular version (may be "older")
+  } else {
+    updater.allowPrerelease = false;
+    updater.allowDowngrade = false;
+  }
+}
+function setBetaUpdates(on) {
+  updatePrefs.beta = !!on;
+  writeJsonAt(userFile('updates.json'), updatePrefs);
+  applyUpdateChannel();
+  pushAll();
+  if (updater) updater.checkForUpdates().catch(() => {});
+}
 const setUpdate = (patch) => { Object.assign(update, patch); pushAll(); };
 
 function initUpdater() {
@@ -128,6 +169,7 @@ function initUpdater() {
   updater.logger = { info: log('INFO'), warn: log('WARN'), error: log('ERROR'), debug: () => {} };
   update.logFile = logFile;
   updater.autoDownload = true;
+  applyUpdateChannel();
   updater.autoInstallOnAppQuit = true; // a downloaded update also installs whenever you close the app
   updater.on('checking-for-update', () => setUpdate({ state: 'checking', message: '' }));
   // info.version is the newest version GitHub offered, so a stuck release is easy to spot
@@ -233,6 +275,7 @@ function createWorkbench(profile) {
   // Each window is one person with their own hours. The first window keeps the original files.
   const trackFile = profileFile(profile.id, 'tracking.json');
   const syncStatus = { state: 'off', message: '', lastSync: null };
+  let syncChoice = null; // turning sync on: { flags, shifts, ros, updatedAt } while asking restore or overwrite
   let sync = null;
   const syncOn = () => !!SYNC_URL && !!settings.syncEnabled;
   const tracker = new Tracker({
@@ -257,6 +300,47 @@ function createWorkbench(profile) {
     try { await sync.flush(4000); } catch { /* best effort */ }
   }
   // Closing: record when (for "forgot to clock out"), then send anything not yet synced
+  // ---------- turning sync on ----------
+  // If the server already has a copy for this person, ask: restore this computer from it, or overwrite it?
+  async function beginSync() {
+    sync.paused = true;
+    Object.assign(syncStatus, { state: 'syncing', message: 'Checking the sync server…' }); pushState();
+    let info;
+    try { info = await sync.peek(); } catch (e) {
+      sync.paused = false;
+      settings = { ...settings, syncEnabled: false }; writeJson('settings.json', settings);
+      const msg = String(e?.message || e);
+      Object.assign(syncStatus, { state: 'error', message: /employee/i.test(msg) ? msg
+        : `Sync wasn't turned on: ${/fetch|network|ENOTFOUND|ECONN|ETIMEDOUT|net::/i.test(msg) ? "can't reach the sync server" : msg}. Try again.` });
+      pushState();
+      return;
+    }
+    if (!info.exists) { sync.paused = false; sync.rejoin(); sync.start(); return; } // nothing there yet: upload this computer's copy
+    syncChoice = info;
+    Object.assign(syncStatus, { state: 'ok', message: 'Waiting for your choice' });
+    pushState();
+  }
+  async function chooseSync(choice) {
+    if (!syncChoice) return;
+    syncChoice = null;
+    if (choice === 'cancel') {
+      sync.paused = false;
+      settings = { ...settings, syncEnabled: false }; writeJson('settings.json', settings);
+      Object.assign(syncStatus, { state: 'off', message: '' }); pushState();
+      return;
+    }
+    sync.paused = false;
+    Object.assign(syncStatus, { state: 'syncing', message: '' }); pushState();
+    try {
+      if (choice === 'restore') await sync.restoreFromServer();
+      else await sync.overwriteServer();
+      sync.start();
+    } catch (e) {
+      Object.assign(syncStatus, { state: 'error', message: String(e?.message || e).slice(0, 120) });
+    }
+    pushAll();
+  }
+
   async function closeOut() {
     tracker.appClosed();
     await flushSync();
@@ -266,8 +350,12 @@ function createWorkbench(profile) {
   const sidebarWidth = () => Math.min(700, Math.max(260, Number(settings.sidebarWidth) || 380));
 
   let win, chrome, xtimeView;
-  let mode = 'xtime';           // 'xtime' | 'manual'
+  let mode = 'xtime';           // 'xtime' | 'manual' (the Workbench)
   let drawerOpen = true;
+  let chatOpen = false;          // the app's Dealership chat panel
+  const loggedChatFields = new Set();
+  let loggedXtimeFields = false;
+  let loggedLineFields = false;
   let overlay = false;          // a dialog is open in the app UI; hide web views
   let myROs = [];
   let xtimeStatus = 'Log in to Xtime to load your ROs';
@@ -346,6 +434,8 @@ function createWorkbench(profile) {
         ro: ws.ro, vin: ws.vin, ymm: ws.ymm,
         tabs: ws.tabs.map((t) => ({ kind: t.kind, title: t.title, ...(t.manualState ? { state: t.manualState } : {}) })),
         activeIndex: Math.max(0, ws.tabs.findIndex((t) => t.id === ws.activeTab)),
+        svcIndex: ws.tabs.findIndex((t) => t.id === ws.svcTab),
+        layout: 3,
       })),
     });
   }
@@ -356,10 +446,11 @@ function createWorkbench(profile) {
     if (saved?.xtimeName) xtimeName = String(saved.xtimeName);
     if (!saved?.list) return;
     for (const w of saved.list) {
-      const tabs = (w.tabs?.length ? w.tabs : [{ kind: 'pts', title: 'Manual' }])
+      const tabs = (w.tabs?.length ? w.tabs : [{ kind: 'pts', title: 'PTS' }])
         .map((t) => ({ id: nextTabId++, kind: t.kind, title: t.title, view: null, status: '', manualState: t.state || null }));
-      const ws = { ro: w.ro, vin: w.vin, ymm: w.ymm || '', tabs, activeTab: tabs[w.activeIndex || 0]?.id ?? tabs[0].id };
-      if (!tabs.some((t) => t.kind === 'xtime')) addTab(ws, 'xtime', { activate: false, front: true }); // older saves
+      const ws = { ro: w.ro, vin: w.vin, ymm: w.ymm || '', tabs, activeTab: tabs[w.activeIndex || 0]?.id ?? tabs[0].id,
+        svcTab: w.svcIndex >= 0 ? tabs[w.svcIndex]?.id ?? null : null };
+      if (w.layout !== 3) upgradeTabs(ws, ws.activeTab); // saved before Xtime | PTS | Service Manual
       workspaces.set(w.ro, ws);
     }
     if (saved.activeRO && workspaces.has(saved.activeRO)) activeRO = saved.activeRO;
@@ -376,7 +467,7 @@ function createWorkbench(profile) {
       if (s) roInfo[ro] = s;
     }
     chrome.webContents.send('state', {
-      mode, drawerOpen, settings, xtimeStatus, lastPoll, activeRO,
+      mode, drawerOpen, chatOpen, settings, xtimeStatus, lastPoll, activeRO, xtimeSignin, msgCount,
       myROs, roInfo,
       tracking: tracker?.summary() ?? null,
       period: tracker?.period(periodOffset) ?? null,
@@ -390,17 +481,22 @@ function createWorkbench(profile) {
       xtimeViewingRO,
       logins: readLogins().map((l) => ({ host: l.host, username: l.username })), // never the passwords
       canSavePasswords: canEncrypt(),
-      sync: { ...syncStatus, configured: !!SYNC_URL, enabled: !!settings.syncEnabled, isMain: true },
-      app: { version: app.getVersion(), update: { ...update } },
+      sync: { ...syncStatus, configured: !!SYNC_URL, enabled: !!settings.syncEnabled, isMain: true, choice: syncChoice },
+      app: { version: app.getVersion(), update: { ...update }, beta: IS_BETA, betaUpdates: !!updatePrefs.beta },
       profile: { id: profile.id, name: profile.name, xtimeName, displayName: displayName() },
       profiles: profiles.map((p) => ({
         id: p.id, name: p.name, open: windows.has(p.id), current: p.id === profile.id,
         displayName: windows.get(p.id)?.displayName() || p.name,
       })),
-      workspaces: [...workspaces.values()].map((ws) => ({
-        ro: ws.ro, vin: ws.vin, ymm: ws.ymm, activeTab: ws.activeTab,
-        tabs: ws.tabs.map((t) => ({ id: t.id, kind: t.kind, title: t.title, status: t.status })),
-      })),
+      // Each vehicle's top row of tabs, and the Service Manual's own tabs
+      workspaces: [...workspaces.values()].map((ws) => {
+        const pick = (t) => ({ id: t.id, kind: t.kind, title: t.title, status: t.status });
+        return {
+          ro: ws.ro, vin: ws.vin, ymm: ws.ymm, activeTab: topTab(ws)?.id ?? null, viewTab: currentTab(ws)?.id ?? null,
+          tabs: ws.tabs.filter((t) => !inService(t.kind)).map(pick),
+          sub: serviceTab(ws) ? { active: subTab(ws)?.id ?? null, tabs: ws.tabs.filter((t) => inService(t.kind)).map(pick) } : null,
+        };
+      }),
     });
   }
 
@@ -417,16 +513,19 @@ function createWorkbench(profile) {
     chrome.setBounds({ x: 0, y: 0, width, height });
     let visible = null;
     if (!overlay) {
-      if (mode === 'xtime') {
-        xtimeView.setBounds({ x: 0, y: TOP_BAR, width: Math.max(0, width - (drawerOpen ? DRAWER : 0)), height: Math.max(0, height - TOP_BAR) });
+      if (mode === 'xtime' && settings.xtimeDashboard) {
+        visible = null; // the app's own dashboard is drawn in the app's screen
+      } else if (mode === 'xtime') {
+        xtimeView.setBounds({ x: 0, y: TOP_BAR, width: Math.max(0, width - (chatOpen ? CHAT_W : drawerOpen ? DRAWER : 0)), height: Math.max(0, height - TOP_BAR) });
         visible = xtimeView;
       } else if (activeRO && workspaces.has(activeRO)) {
         const ws = workspaces.get(activeRO);
-        const tab = ws.tabs.find((t) => t.id === ws.activeTab);
-        if (tab) {
+        const tab = currentTab(ws);
+        if (tab && tab.kind !== 'service') {
           ensureView(ws, tab);
-          const side = sidebarWidth();
-          tab.view.setBounds({ x: side, y: TOP_BAR + TAB_STRIP, width: Math.max(0, width - side), height: Math.max(0, height - TOP_BAR - TAB_STRIP) });
+          const side = settings.sidebarHidden ? 0 : sidebarWidth(); // the Workbench sidebar can be tucked away
+          const top = TOP_BAR + TAB_STRIP + (inService(tab.kind) ? SUB_STRIP : 0);
+          tab.view.setBounds({ x: side, y: top, width: Math.max(0, width - side - (chatOpen ? CHAT_W : 0)), height: Math.max(0, height - top) });
           visible = tab.view;
         }
       }
@@ -479,9 +578,11 @@ function createWorkbench(profile) {
   const hostOf = (url) => { try { return new URL(url).hostname; } catch { return ''; } };
 
   function ensureView(ws, tab) {
-    if (tab.view) return;
+    if (tab.view || tab.kind === 'service') return; // Service Manual is only a row of tabs
     if (tab.kind === 'manual') { tab.view = makeManualView(ws, tab); return; }
     if (tab.kind === 'oasisview') { tab.view = makeManualView(ws, tab, 'oasis.html'); return; }
+    if (tab.kind === 'diag') { tab.view = makeManualView(ws, tab, 'diag.html'); return; }
+    if (tab.kind === 'labor') { tab.view = makeManualView(ws, tab, 'labor.html'); return; }
     tab.view = makeWebView();
     const wc = tab.view.webContents;
     if (tab.kind === 'wiring') {
@@ -653,7 +754,40 @@ function createWorkbench(profile) {
     const { ws, tab } = entry;
     const fail = (e) => ({ error: true, needsLogin: !!e.needsLogin, message: e.message || String(e), detail: e.detail || '' });
     switch (name) {
-      case 'init': return { vin: ws.vin, ro: ws.ro, ymm: ws.ymm, state: tab.manualState || null };
+      case 'init': {
+        const open = tab.pendingOpen || null; // a procedure sent here from the Diagnostics tab before this tab existed
+        tab.pendingOpen = null;
+        return { vin: ws.vin, ro: ws.ro, ymm: ws.ymm, state: tab.manualState || null, open };
+      }
+      case 'diag': // Diagnostics tab: Ford's search for DTCs / words on this vehicle
+        try {
+          const q = payload || {};
+          const dtcs = (Array.isArray(q.dtcs) ? q.dtcs : []).map(String).filter((x) => /^[PBUC][0-9A-F]{4,6}(?:[:|][0-9A-Z]{2,12}){0,2}$/i.test(x)).slice(0, 20);
+          const sources = Array.isArray(q.sources) ? q.sources.map(String) : undefined;
+          return await manualService.diagSearch(ws.vin, { text: String(q.text || '').slice(0, 200), dtcs, sources,
+            rows: Math.min(200, Math.max(1, Number(q.rows) || 50)), start: Math.max(0, Number(q.start) || 0), exact: !!q.exact });
+        } catch (e) { return fail(e); }
+      case 'open-diag': { // from the manual's search: search this DTC in the vehicle's Diagnostics tab
+        const query = String(payload || '').slice(0, 200);
+        const dt = ws.tabs.find((t) => t.kind === 'diag') || addTab(ws, 'diag', { activate: false });
+        setActive(ws, dt); mode = 'manual';
+        dt.manualState = { ...(dt.manualState || {}), query };
+        if (dt.view && !dt.view.webContents.isDestroyed() && !dt.view.webContents.isLoading()) dt.view.webContents.send('manual-open', { query });
+        saveWorkspaces(); layout(); pushState();
+        return true;
+      }
+      case 'open-proc': { // Diagnostics tab: show a procedure / pinpoint test in this vehicle's Workshop Manual tab
+        const q = payload || {};
+        const link = { searchNumber: String(q.searchNumber || ''), procUid: String(q.procUid || ''), linkType: 'Procedure',
+          title: String(q.title || '').slice(0, 200), ppt: String(q.ppt || ''), section: 'Diagnostics' };
+        if (!link.searchNumber && !link.procUid) return false;
+        const mt = ws.tabs.find((t) => t.kind === 'manual') || addTab(ws, 'manual', { activate: false });
+        setActive(ws, mt); mode = 'manual';
+        if (mt.view && !mt.view.webContents.isDestroyed() && !mt.view.webContents.isLoading()) mt.view.webContents.send('manual-open', link);
+        else mt.pendingOpen = link;
+        saveWorkspaces(); layout(); pushState();
+        return true;
+      }
       case 'book':
         try {
           const b = await manualService.book(ws.vin);
@@ -673,6 +807,32 @@ function createWorkbench(profile) {
         try { return await manualService.oasis(ws.vin); } catch (e) { return fail(e); }
       case 'cv':
         try { return await manualService.connectedVehicle(ws.vin); } catch (e) { return fail(e); }
+      case 'slts': // Labor Times tab: Ford's SLTS pages for this vehicle
+        try {
+          const q = payload || {};
+          if (q.op === 'start') return await manualService.sltsStart(ws.vin);
+          return await manualService.sltsRequest({ url: String(q.url || ''), method: q.method === 'POST' ? 'POST' : 'GET',
+            fields: q.fields && typeof q.fields === 'object' ? q.fields : {} });
+        } catch (e) { return fail(e); }
+      case 'svc-list': // which FSAs need a software validation code, and codes already retrieved
+        try {
+          const form = await manualService.svcForm(ws.vin);
+          return { fsas: form.fsas, jv: form.jv, saved: manualService.svcSaved(form.vin), dealerCode: settings.dealerCode || '' };
+        } catch (e) { return fail(e); }
+      case 'svc': {
+        const fsa = String(payload?.fsa || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 12);
+        if (!fsa) return { status: 'error', message: 'No FSA number' };
+        if (!settings.dealerCode) return { status: 'needs-dealer' };
+        try { return await manualService.svc(ws.vin, fsa, settings.dealerCode); } catch (e) { return fail(e); }
+      }
+      case 'set-dealer-code': {
+        const code = cleanDealerCode(payload);
+        if (!code) return false;
+        settings = { ...settings, dealerCode: code };
+        writeJson('settings.json', settings);
+        pushState();
+        return true;
+      }
       case 'copy': try { clipboard.writeText(String(payload || '').slice(0, 500)); } catch {} return true;
       case 'spa':
         try { return await manualService.spaSteps(ws.vin, { file: String(payload?.file || ''), procUid: String(payload?.procUid || '') }); } catch (e) { return fail(e); }
@@ -719,12 +879,241 @@ function createWorkbench(profile) {
   }
 
   // ---------- Xtime ----------
-  function findXtimeDataFrame() {
+  // ---------- Windows notifications ----------
+  // RO assigned to you, a line approved (with what Xtime says about parts), and new Xtime messages.
+  // Clicking one opens that RO's Xtime page in the Workbench.
+  function notifyUser(title, body, ro) {
+    if (!settings.notifications || !Notification.isSupported()) return;
+    try {
+      const n = new Notification({ title, body, silent: false });
+      n.on('click', () => {
+        try { if (win.isMinimized()) win.restore(); win.show(); win.focus(); } catch {}
+        if (ro) {
+          const r = myROs.find((x) => x.ro === ro);
+          openWorkspace({ ro, vin: r?.vin || '', ymm: r ? [r.year, r.make, r.model].filter(Boolean).join(' ') : '', tab: 'xtime' });
+          layout(); pushState();
+        } else { mode = 'xtime'; layout(); pushState(); }
+      });
+      n.show();
+    } catch { /* notifications are optional */ }
+  }
+  let knownMine = null;            // ROs on your list at the last read (null until the first read)
+  const approvedSeen = new Map();  // ro -> approved line keys at the last read
+  function partsNote(r) {
+    const d = r?.dash || {};
+    if (d.notInStock) return '⚠ Parts not in stock';
+    if (d.partsStatus) return `Parts: ${d.partsStatus}`;
+    if (r?.waitingParts) return 'Waiting for parts';
+    return 'No parts flagged as out of stock';
+  }
+  function noteAssigned(list) {
+    const now = new Set(list.map((r) => r.ro));
+    if (knownMine) {
+      for (const r of list) {
+        if (knownMine.has(r.ro)) continue;
+        const ymm = [r.year, r.make, r.model].filter(Boolean).join(' ');
+        notifyUser(`RO ${r.ro} assigned to you`, [ymm, r.tag && `Tag ${r.tag}`].filter(Boolean).join(' · ') || 'New RO on your list', r.ro);
+      }
+    }
+    knownMine = now;
+  }
+  function noteApprovals(r, lines) {
+    const key = (l) => l.key || l.dms;
+    const approved = new Set((lines || []).filter((l) => l.approved && !l.primary && !l.declined).map(key));
+    const before = approvedSeen.get(r.ro);
+    approvedSeen.set(r.ro, approved);
+    if (!before) return; // first look at this RO: nothing to compare with
+    const fresh = (lines || []).filter((l) => approved.has(key(l)) && !before.has(key(l)));
+    if (!fresh.length) return;
+    const what = fresh.map((l) => `${l.dms || ''} ${l.complaint || l.service || ''}`.trim()).join('; ').slice(0, 140);
+    notifyUser(`RO ${r.ro}: ${fresh.length === 1 ? 'line approved' : `${fresh.length} lines approved`}`, `${what}\n${partsNote(r)}`, r.ro);
+  }
+  // Xtime's unread-messages counter (top right of Xtime's page)
+  let msgCount = null;
+  async function readMsgCount() {
+    const frame = findXtimeDataFrame();
+    if (!frame) return;
+    let n = null;
+    // Unread Dealership messages, from Xtime's chat (works without Xtime's page)
+    if (chatConfig || findInspectFrame()) {
+      try {
+        const r = await (chatConfig ? frame : findInspectFrame()).executeJavaScript(`${XTIME_CHAT}({"type":"count"}, ${chatCfgArg()})`, true);
+        if (r?.config) keepChatConfig(r.config);
+        if (r?.ok && Number.isFinite(r.count)) n = r.count;
+      } catch {}
+    }
+    // Otherwise the counter on Xtime's page, when it's loaded
+    const page = findInspectFrame();
+    if (n == null && page) {
+      try { n = await page.executeJavaScript(`(() => { const e = document.querySelector('.messages-count'); return e ? Number(e.getAttribute('data-badge')) || 0 : null; })()`, true); } catch {}
+    }
+    if (n == null) return;
+    if (msgCount != null && n > msgCount) notifyUser('New Xtime message', n - msgCount === 1 ? `1 new message · ${n} unread` : `${n - msgCount} new messages · ${n} unread`, null);
+    if (n !== msgCount) { msgCount = n; pushState(); }
+  }
+  const msgTimer = setInterval(readMsgCount, 20000);
+
+  // ---------- signing in to Xtime from the app's own form ----------
+  // When Xtime sends its page to Cox's sign-in, the app shows its own form and fills in Cox's real page.
+  let xtimeSignin = null; // { step, error, factors, message, buttons, username, busy } while signing in
+  function findSigninFrame() {
+    const main = xtimeView?.webContents?.mainFrame;
+    if (!main) return null;
+    return (main.framesInSubtree || []).find((f) => { try { return COX_SIGNIN_HOST.test(new URL(f.url).hostname); } catch { return false; } }) || null;
+  }
+  async function signinRun(action) {
+    const frame = findSigninFrame();
+    if (!frame) return null;
+    try { return await frame.executeJavaScript(`${COX_SIGNIN}(${JSON.stringify(action || { type: 'state' })})`, true); } catch { return null; }
+  }
+  let signinChecking = false;
+  async function checkSignin() {
+    if (signinChecking || !xtimeView || xtimeView.webContents.isDestroyed()) return;
+    signinChecking = true;
+    try {
+      const frame = findSigninFrame();
+      if (!frame) {
+        // Landed on Scheduling soon after signing in: go to Inspect
+        if (autoInspectUntil > Date.now() && onScheduling() && !xtimeView.webContents.isLoading()) switchToInspect();
+        if (xtimeSignin && !['loading', 'starting'].includes(xtimeSignin.step)) { // signed in: make sure Xtime is on Inspect (it lands on Scheduling), then read it again
+          // The dialog stays up ("Loading Inspect…") until the dashboard has data again
+          xtimeSignin = { step: 'loading', since: Date.now(), busy: false, error: '' }; pushState();
+          autoInspectUntil = Date.now() + 90 * 1000;
+          setTimeout(() => ensureInspect(2), 4000);
+        } else if (['loading', 'starting'].includes(xtimeSignin?.step) && !xtimeSignin.slow && Date.now() - xtimeSignin.since > 90 * 1000) {
+          xtimeSignin = { ...xtimeSignin, slow: true }; pushState(); // taking long: offer a reload
+        }
+        return;
+      }
+      const st = await signinRun({ type: 'state' });
+      if (!st?.ok) return;
+      // Xtime's sign-in page often shows for a moment while Xtime signs in by itself (or a saved login is
+      // filled in), then moves on. Typing into it then gets lost, so the form only shows once the page has
+      // stayed put for a few seconds; until then the dialog says it's connecting.
+      const key = `${String(frame.url).split(/[?#]/)[0]}|${st.step}`;
+      if (key !== signinSettle.key || xtimeView.webContents.isLoading()) signinSettle = { key, since: Date.now() };
+      const settled = Date.now() - signinSettle.since >= 4000 || Date.now() - signinActedAt < 60 * 1000;
+      if (!settled) {
+        if (xtimeSignin?.step !== 'starting') { xtimeSignin = { step: 'starting', since: Date.now(), busy: false, error: '' }; pushState(); }
+        return;
+      }
+      let host = '';
+      try { host = new URL(frame.url).hostname; } catch {}
+      const saved = host ? getLogin(host, true) : null;
+      const next = { step: st.step, error: st.error, factors: st.factors, message: st.message, buttons: st.buttons,
+        username: st.username || saved?.username || '', savedPassword: !!(saved && hasSavedPassword(host)), canRemember: canEncrypt(), busy: !!xtimeSignin?.busy, host };
+      if (JSON.stringify(next) !== JSON.stringify(xtimeSignin)) { xtimeSignin = next; pushState(); }
+    } catch { /* checked again shortly */ } finally { signinChecking = false; }
+  }
+  let signinSettle = { key: '', since: 0 };
+  let signinActedAt = 0; // you pressed something in the sign-in form: show its next steps right away
+  const signinTimer = setInterval(checkSignin, 1500);
+  const hasSavedPassword = (host) => { try { return !!getLogin(host)?.password; } catch { return false; } };
+
+  // After signing in, Xtime opens Scheduling; the app's data comes from Inspect, so go there the same way
+  // Scheduling's top-left menu does ("INSPECT": login.<xtime domain>/?pt=svp&view=svp&StoreID=<store>)
+  let autoInspectUntil = Date.now() + 90 * 1000; // also right after the app starts (it may sign in on its own)
+  let lastInspectSwitch = 0;
+  const onScheduling = () => {
+    try {
+      const u = new URL(xtimeView.webContents.getURL());
+      return /(^|\.)xtime\.app\.coxautoinc\.com$/i.test(u.hostname) && (/^\/panama\//i.test(u.pathname) || /^x\d*\./i.test(u.hostname));
+    } catch { return false; }
+  };
+  function switchToInspect() {
+    if (Date.now() - lastInspectSwitch < 20000) return false; // once at a time
+    let domain = 'xtime.app.coxautoinc.com';
+    try { domain = new URL(xtimeView.webContents.getURL()).hostname.replace(/^[^.]+\./, '') || domain; } catch {}
+    lastInspectSwitch = Date.now();
+    xtimeStatus = 'Opening Xtime Inspect…'; pushState();
+    try { xtimeView.webContents.loadURL(`https://login.${domain}/?pt=svp&view=svp&StoreID=${encodeURIComponent(settings.storeId)}`); } catch {}
+    return true;
+  }
+  function ensureInspect(triesLeft) {
+    if (!xtimeView || xtimeView.webContents.isDestroyed()) return;
+    if (findInspectFrame()) { pollXtime(); return; }
+    if (findSigninFrame()) return; // still signing in (e.g. a verification step)
+    if (xtimeView.webContents.isLoading()) { if (triesLeft > 0) setTimeout(() => ensureInspect(triesLeft), 2000); return; }
+    if (!(onScheduling() && switchToInspect())) reloadXtime('Opening Xtime Inspect…');
+    if (triesLeft > 1) setTimeout(() => ensureInspect(triesLeft - 1), 8000);
+  }
+
+  async function waitForStep(steps, ms = 8000) {
+    const end = Date.now() + ms;
+    while (Date.now() < end) {
+      const st = await signinRun({ type: 'state' });
+      if (st?.ok && (steps.includes(st.step) || st.error)) return st;
+      if (!findSigninFrame()) return { ok: true, step: 'done' };
+      await new Promise((r) => setTimeout(r, 300));
+    }
+    return await signinRun({ type: 'state' });
+  }
+
+  // Xtime's Inspect frame inside the full Xtime page (only there while that page is loaded)
+  function findInspectFrame() {
     const main = xtimeView?.webContents?.mainFrame;
     if (!main) return null;
     return main.framesInSubtree.find((f) => {
       try { return new URL(f.url).hostname === settings.xtimeDataHost; } catch { return false; }
     }) || null;
+  }
+  // Where the app's Xtime requests run: the small background page on the Inspect site when it's ready
+  // (no Xtime page needed), otherwise the full Xtime page's Inspect frame
+  function findXtimeDataFrame() {
+    if (liteReady()) return xtimeLite.webContents.mainFrame;
+    return findInspectFrame();
+  }
+
+  // ---------- the small background page ----------
+  // A blank-ish page on Xtime's Inspect site (its robots.txt). It shares the window's Xtime login, so the
+  // same requests Xtime's page makes work from it, without loading or running Xtime's page itself.
+  // The full Xtime page is then only loaded to sign in, to show it, or when asked for.
+  let xtimeLite = null;
+  let liteLoading = false;
+  const liteUrl = () => `https://${settings.xtimeDataHost}/robots.txt`;
+  function liteReady() {
+    try {
+      return !!xtimeLite && !xtimeLite.webContents.isDestroyed() && !liteLoading
+        && new URL(xtimeLite.webContents.getURL()).hostname === settings.xtimeDataHost;
+    } catch { return false; }
+  }
+  function startLite() {
+    if (!xtimeLite) {
+      xtimeLite = new WebContentsView({ webPreferences: { partition: PARTITION, sandbox: true, contextIsolation: true, nodeIntegration: false, backgroundThrottling: false } });
+      hardenWebContents(xtimeLite.webContents);
+      xtimeLite.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+      xtimeLite.webContents.on('did-start-loading', () => { liteLoading = true; });
+      xtimeLite.webContents.on('did-stop-loading', () => { liteLoading = false; });
+    }
+    try { xtimeLite.webContents.loadURL(liteUrl()); } catch {}
+  }
+
+  // Xtime's chat settings (dealer code, your Xtime username), saved from the full page so chat
+  // works without it. Nothing about customers.
+  let chatConfig = readJson('xtime-chat.json', null);
+  function keepChatConfig(c) {
+    if (!c || !c.dealerCode || !c.userName) return;
+    const next = { dealerCode: c.dealerCode, userName: c.userName, env: c.env || '', chatgatewayUrl: c.chatgatewayUrl || '', storeId: c.storeId || settings.storeId };
+    if (JSON.stringify(next) !== JSON.stringify(chatConfig)) { chatConfig = next; writeJson('xtime-chat.json', chatConfig); }
+  }
+  const chatCfgArg = () => JSON.stringify(chatConfig || { storeId: settings.storeId });
+
+  // The full Xtime page: put away (blank) while the app's dashboard is in use and everything works without it
+  let xtimeParked = false;
+  let liteTriedAt = Date.now();
+  function unparkXtime(status) {
+    if (!xtimeParked) return;
+    xtimeParked = false;
+    if (status) { xtimeStatus = status; pushState(); }
+    try { xtimeView.webContents.loadURL(settings.xtimeUrl); } catch {}
+  }
+  function parkCheck() {
+    if (xtimeParked || !settings.xtimeDashboard || xtimeSignin || !liteReady() || !chatConfig) return;
+    if (!findInspectFrame() || xtimeView.webContents.isLoading()) return;      // still signing in / getting to Inspect
+    if (!lastPoll || Date.now() - lastPoll > 3 * 60 * 1000 || xtimeFailures) return; // the background page must be working
+    if (Date.now() - xtimeLoadedAt < 30 * 1000) return;
+    xtimeParked = true;
+    try { xtimeView.webContents.loadURL('about:blank'); } catch {}
   }
 
   let polling = false;
@@ -740,6 +1129,7 @@ function createWorkbench(profile) {
     lastRecovery = Date.now();
     xtimeFailures = 0;
     if (status) { xtimeStatus = status; pushState(); }
+    xtimeParked = false;
     try { xtimeView.webContents.loadURL(settings.xtimeUrl); } catch {}
   }
 
@@ -753,6 +1143,7 @@ function createWorkbench(profile) {
 
   function xtimeFailed(message, expired) {
     xtimeFailures++;
+    if (expired && xtimeParked) { reloadXtime('Xtime session expired — reconnecting…'); return; }
     if ((expired || xtimeFailures >= 2) && Date.now() - lastRecovery > 10 * 60 * 1000) {
       reloadXtime('Xtime session expired — reconnecting…');
       return;
@@ -787,6 +1178,7 @@ function createWorkbench(profile) {
   async function pollXtimeOnce() {
     const frame = findXtimeDataFrame();
     if (!frame) {
+      if (xtimeParked) { unparkXtime('Opening Xtime…'); if (!liteLoading) startLite(); return; }
       if (onLoginPage()) {
         // Xtime has sent the page to its sign-in screen; a saved login fills it in
         xtimeStatus = 'Log in to Xtime to load your ROs';
@@ -801,16 +1193,24 @@ function createWorkbench(profile) {
     }
     await resolveTechId(frame);
     if (!settings.techId) {
+      if (xtimeSignin?.step === 'starting') xtimeSignin = null; // nothing to load until the employee number is set
       xtimeStatus = settings.employeeNumber ? (employeeStatus || 'Looking up your employee number…') : 'Enter your employee number in ⚙ Settings';
       pushState();
       return;
     }
     try {
       const res = await frame.executeJavaScript(
-        `${XTIME_EXTRACT}(${JSON.stringify(settings.techId)}, ${JSON.stringify(settings.xtimeApiPath)})`, true);
+        `${XTIME_EXTRACT}(${JSON.stringify(settings.techId)}, ${JSON.stringify(settings.xtimeApiPath)}, ${JSON.stringify(String(settings.xtimeEmployeesPath || '').replace('{STORE}', encodeURIComponent(settings.storeId)))})`, true);
       if (!res?.ok) { xtimeFailed(res?.error || 'Could not read Xtime', !!res?.expired); return; }
       xtimeFailures = 0;
       myROs = res.mine;
+      if (xtimeSignin?.step === 'loading' || xtimeSignin?.step === 'starting') xtimeSignin = null; // the data is here: close the dialog
+      noteAssigned(myROs);
+      // Xtime's field names (names only, no values), so dashboard columns that don't match can be fixed
+      if (res.fieldNames && !loggedXtimeFields) {
+        loggedXtimeFields = true;
+        try { fs.writeFileSync(userFile('xtime-fields.txt'), `${new Date().toISOString()}\n${res.fieldNames.join('\n')}\n`); } catch {}
+      }
       // Move ROs to Review when they go to Pending Review or close (skip an empty dashboard: likely a glitch)
       if (res.total > 0) tracker.syncStatus(settings.techId, myROs);
       lastPoll = Date.now();
@@ -830,7 +1230,10 @@ function createWorkbench(profile) {
         try {
           const d = await frame.executeJavaScript(
             `${XTIME_DETAILS}(${JSON.stringify(r.ro)}, ${JSON.stringify(settings.xtimeDetailsPath)})`, true);
-          if (d?.ok) tracker.updateLines(r.ro, d.lines, r.other ? '' : [r.year, r.make, r.model].filter(Boolean).join(' '));
+          if (d?.ok) {
+            if (!r.other) noteApprovals(r, d.lines);
+            tracker.updateLines(r.ro, d.lines, r.other ? '' : [r.year, r.make, r.model].filter(Boolean).join(' '));
+          }
           else if (!r.other) failed++; // someone else's RO may have closed; don't count it as a problem
         } catch { failed++; }
       }
@@ -893,35 +1296,99 @@ function createWorkbench(profile) {
   }
 
   // ---------- workspaces ----------
-  const TAB_NAMES = { xtime: 'Xtime', oasisview: 'OASIS', manual: 'Workshop Manual', wiring: 'Wiring', pts: 'PTS', ota: 'OTA Updates', cvd: 'Connected Data', prodemand: 'ProDemand', oasis: 'OASIS' };
+  // A vehicle's tabs: Xtime | PTS | Service Manual (+ any added). "Service Manual" holds its own tabs:
+  // OASIS | Diagnostics | Workshop Manual | Labor Times (the app's own pages).
+  const SVC_KINDS = new Set(['oasisview', 'diag', 'manual', 'labor']);
+  const SVC_DEFAULTS = ['oasisview', 'diag', 'manual', 'labor'];
+  const inService = (kind) => SVC_KINDS.has(kind);
+  const serviceTab = (ws) => ws.tabs.find((t) => t.kind === 'service') || null;
+  // The vehicle's chosen tab in the top row
+  function topTab(ws) {
+    return ws.tabs.find((t) => t.id === ws.activeTab && !inService(t.kind)) || ws.tabs.find((t) => !inService(t.kind)) || null;
+  }
+  // The Service Manual's chosen tab
+  function subTab(ws) {
+    return ws.tabs.find((t) => t.id === ws.svcTab && inService(t.kind)) || ws.tabs.find((t) => inService(t.kind)) || null;
+  }
+  // The page showing for this vehicle
+  function currentTab(ws) {
+    const top = topTab(ws);
+    return top?.kind === 'service' ? subTab(ws) : top;
+  }
+  function ensureService(ws) {
+    let svc = serviceTab(ws);
+    if (svc) return svc;
+    svc = { id: nextTabId++, kind: 'service', title: 'Service Manual', view: null, status: '' };
+    // after Xtime and PTS
+    const after = Math.max(...['xtime', 'pts'].map((k) => ws.tabs.map((t) => t.kind).lastIndexOf(k)));
+    ws.tabs.splice(after + 1, 0, svc);
+    return svc;
+  }
+  function setActive(ws, tab) {
+    if (inService(tab.kind)) { ws.svcTab = tab.id; ws.activeTab = ensureService(ws).id; }
+    else ws.activeTab = tab.id;
+  }
+  // A new vehicle: Xtime | PTS | Service Manual (OASIS | Diagnostics | Workshop Manual | Labor Times);
+  // anything else: Xtime | ProDemand
+  function addDefaultTabs(ws) {
+    addTab(ws, 'xtime', { activate: false });
+    if (isFordVehicle(ws.vin, ws.ymm)) {
+      addTab(ws, 'pts', { activate: false });
+      SVC_DEFAULTS.forEach((k, i) => addTab(ws, k, { activate: i === 0 })); // opens on Service Manual › OASIS
+    } else {
+      addTab(ws, 'prodemand');
+    }
+  }
+  // Saved before this layout: Xtime and PTS first, the app's pages gathered into Service Manual, the rest after
+  function upgradeTabs(ws, wasActive) {
+    ws.tabs = ws.tabs.filter((t) => t.kind !== 'service');
+    if (!ws.tabs.some((t) => t.kind === 'xtime')) addTab(ws, 'xtime', { activate: false, front: true });
+    if (isFordVehicle(ws.vin, ws.ymm)) {
+      if (!ws.tabs.some((t) => t.kind === 'pts')) addTab(ws, 'pts', { activate: false });
+      for (const k of SVC_DEFAULTS) if (!ws.tabs.some((t) => t.kind === k)) addTab(ws, k, { activate: false });
+    }
+    const first = ['xtime', 'pts'].map((k) => ws.tabs.find((t) => t.kind === k)).filter(Boolean);
+    const svc = [...SVC_DEFAULTS.map((k) => ws.tabs.find((t) => t.kind === k)).filter(Boolean), ...ws.tabs.filter((t) => inService(t.kind) && !SVC_DEFAULTS.includes(t.kind))];
+    const rest = ws.tabs.filter((t) => !first.includes(t) && !svc.includes(t));
+    const unique = (list) => list.filter((t, i) => list.indexOf(t) === i);
+    ws.tabs = unique([...first, ...svc, ...rest]);
+    if (svc.length) ensureService(ws);
+    const was = ws.tabs.find((t) => t.id === wasActive);
+    if (was) setActive(ws, was); else ws.activeTab = topTab(ws)?.id ?? null;
+  }
+
+  const TAB_NAMES = { service: 'Service Manual', labor: 'Labor Times', diag: 'Diagnostics', xtime: 'Xtime', oasisview: 'OASIS', manual: 'Workshop Manual', wiring: 'Wiring', pts: 'PTS', ota: 'OTA Updates', cvd: 'Connected Data', prodemand: 'ProDemand', oasis: 'OASIS' };
   function addTab(ws, kind, { activate = true, front = false } = {}) {
     const n = ws.tabs.filter((t) => t.kind === kind).length;
     const base = TAB_NAMES[kind] || 'Manual';
     const tab = { id: nextTabId++, kind, title: n ? `${base} ${n + 1}` : base, view: null, status: '' };
     if (front) ws.tabs.unshift(tab); else ws.tabs.push(tab);
-    if (activate) ws.activeTab = tab.id;
+    if (inService(kind)) ensureService(ws);
+    if (activate) setActive(ws, tab);
     return tab;
   }
 
-  function openWorkspace({ ro, vin, ymm }) {
+  function openWorkspace({ ro, vin, ymm, tab }) {
     ro = String(ro).trim();
     vin = String(vin).trim().toUpperCase();
     if (!ro || vin.length !== 17) return;
     let ws = workspaces.get(ro);
     if (!ws) {
-      // First tab: the RO in Xtime; then PTS for a Ford/Lincoln/Mercury, ProDemand for anything else
-      ws = { ro, vin, ymm: ymm || '', tabs: [], activeTab: null };
+      ws = { ro, vin, ymm: ymm || '', tabs: [], activeTab: null, svcTab: null };
       workspaces.set(ro, ws);
-      addTab(ws, 'xtime', { activate: false });
-      if (isFordVehicle(vin, ymm)) { addTab(ws, 'pts'); addTab(ws, 'manual', { activate: false }); } // Xtime | PTS | Workshop Manual
-      else addTab(ws, 'prodemand');
+      addDefaultTabs(ws);
     } else if (ws.vin !== vin) {
       ws.vin = vin; // VIN corrected in Xtime: re-enter it in open manual tabs
       for (const t of ws.tabs) if (FORD_LINKS[t.kind] && t.view) reopenFordTab(ws, t);
       for (const t of ws.tabs) {
         if (t.kind === 'manual') t.manualState = null; // the open procedures were for the old VIN
-        if ((t.kind === 'manual' || t.kind === 'wiring' || t.kind === 'oasisview') && t.view) destroyTab(t); // reopen for the right vehicle
+        if (t.kind === 'diag') t.manualState = null;
+        if ((t.kind === 'manual' || t.kind === 'wiring' || t.kind === 'oasisview' || t.kind === 'diag') && t.view) destroyTab(t); // reopen for the right vehicle
       }
+    }
+    if (tab) { // e.g. from the dashboard: show the RO's Xtime page
+      const t = ws.tabs.find((x) => x.kind === tab) || (tab === 'xtime' ? addTab(ws, 'xtime', { activate: false }) : null);
+      if (t) setActive(ws, t);
     }
     activeRO = ro;
     mode = 'manual';
@@ -930,15 +1397,169 @@ function createWorkbench(profile) {
     pushState();
   }
 
+  // Messages you've read in the app (Xtime message ids only, no text): shown as read right away,
+  // even before Xtime's own lists catch up. Kept 60 days.
+  const READ_KEEP = 60 * 24 * 60 * 60 * 1000;
+  const readCache = new Map(Object.entries(readJson('chat-read.json', {}) || {}).filter(([, t]) => Date.now() - t < READ_KEEP));
+  const markLocal = (list) => (list || []).map((m) => (m.unread && readCache.has(String(m.id)) ? { ...m, unread: false } : m));
+  const readBusy = new Map(); // channelId -> when a read receipt was last sent
+  // Opening a conversation marks it read, like Xtime does. Xtime is asked which of your messages there are still
+  // unread (it knows best), so this runs on every open (at most every 15 s per conversation).
+  // chat-read.log: what happened (counts and ids only, no message text), for checking it works.
+  const readLog = (line) => {
+    try {
+      const f = userFile('chat-read.log');
+      try { if (fs.statSync(f).size > 256 * 1024) fs.renameSync(f, f + '.old'); } catch {}
+      fs.appendFileSync(f, `${new Date().toISOString()} ${line}\n`);
+    } catch { /* best effort */ }
+  };
+  async function sendReadReceipts(channelId, messages) {
+    if (!channelId) return;
+    if (Date.now() - (readBusy.get(channelId) || 0) < 15 * 1000) return; // already done just now
+    readBusy.set(channelId, Date.now());
+    const frame = findXtimeDataFrame();
+    if (!frame || !chatConfig) { readLog(`${channelId} skipped: ${!frame ? 'Xtime not loaded' : 'chat settings not known yet'}`); return; }
+    let r = null;
+    try { r = await frame.executeJavaScript(`${XTIME_CHAT}(${JSON.stringify({ type: 'read', channelId })}, ${chatCfgArg()})`, true); } catch (e) { r = { ok: false, error: e.message }; }
+    const shownUnread = (messages || []).filter((m) => m.unread && !m.mine).length;
+    readLog(`${channelId} unread here ${shownUnread} · Xtime said unread ${r?.tried ?? (r?.ids || []).length} ${r?.shape || ''} · ${r?.ok ? 'receipts sent' + (r.ids?.length ? ` for ${r.ids.join(',')}` : ' (none needed)') : `FAILED: ${r?.error || 'no answer'}`}`);
+    if (!r?.ok) { readBusy.delete(channelId); return; }                 // try again next time it's opened
+    const now = Date.now();
+    // Everything others sent in this conversation counts as read here now
+    for (const id of [...(r.ids || []), ...(messages || []).filter((m) => !m.mine).map((m) => m.id)]) if (id) readCache.set(String(id), now);
+    for (const [id, t] of readCache) if (now - t > READ_KEEP) readCache.delete(id);
+    writeJson('chat-read.json', Object.fromEntries(readCache));
+    if (chrome && !chrome.webContents.isDestroyed()) chrome.webContents.send('chat', { kind: 'read', channelId, ids: [...readCache.keys()] });
+    setTimeout(readMsgCount, 3000); // the unread counter catches up
+  }
+
+  async function chatRun(action, kind) {
+    const reply = (r) => { if (chrome && !chrome.webContents.isDestroyed()) chrome.webContents.send('chat', { kind, channelId: action.channelId, ...r }); };
+    // Chat settings come from Xtime's full page the first time; after that the background page is enough
+    const frame = chatConfig ? findXtimeDataFrame() : (findInspectFrame() || findXtimeDataFrame());
+    if (!frame) return reply({ ok: false, error: 'Xtime is still loading' });
+    try {
+      const r = await frame.executeJavaScript(`${XTIME_CHAT}(${JSON.stringify(action)}, ${chatCfgArg()})`, true);
+      if (r?.config) keepChatConfig(r.config);
+      if (r?.needPage) unparkXtime(); // e.g. the first time: load Xtime's page once to learn its chat settings
+      if (r?.fieldNames?.length && !loggedChatFields.has(kind)) { // field names only, for mapping; no message text
+        loggedChatFields.add(kind);
+        try { fs[loggedChatFields.size === 1 ? 'writeFileSync' : 'appendFileSync'](userFile('xtime-chat-fields.txt'), `${new Date().toISOString()} ${kind}\n${r.fieldNames.join('\n')}\n`); } catch {}
+      }
+      if (!r?.ok) return reply({ ok: false, error: r?.error || 'Could not read Xtime chat' });
+      if (kind === 'list') reply({ ok: true, conversations: markLocal(r.conversations) });
+      else if (kind === 'history') {
+        reply({ ok: true, messages: markLocal(r.messages) });
+        sendReadReceipts(action.channelId, markLocal(r.messages)); // you've opened it: mark it read, like Xtime does
+      }
+      else if (kind === 'roster') reply({ ok: true, people: r.people });
+      else reply({ ok: true });
+    } catch (e) { reply({ ok: false, error: e.message || String(e) }); }
+  }
+
   // Shared (tracker) changes refresh every window; window-only changes refresh just this one.
   const handlers = {
     'ui-ready': () => pushState(),
     'set-mode': (m) => { mode = m === 'manual' ? 'manual' : 'xtime'; layout(); pushState(); },
+    // The messages counter: Xtime's chat is on Xtime's own page for now
+    'open-messages': () => {
+      mode = 'xtime';
+      if (settings.xtimeDashboard) { settings = { ...settings, xtimeDashboard: false }; writeJson('settings.json', settings); }
+      unparkXtime('Opening Xtime…');
+      chatOpen = false;
+      layout(); pushState();
+    },
+    // The app's own read-only Dealership chat (Xtime's chat gateway, read through the Inspect page).
+    // Messages are shown and forgotten: never saved to a file, never synced, nothing is sent or marked read.
+    'chat-toggle': ({ open } = {}) => { chatOpen = open == null ? !chatOpen : !!open; layout(); pushState(); },
+    // your messages from the last 2 weeks, plus everything (about 4 months back) on ROs assigned to you
+    'chat-list': async () => chatRun({ type: 'list', days: 14, roDays: 120, ros: [...new Set([...myROs.map((r) => r.ro), ...workspaces.keys()])] }, 'list'),
+    'chat-history': async ({ channelId } = {}) => { if (channelId) chatRun({ type: 'history', channelId: String(channelId) }, 'history'); },
+    'chat-roster': async () => chatRun({ type: 'roster' }, 'roster'),
+    // Sends only what you typed, only when you press Send, to a conversation that already exists
+    'chat-send': async ({ channelId, ro, text } = {}) => {
+      text = String(text || '').slice(0, 2000);
+      if (!channelId || !text.trim()) return;
+      await chatRun({ type: 'send', channelId: String(channelId), ro: String(ro || ''), text }, 'send');
+      setTimeout(() => chatRun({ type: 'history', channelId: String(channelId) }, 'history'), 1500);
+    },
+    // The dashboard's expanded RO: its lines, and the Done button
+    'ro-lines': async ({ ro } = {}) => {
+      ro = String(ro || '');
+      const reply = (r) => { if (chrome && !chrome.webContents.isDestroyed()) chrome.webContents.send('ro-lines', { ro, ...r }); };
+      const frame = findXtimeDataFrame();
+      if (!frame) return reply({ ok: false, error: 'Xtime is still loading' });
+      try {
+        const r = await frame.executeJavaScript(`${XTIME_RO}(${JSON.stringify(settings.storeId)}, ${JSON.stringify(ro)}, {"type":"get"})`, true);
+        if (r?.fieldNames && !loggedLineFields) {
+          loggedLineFields = true;
+          try { fs.writeFileSync(userFile('xtime-line-fields.txt'), `${new Date().toISOString()}\n${r.fieldNames.join('\n')}\n`); } catch {}
+        }
+        reply(r?.ok ? { ok: true, lines: r.lines } : { ok: false, error: r?.error || 'Could not read Xtime' });
+      } catch (e) { reply({ ok: false, error: e.message || String(e) }); }
+    },
+    'ro-line-done': async ({ ro, id, value } = {}) => {
+      const frame = findXtimeDataFrame();
+      if (!frame || id == null) return;
+      try {
+        const r = await frame.executeJavaScript(
+          `${XTIME_RO}(${JSON.stringify(settings.storeId)}, ${JSON.stringify(String(ro))}, ${JSON.stringify({ type: 'done', id, value: !!value })})`, true);
+        if (!r?.ok) notice(`Couldn't update the line in Xtime: ${r?.error || 'error'}`);
+      } catch (e) { notice(`Couldn't update the line in Xtime: ${e.message || e}`); }
+      handlers['ro-lines']({ ro });
+    },
+    // The app's "Sign in to Xtime" form: username and password (both steps), a code, a choice, or a page button
+    'xtime-signin': async ({ username, password, remember, code, choose, press } = {}) => {
+      if (!xtimeSignin || xtimeSignin.busy || xtimeSignin.step === 'starting' || xtimeSignin.step === 'loading') return;
+      signinActedAt = Date.now();
+      xtimeSignin = { ...xtimeSignin, busy: true, error: '' }; pushState();
+      let res = null;
+      try {
+        if (password != null) {
+          // Left blank with a saved login: use the saved password (it never goes to the screen)
+          if (!password && xtimeSignin?.host) {
+            const saved = getLogin(xtimeSignin.host);
+            if (saved?.password && (!username || !saved.username || saved.username.toLowerCase() === String(username).toLowerCase())) {
+              password = saved.password; username = username || saved.username; remember = false;
+            }
+          }
+          if (!password) { res = { ok: false, error: 'Enter your password' }; return; }
+          let st = await signinRun({ type: 'state' });
+          if (st?.step === 'username') {
+            res = await signinRun({ type: 'username', value: String(username || '') });
+            if (res?.ok !== false) st = await waitForStep(['password', 'code', 'choose', 'other']);
+          }
+          if (st?.step === 'password' && !st.error) {
+            res = await signinRun({ type: 'password', value: String(password) });
+            if (remember && res?.ok !== false && xtimeSignin?.host) saveLogin(xtimeSignin.host, String(username || st.username || ''), String(password));
+            await waitForStep(['code', 'choose', 'eula', 'duplicate', 'other'], 6000);
+          } else if (st?.error) res = st;
+        } else if (code != null) {
+          res = await signinRun({ type: 'code', value: String(code).replace(/\s+/g, '') });
+          await waitForStep(['other', 'eula', 'duplicate'], 6000);
+        } else if (choose != null) {
+          res = await signinRun({ type: 'choose', index: Number(choose) });
+          await waitForStep(['code'], 6000);
+        } else if (press) {
+          res = await signinRun({ type: 'press', text: String(press) });
+        }
+      } finally {
+        if (xtimeSignin) xtimeSignin = { ...xtimeSignin, busy: false, error: res?.ok === false ? res.error : (res?.error || '') };
+        await checkSignin();
+        pushState();
+      }
+    },
+    'toggle-dashboard': () => {
+      settings = { ...settings, xtimeDashboard: !settings.xtimeDashboard };
+      writeJson('settings.json', settings);
+      if (!settings.xtimeDashboard) unparkXtime('Opening Xtime…');
+      layout(); pushState();
+    },
     'toggle-drawer': () => { drawerOpen = !drawerOpen; layout(); pushState(); },
     'set-overlay': (on) => { overlay = !!on; layout(); },
     // ↻: refresh the list; if Xtime has been failing, start the Xtime page fresh instead
     'refresh-ros': () => {
-      if (xtimeFailures > 0 || (!findXtimeDataFrame() && !onLoginPage())) reloadXtime('Reloading Xtime…');
+      if (xtimeFailures > 0 || (!findXtimeDataFrame() && !onLoginPage())) { reloadXtime('Reloading Xtime…'); startLite(); }
       else pollXtime();
     },
     // Review / Completed
@@ -1041,6 +1662,11 @@ function createWorkbench(profile) {
       if (!lookup || lookup.ro !== ro) lookup = { ro, status: 'ok', message: '' };
       pushAll();
     },
+    'toggle-sidebar': (hide) => {
+      settings = { ...settings, sidebarHidden: hide == null ? !settings.sidebarHidden : !!hide };
+      writeJson('settings.json', settings);
+      layout(); pushState();
+    },
     'set-sidebar': (w) => {
       settings.sidebarWidth = Math.round(Number(w) || 380);
       layout();
@@ -1059,14 +1685,22 @@ function createWorkbench(profile) {
       const ws = workspaces.get(ro);
       if (!ws) return;
       // "+ Manual" while looking at a PTS tab copies that tab: same vehicle, same page, same scroll.
-      const src = ws.tabs.find((t) => t.id === ws.activeTab);
+      const src = currentTab(ws);
       let snapshot = null;
-      const KINDS = ['oasisview', 'manual', 'wiring', 'pts', 'ota', 'cvd', 'prodemand', 'oasis', 'xtime'];
+      const KINDS = ['service', 'labor', 'diag', 'oasisview', 'manual', 'wiring', 'pts', 'ota', 'cvd', 'prodemand', 'oasis', 'xtime'];
       kind = KINDS.includes(kind) ? kind : 'pts';
       if (kind === 'pts' && src?.kind === 'pts' && src.view && !src.view.webContents.isDestroyed()) {
         try { snapshot = await snapshotFrames(src.view.webContents); } catch { snapshot = null; }
       }
+      if (kind === 'service') { // Service Manual with its standard tabs (only one per vehicle)
+        for (const k of SVC_DEFAULTS) if (!ws.tabs.some((t) => t.kind === k)) addTab(ws, k, { activate: false });
+        setActive(ws, subTab(ws) || ws.tabs.find((t) => inService(t.kind)));
+        mode = 'manual';
+        saveWorkspaces(); layout(); pushState();
+        return;
+      }
       const tab = addTab(ws, kind);
+      mode = 'manual';
       if (snapshot) {
         tab.cloneSnapshot = snapshot;
         tab.title = `${src.title} copy`.slice(0, 40);
@@ -1075,8 +1709,9 @@ function createWorkbench(profile) {
     },
     'select-tab': ({ ro, id }) => {
       const ws = workspaces.get(ro);
-      if (!ws?.tabs.some((t) => t.id === id)) return;
-      ws.activeTab = id;
+      const t = ws?.tabs.find((x) => x.id === id);
+      if (!t) return;
+      setActive(ws, t);
       saveWorkspaces(); layout(); pushState();
     },
     'close-tab': ({ ro, id }) => {
@@ -1084,10 +1719,19 @@ function createWorkbench(profile) {
       if (!ws) return;
       const i = ws.tabs.findIndex((t) => t.id === id);
       if (i < 0) return;
-      destroyTab(ws.tabs[i]);
-      ws.tabs.splice(i, 1);
+      const closing = ws.tabs[i];
+      // Closing Service Manual closes its tabs too; closing its last tab closes Service Manual
+      const gone = closing.kind === 'service' ? ws.tabs.filter((t) => t === closing || inService(t.kind)) : [closing];
+      if (inService(closing.kind) && ws.tabs.filter((t) => inService(t.kind)).length === 1) gone.push(serviceTab(ws));
+      const topBefore = ws.tabs.slice(0, ws.tabs.indexOf(gone.find((t) => t && !inService(t.kind)) || closing)).filter((t) => !inService(t.kind) && !gone.includes(t)).pop();
+      for (const t of gone) if (t) destroyTab(t);
+      ws.tabs = ws.tabs.filter((t) => !gone.includes(t));
       if (!ws.tabs.length) { handlers['close-ro'](ro); return; }
-      if (ws.activeTab === id) ws.activeTab = ws.tabs[Math.max(0, i - 1)].id;
+      if (inService(closing.kind) && ws.svcTab === id) {
+        const before = ws.tabs.slice(0, i).filter((t) => inService(t.kind)).pop();
+        ws.svcTab = (before || ws.tabs.find((t) => inService(t.kind)))?.id ?? null;
+      }
+      if (!ws.tabs.some((t) => t.id === ws.activeTab)) ws.activeTab = (topBefore || ws.tabs.find((t) => !inService(t.kind)))?.id ?? null;
       saveWorkspaces(); layout(); pushState();
     },
     'rename-tab': ({ ro, id, title }) => {
@@ -1130,6 +1774,7 @@ function createWorkbench(profile) {
           clean[k] = Math.min(hi, Math.max(lo, Number(next[k]) || DEFAULT_SETTINGS[k]));
         } else clean[k] = String(next[k]).trim();
       }
+      if (clean.dealerCode !== undefined) clean.dealerCode = cleanDealerCode(clean.dealerCode);
       const xtimeChanged = clean.xtimeUrl && clean.xtimeUrl !== settings.xtimeUrl;
       const syncWas = !!settings.syncEnabled;
       const empChanged = clean.employeeNumber !== undefined && clean.employeeNumber !== settings.employeeNumber;
@@ -1140,7 +1785,7 @@ function createWorkbench(profile) {
       settings = { ...settings, ...clean };
       writeJson('settings.json', settings);
       if (sync) {
-        if (settings.syncEnabled && !syncWas) { syncFlushed = false; sync.rejoin(); sync.start(); } // turned on: join fresh
+        if (settings.syncEnabled && !syncWas) { syncFlushed = false; beginSync(); } // turned on: ask first if the server has a copy
         else if (!settings.syncEnabled && syncWas) { sync.stop(); Object.assign(syncStatus, { state: 'off', message: '' }); }
         else if (settings.syncEnabled && (empChanged || storeChanged)) sync.syncNow(); // new person: their own data
       }
@@ -1165,8 +1810,10 @@ function createWorkbench(profile) {
     },
     // Sync across computers
     'sync-now': () => { if (sync) sync.syncNow(); },
+    'sync-choice': (choice) => chooseSync(['restore', 'overwrite', 'cancel'].includes(choice) ? choice : 'cancel'),
     // Updates
     'check-update': () => { if (updater) updater.checkForUpdates().catch(() => {}); },
+    'set-beta-updates': (on) => setBetaUpdates(on),
     'open-update-log': () => { if (update.logFile) shell.openPath(update.logFile).catch(() => {}); },
     'install-update': () => installUpdate(),
     // Windows / profiles
@@ -1209,8 +1856,11 @@ function createWorkbench(profile) {
       if (isPrintKey(input)) { ev.preventDefault(); printVisible(); }
     });
 
+    // The app's dashboard starts with "Connecting to Xtime…" until the first ROs arrive (or Xtime asks to sign in)
+    if (settings.xtimeDashboard) xtimeSignin = { step: 'starting', since: Date.now(), busy: false, error: '' };
     xtimeView = makeWebView();
-    xtimeView.webContents.loadURL(settings.xtimeUrl);
+    xtimeView.webContents.loadURL(settings.xtimeUrl); // signs in (and shows Xtime) when needed; put away once the app works without it
+    startLite();
     let soon = null;
     xtimeView.webContents.on('did-frame-finish-load', () => {
       clearTimeout(soon);
@@ -1226,11 +1876,14 @@ function createWorkbench(profile) {
     });
     // Watch which RO page is open in Xtime, so a hidden RO can be unhidden from there.
     watchTimer = setInterval(() => {
+      parkCheck();
+      // The background page landed somewhere else (e.g. sent to sign in before Xtime was signed in): try again once Inspect works
+      if (!liteReady() && !liteLoading && findInspectFrame() && Date.now() - liteTriedAt > 30 * 1000) { liteTriedAt = Date.now(); startLite(); }
       const ro = viewingROFromXtime();
       if (ro !== xtimeViewingRO) { xtimeViewingRO = ro; pushState(); }
       // Refresh Xtime before its session runs out — only while you're not looking at the Xtime tab
       const due = Date.now() - xtimeLoadedAt > Number(settings.xtimeRefreshMinutes || 90) * 60 * 1000;
-      if (due && (mode !== 'xtime' || overlay) && findXtimeDataFrame() && Date.now() - lastRecovery > 5 * 60 * 1000) {
+      if (due && !xtimeParked && (mode !== 'xtime' || overlay) && findInspectFrame() && Date.now() - lastRecovery > 5 * 60 * 1000) {
         reloadXtime('');
       }
     }, 1500);
@@ -1238,6 +1891,8 @@ function createWorkbench(profile) {
     win.on('resize', layout);
     win.on('closed', () => {
       clearInterval(pollTimer);
+      clearInterval(signinTimer);
+      clearInterval(msgTimer);
       clearInterval(watchTimer);
       clearInterval(heartbeatTimer);
       if (!closingOut) closeOut().finally(() => sync.stop()); // closing just this window
@@ -1245,6 +1900,7 @@ function createWorkbench(profile) {
       // Web pages inside the window aren't closed automatically; close them so nothing keeps running
       for (const ws of workspaces.values()) for (const t of ws.tabs) { t.vinToken = -1; try { t.view?.webContents.close(); } catch {} }
       try { xtimeView.webContents.close(); } catch {}
+      try { xtimeLite?.webContents.close(); } catch {}
       try { chrome.webContents.close(); } catch {}
       windows.delete(profile.id);
       if (!quitting) { saveProfiles(); pushAll(); } // other windows' profile lists update
@@ -1265,6 +1921,12 @@ function createWorkbench(profile) {
     keepROs: () => [...workspaces.keys()],
     owns: (sender) => chrome && sender === chrome.webContents,
     manualCall, manualSave,
+    // Ctrl+B pressed inside one of this window's pages: show or hide the Workbench sidebar
+    sidebarKey: (wc) => {
+      if (!allContentViews().some((v) => v.webContents === wc) || mode !== 'manual') return false;
+      handlers['toggle-sidebar']();
+      return true;
+    },
     focus: () => { if (win && !win.isDestroyed()) { if (win.isMinimized()) win.restore(); win.focus(); } },
   };
 }
@@ -1395,6 +2057,7 @@ if (!app.requestSingleInstanceLock()) {
   app.on('second-instance', () => { windows.values().next().value?.focus(); });
 
   app.whenReady().then(() => {
+    try { app.setAppUserModelId('local.ptsworkbench'); } catch {} // Windows shows notifications under this app
     const saved = readJsonAt(userFile('profiles.json'), null);
     profiles = Array.isArray(saved?.profiles) && saved.profiles.length ? saved.profiles : [{ id: 'main', name: 'Main' }];
     if (!profiles.some((p) => p.id === 'main')) profiles.unshift({ id: 'main', name: 'Main' });
@@ -1419,7 +2082,12 @@ if (!app.requestSingleInstanceLock()) {
   app.on('web-contents-created', (_e, wc) => {
     // Ctrl+P prints the page (the app's own screen handles it itself, to print the page that's showing)
     wc.on('before-input-event', (ev, input) => {
-      if (appUiContents.has(wc) || !isPrintKey(input)) return;
+      if (appUiContents.has(wc)) return;
+      if (input.type === 'keyDown' && input.control && !input.alt && !input.shift && input.key.toLowerCase() === 'b') {
+        for (const wb of windows.values()) if (wb.sidebarKey?.(wc)) { ev.preventDefault(); return; }
+        return;
+      }
+      if (!isPrintKey(input)) return;
       ev.preventDefault();
       printPage(wc);
     });

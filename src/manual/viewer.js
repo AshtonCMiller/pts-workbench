@@ -53,9 +53,11 @@ async function start() {
   if (init?.state) state = { ...state, ...init.state };
   applyLayout();
   renderTabs();
-  showDoc();
+  if (init?.open) openDoc(init.open, { newTab: true }); // sent here from the Diagnostics tab
+  else showDoc();
   loadContents();
 }
+api.onOpen?.((link) => openDoc(link, { newTab: true }));
 
 async function loadContents() {
   try { await loadContentsInner(); } catch (e) {
@@ -219,15 +221,20 @@ function toggleFolder(id) {
   $('tree').scrollTop = scroll;
 }
 
+// A DTC typed in the contents search: offer Ford's diagnostics search (pinpoint tests, TSBs…) for it
+const DTC_LIKE = /(?:^|\s)([PBUC][0-9A-F]{4})(?:[:|][0-9A-F]{2})?(?=\s|$)/i;
 function renderSearch(box, q) {
   const words = q.split(/\s+/).filter(Boolean);
+  const dtc = q.match(DTC_LIKE);
+  const diag = dtc ? el('button', { class: 'diag-offer', title: "Search Ford's diagnostics (pinpoint tests, TSBs, SSMs) for this code",
+    onclick: () => api.openDiag(q.trim()) }, el('b', { text: `🔎 ${dtc[1].toUpperCase()}` }), ' Find pinpoint tests & TSBs in Diagnostics ›') : null;
   const hits = [];
   for (const n of leaves) {
     const hay = n.path.join(' ').toLowerCase();
     if (words.every((w) => hay.includes(w))) hits.push(n);
     if (hits.length >= 300) break;
   }
-  if (!hits.length) return box.replaceChildren(el('div', { class: 'note', text: 'Nothing in the contents matches that.' }));
+  if (!hits.length) return box.replaceChildren(...[diag, el('div', { class: 'note', text: 'Nothing in the contents matches that.' })].filter(Boolean));
   const mark = (s) => {
     const frag = document.createDocumentFragment();
     const re = new RegExp(`(${words.map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})`, 'ig');
@@ -236,7 +243,7 @@ function renderSearch(box, q) {
     frag.append(s.slice(last));
     return frag;
   };
-  box.replaceChildren(...hits.map((n) => leafNode(n, 0, el('span', {}, mark(n.title), el('span', { class: 'result-path', text: n.path.slice(0, -1).slice(-2).join(' › ') })))));
+  box.replaceChildren(...(diag ? [diag] : []), ...hits.map((n) => leafNode(n, 0, el('span', {}, mark(n.title), el('span', { class: 'result-path', text: n.path.slice(0, -1).slice(-2).join(' › ') })))));
 }
 
 function openLeaf(n, e) {
@@ -257,6 +264,7 @@ function openDoc(link, { newTab = false, hash = link.hash } = {}) {
     else state.docs.splice(cur + 1, 0, d);
   }
   if (hash) { d.hash = hash; d.scroll = 0; }
+  if (link.ppt) { d.goPpt = String(link.ppt); d.scroll = 0; }
   rememberScroll();
   state.active = key;
   save();
@@ -322,7 +330,10 @@ async function showDoc() {
   $('content').replaceChildren(node);
   if (node._ppts) for (const p of node._ppts.values()) renderPpt(node, d, p); // the view may have changed in another procedure
   updateModeButton(node);
-  if (d.hash) {
+  if (d.goPpt) {
+    const id = d.goPpt; d.goPpt = ''; save();
+    requestAnimationFrame(() => goToPpt(node, d, id));
+  } else if (d.hash) {
     const h = d.hash; d.hash = ''; save();
     requestAnimationFrame(() => jumpTo(node, h, false));
   } else {
@@ -475,7 +486,7 @@ function cleanContent(root, base, d) {
 
   // Attributes: no scripts, no Ford styling, but keep what tables and anchors need
   const KEEP = new Set(['href', 'name', 'id', 'colspan', 'rowspan', 'src', 'alt', 'title', 'class', 'type', 'start',
-    'data-for', 'data-procuid', 'data-content-type', 'data-pptid', 'data-pptstepid', 'data-ppttypeandstep', 'data-ppt', 'data-spa', 'data-legacy', 'data-hash-type', 'data-linkid', 'valign']);
+    'data-for', 'data-procuid', 'data-show-ppt', 'data-content-type', 'data-pptid', 'data-pptstepid', 'data-ppttypeandstep', 'data-ppt', 'data-spa', 'data-legacy', 'data-hash-type', 'data-linkid', 'valign']);
   root.querySelectorAll('*').forEach((n) => {
     for (const a of [...n.attributes]) if (!KEEP.has(a.name)) n.removeAttribute(a.name);
     if (n.tagName === 'A' && n.getAttribute('name')) n.id = `n-${n.getAttribute('name')}`;
@@ -506,7 +517,15 @@ function cleanContent(root, base, d) {
   root.querySelectorAll('a').forEach((a) => {
     const href = a.getAttribute('href') || '';
     const forAttr = a.getAttribute('data-for');
-    if (forAttr && /expand-link|procedure-link|publication-content/.test(a.className)) {
+    const showPpt = a.getAttribute('data-show-ppt');
+    if (forAttr && showPpt) {
+      // Ford's DTC charts: "GO to Pinpoint Test X" in this or another procedure
+      const { searchNumber } = splitTarget(forAttr);
+      const procUid = a.getAttribute('data-procuid') || '';
+      if (searchNumber === d.searchNumber || (procUid && procUid === d.procUid)) a.dataset.ppt = showPpt;
+      else a.dataset.open = JSON.stringify({ searchNumber, procUid, linkType: 'Procedure', ppt: showPpt, title: (a.textContent || '').trim() });
+      a.removeAttribute('href');
+    } else if (forAttr && /expand-link|procedure-link|publication-content/.test(a.className)) {
       const { searchNumber, hash } = splitTarget(forAttr);
       a.dataset.open = JSON.stringify({ searchNumber, procUid: a.getAttribute('data-procuid') || '',
         linkType: /publication-content/.test(a.className) ? 'PublicationContent' : 'Procedure', hash, title: (a.textContent || '').trim() });
@@ -579,6 +598,10 @@ function renderProcedure(html, base, d) {
       e.preventDefault();
       const link = JSON.parse(a.dataset.open);
       openDoc({ ...link, section: '' }, { newTab: true, hash: link.hash });
+    } else if (a.dataset.ppt) {
+      e.preventDefault();
+      pushBack();
+      goToPpt(docEl, d, a.dataset.ppt);
     } else if (a.dataset.jump) {
       e.preventDefault();
       pushBack();
@@ -768,6 +791,28 @@ function openPpt(docEl, d, p, { step, scroll = true } = {}) {
   if (p.spa && !p.rows.length) loadSpaSteps(docEl, d, p);
   if (!wasOpen) report(p, d, {}, 'Test start recorded to Vehicle History');
   if (scroll) p.h.scrollIntoView({ block: 'start' });
+}
+
+// Open a pinpoint test by Ford's id for it (a letter like "A", or an id like "G2198756p1"), e.g. from a
+// Diagnostics search result or a DTC chart
+function findPpt(docEl, id) {
+  const ppts = docEl._ppts;
+  if (!ppts || !id) return null;
+  const want = String(id).replace(/^PPT/i, '');
+  if (ppts.has(want)) return ppts.get(want);
+  for (const p of ppts.values()) {
+    if (p.spa === want || p.rows.some((r) => r.getAttribute('data-pptid') === want)) return p;
+    if (p.name.toLowerCase() === want.toLowerCase()) return p;
+  }
+  return null;
+}
+function goToPpt(docEl, d, id) {
+  const p = findPpt(docEl, id);
+  if (p) { openPpt(docEl, d, p); p.h.classList.remove('flash'); void p.h.offsetWidth; p.h.classList.add('flash'); return true; }
+  const target = docEl.querySelector(`#PPT${CSS.escape(String(id))}`) || docEl.querySelector(`#n-${CSS.escape(String(id))}`) || docEl.querySelector(`[name="${CSS.escape(String(id))}"]`);
+  if (target) { target.scrollIntoView({ block: 'start' }); return true; }
+  api.log(`pinpoint test ${id} not found in ${d.searchNumber}/${d.procUid}`);
+  return false;
 }
 
 // A jump to a pinpoint test or one of its steps (from the symptom chart, a link, or a reopened tab)
