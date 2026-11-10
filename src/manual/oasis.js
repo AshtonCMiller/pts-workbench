@@ -1,4 +1,5 @@
-// OASIS, redrawn in the app's style. Starts with Vehicle Information; more sections can be added one by one.
+// OASIS, redrawn in the app's style: the vehicle's picture, connected vehicle data, vehicle information,
+// field service actions, warning messages, then warranty coverage.
 'use strict';
 const api = window.manual;
 const $ = (id) => document.getElementById(id);
@@ -51,6 +52,94 @@ function vehicleInfo(doc) {
   return pairs;
 }
 
+// ---------- picture of the vehicle (from the PTS manual page) ----------
+function hero(image, name, fsa, warn) {
+  const box = el('section', { class: 'o-hero' });
+  if (image) {
+    const img = el('img', { class: 'o-car', alt: name || 'Vehicle', src: `ptsasset://f/?u=${encodeURIComponent(image)}` });
+    img.addEventListener('error', () => { api.log(`oasis: vehicle picture didn't load (${image.slice(0, 160)})`); img.remove(); box.classList.add('no-pic'); });
+    box.append(el('div', { class: 'o-stage' }, img));
+  } else box.classList.add('no-pic');
+  // A quick heads-up for what's further down the page
+  const chips = [];
+  const jump = (id) => () => document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  if (fsa.items.length) chips.push(el('button', { class: 'o-chip bad', onclick: jump('fsa') }, `${fsa.items.length} open field service action${fsa.items.length === 1 ? '' : 's'}`));
+  else if (fsa.found) chips.push(el('button', { class: 'o-chip good', onclick: jump('fsa') }, 'No open field service actions'));
+  if (warn.lines.length) chips.push(el('button', { class: 'o-chip warn', onclick: jump('warnings') }, `${warn.lines.length} warning message${warn.lines.length === 1 ? '' : 's'}`));
+  if (chips.length) box.append(el('div', { class: 'o-chips' }, ...chips));
+  return box;
+}
+
+// ---------- field service actions (recalls) ----------
+const headerText = (doc, panel) => clean(doc.querySelector(`label[data-results="${panel}"]`)?.textContent).replace(/^[▴▾\s]+/, '');
+function readFsa(doc) {
+  const panel = doc.getElementById('fsa-panel');
+  const out = { found: !!panel, title: headerText(doc, 'fsa-panel'), items: [], links: [] };
+  if (!panel) return out;
+  panel.querySelectorAll('li').forEach((li) => {
+    const a = li.querySelector('a[data-fsanum], a');
+    const num = clean(a?.getAttribute('data-fsanum') || a?.textContent);
+    const desc = clean([...li.querySelectorAll('label')].map((l) => l.textContent).join(' ')) || clean(li.textContent).replace(num, '').trim();
+    if (num || desc) out.items.push({ num, desc, url: a?.getAttribute('href') || '' });
+  });
+  // Ford's notices above the list (software repair steps, the list of recalls the process supports)
+  panel.querySelectorAll(':scope .row a[href]').forEach((a) => {
+    if (a.closest('li')) return;
+    const text = clean(a.closest('label')?.textContent || a.textContent);
+    if (text) out.links.push({ text: text.replace(/^NOTICE\s*[–-]\s*/i, ''), url: a.getAttribute('href'), label: clean(a.textContent) });
+  });
+  return out;
+}
+function renderFsa(fsa) {
+  const box = el('section', { class: 'o-section', id: 'fsa' }, el('h2', { text: 'Field service actions (recalls)' }));
+  if (!fsa.found) return box.appendChild(el('div', { class: 'o-card o-msg', text: "OASIS didn't include field service actions for this VIN." })), box;
+  if (!fsa.items.length) {
+    box.append(el('div', { class: 'o-card o-msg ok' }, el('b', { text: '✓ ' }), /no\b/i.test(fsa.title) ? nice(fsa.title) : 'No open field service actions for this VIN.'));
+    return box;
+  }
+  const rows = fsa.items.map((f) => el('div', { class: 'o-fsa' },
+    f.url ? el('button', { class: 'o-fsa-num', text: f.num, title: `Open ${f.num}`, onclick: () => api.openUrl(f.url) })
+      : el('span', { class: 'o-fsa-num', text: f.num }),
+    el('span', { class: 'o-fsa-desc', text: f.desc }),
+    el('button', { class: 'ghost small', text: 'Copy', title: `Copy ${f.num}`, onclick: () => copy(f.num) })));
+  const notes = fsa.links.map((l) => el('div', { class: 'o-note' }, el('button', { class: 'link', text: l.text, onclick: () => api.openUrl(l.url) })));
+  box.append(el('div', { class: 'o-card o-fsas' }, ...rows), ...(notes.length ? [el('div', { class: 'o-notes' }, ...notes)] : []));
+  return box;
+}
+
+// ---------- warning messages ----------
+function readWarnings(doc) {
+  const body = doc.querySelector('#warnmsg-panel .panel-body');
+  const title = headerText(doc, 'warnmsg-panel');
+  const lines = [];
+  if (body) {
+    const items = body.querySelectorAll('li, p, label, .row > div');
+    const seen = new Set();
+    (items.length ? [...items] : [body]).forEach((n) => {
+      if (n.querySelector('li, p, label') && items.length) return; // only the innermost pieces
+      const t = clean(n.textContent);
+      if (t && !seen.has(t)) { seen.add(t); lines.push(t); }
+    });
+  }
+  // OASIS hides the "imported by HUSM" notice unless it applies
+  const husm = doc.getElementById('husmDiv');
+  if (husm && !husm.hasAttribute('data-hidden')) {
+    const t = clean(doc.getElementById('husmMessage')?.textContent);
+    if (t) lines.push([t, clean(doc.getElementById('husmInformation')?.textContent)].filter(Boolean).join(' — '));
+  }
+  return { found: !!body, title, lines };
+}
+function renderWarnings(warn) {
+  const box = el('section', { class: 'o-section', id: 'warnings' }, el('h2', { text: 'Warning messages' }));
+  if (!warn.lines.length) {
+    box.append(el('div', { class: 'o-card o-msg ok' }, el('b', { text: '✓ ' }),
+      warn.found ? 'No warning messages for this VIN.' : "OASIS didn't include warning messages for this VIN."));
+    return box;
+  }
+  box.append(el('div', { class: 'o-card o-warns' }, ...warn.lines.map((t) => el('div', { class: 'o-warn', text: t }))));
+  return box;
+}
+
 function render(res) {
   const doc = new DOMParser().parseFromString(stripStyles(res.html), 'text/html');
   const vin = clean(doc.title).replace(/^OASIS RESULTS?:\s*/i, '');
@@ -82,10 +171,18 @@ function render(res) {
   if (rest.length) cards.push(el('div', { class: 'o-card' }, el('h3', { text: 'Other' }), ...rest));
 
   warranty = readWarranty(doc);
-  $('o-body').replaceChildren(el('section', { class: 'o-section', id: 'warranty' }), el('section', { class: 'o-section', id: 'cv' }), 
+  const fsa = readFsa(doc);
+  const warn = readWarnings(doc);
+  $('o-body').replaceChildren(
+    hero(res.image, $('o-title').textContent, fsa, warn),
+    el('section', { class: 'o-section', id: 'cv' }),
     pairs.length
       ? el('section', { class: 'o-section' }, el('h2', { text: 'Vehicle information' }), el('div', { class: 'o-grid' }, ...cards))
-      : el('div', { class: 'state' }, el('h2', { text: 'No vehicle information' }), el('p', { text: "OASIS didn't include the vehicle information section for this VIN." })));
+      : el('section', { class: 'o-section' }, el('h2', { text: 'Vehicle information' }),
+        el('div', { class: 'o-card o-msg', text: "OASIS didn't include the vehicle information section for this VIN." })),
+    renderFsa(fsa),
+    renderWarnings(warn),
+    el('section', { class: 'o-section', id: 'warranty' }));
   if (!pairs.length) api.log(`oasis: no vehicle information found (${res.html.length} characters)`);
 }
 
@@ -248,7 +345,7 @@ function statusRow(label, value, when, cls) {
 function renderCv(res) {
   const box = $('cv');
   if (!box) return;
-  const head = el('h2', {}, 'Connected vehicle', el('button', { class: 'ghost small inline', text: '↻', title: 'Ask for the latest data', onclick: loadCv }));
+  const head = el('h2', {}, 'Connected vehicle data', el('button', { class: 'ghost small inline', text: '↻', title: 'Ask for the latest data', onclick: loadCv }));
   if (res?.error) {
     box.replaceChildren(head, el('div', { class: 'o-card o-msg' }, res.needsLogin ? 'Sign in to PTS to see connected vehicle data.' : `Couldn't get connected vehicle data (${res.message}).`));
     return;
@@ -317,7 +414,7 @@ function renderCv(res) {
 async function loadCv() {
   const box = $('cv');
   if (!box) return;
-  box.replaceChildren(el('h2', { text: 'Connected vehicle' }), el('div', { class: 'o-card o-msg' }, el('div', { class: 'spinner' }), 'Asking the vehicle’s latest data…'));
+  box.replaceChildren(el('h2', { text: 'Connected vehicle data' }), el('div', { class: 'o-card o-msg' }, el('div', { class: 'spinner' }), 'Asking the vehicle’s latest data…'));
   let res;
   try { res = await api.cv(); } catch (e) { res = { error: true, message: String(e?.message || e) }; }
   try { renderCv(res); } catch (e) {

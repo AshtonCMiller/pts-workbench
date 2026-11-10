@@ -50,3 +50,42 @@ body.oasis { overflow: auto; }
 .o-cov.out .o-cov-text { color: var(--warn-line); font-weight: 600; }
 .o-cov-info summary { cursor: pointer; color: var(--accent); font-size: 12px; margin-top: 3px; }
 .o-cov-info p { margin: 4px 0 0; font-size: 12px; color: var(--muted); }
+
+/* The vehicle's picture, centered at the top */
+.o-hero { display: flex; flex-direction: column; align-items: center; gap: 10px; margin: 0 0 20px; }
+.o-hero.no-pic { margin-bottom: 8px; }
+.o-stage { display: flex; justify-content: center; align-items: center; width: min(100%, 420px); padding: 6px 0 2px;
+  background: radial-gradient(ellipse 60% 55% at 50% 58%, color-mix(in srgb, var(--accent) 9%, transparent), transparent 72%); }
+/* PTS's picture has a white background: blend it into the page in light mode, sit it on a soft white tile in dark mode */
+.o-car { display: block; width: 300px; max-width: 100%; height: auto; mix-blend-mode: multiply; }
+@media (prefers-color-scheme: dark) {
+  .o-stage { background: none; }
+  .o-car { mix-blend-mode: normal; background: #fff; border-radius: 14px; padding: 6px 14px; box-shadow: 0 2px 14px rgba(0,0,0,.35); }
+}
+.o-chips { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
+.o-chip { font: inherit; font-size: 12px; font-weight: 600; padding: 4px 12px; border-radius: 999px; cursor: pointer;
+  border: 1px solid var(--line); background: var(--panel); color: var(--text); }
+.o-chip:hover { border-color: var(--accent); }
+.o-chip.bad { background: var(--warn-bg); border-color: var(--warn-line); color: var(--warn-line); }
+.o-chip.warn { background: var(--caut-bg); border-color: var(--caut-line); color: var(--caut-line); }
+.o-chip.good { color: #16a34a; }
+.o-section { scroll-margin-top: 70px; }
+
+/* Field service actions and warning messages */
+.o-msg.ok { color: var(--text); }
+.o-msg.ok b { color: #16a34a; }
+.o-fsas { padding: 2px 14px; border-left: 3px solid var(--warn-line); }
+.o-fsa { display: flex; align-items: center; gap: 12px; padding: 9px 0; border-top: 1px solid var(--line); }
+.o-fsa:first-child { border-top: 0; }
+.o-fsa-num { flex: none; font: inherit; font-family: Consolas, ui-monospace, monospace; font-weight: 700; font-size: 13px; min-width: 64px; text-align: center;
+  padding: 2px 8px; border-radius: 5px; border: 1px solid var(--warn-line); background: var(--warn-bg); color: var(--warn-line); }
+button.o-fsa-num { cursor: pointer; }
+button.o-fsa-num:hover { text-decoration: underline; }
+.o-fsa-desc { flex: 1; font-weight: 600; font-size: 13px; }
+.o-notes { margin-top: 6px; display: flex; flex-direction: column; gap: 2px; }
+.o-note button.link { font: inherit; font-size: 12px; background: none; border: 0; padding: 2px 0; color: var(--accent); cursor: pointer; text-align: left; }
+.o-note button.link:hover { text-decoration: underline; }
+.o-warns { padding: 2px 14px; border-left: 3px solid var(--caut-line); }
+.o-warn { padding: 8px 0; border-top: 1px solid var(--line); font-weight: 600; font-size: 13px; }
+.o-warn:first-child { border-top: 0; }
+@media print { .o-chips, .o-fsa .ghost { display: none !important; } .o-car { mix-blend-mode: normal; box-shadow: none; } }

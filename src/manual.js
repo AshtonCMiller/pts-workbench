@@ -292,10 +292,28 @@ class ManualService {
     const url = `${PTS}/oasis/Index?vin=${encodeURIComponent(book.vin)}&ModelYear=${encodeURIComponent(book.vehicle.year || p.modelYear || '')}` +
       `&DefaultDisplayName=${encodeURIComponent(book.vehicle.name || '')}&OasisEnv=RELEASE&country=${encodeURIComponent(p.country || 'USA')}` +
       `&region=${encodeURIComponent(p.marketGroup || 'NA')}&v=1238`;
+    const picture = this.vehicleImage(vin); // at the same time; usually already on disk
     const html = await this.text(url);
     if (!/vehicleinfo-panel|OASIS RESULT/i.test(html)) throw new Error('Ford sent back something other than OASIS');
     this.lastOasis = { vin: book.vin, html, at: Date.now() };
-    return { html, url };
+    return { html, url, image: await picture };
+  }
+
+  // PTS's picture of the vehicle: it comes with the manual's contents (Ford's "tree and cover"), not the manual page
+  async vehicleImage(vin) {
+    try {
+      const book = await this.book(vin);
+      const html = await this.tree(vin);
+      const img = html.match(/<img\b[^>]*\bid=["']VehicleImage["'][^>]*>/i)?.[0] || html.match(/<img\b[^>]*\bclass=["'][^"']*vehicle-image[^>]*>/i)?.[0] || '';
+      const src = (img.match(/\bsrc=["']([^"']+)["']/i)?.[1] || '').replace(/&amp;/g, '&').trim();
+      if (!src) { this.log('   no vehicle picture with the manual contents'); return ''; }
+      const abs = new URL(src, book.bases.publicationBookTreeAndCoverBase || PTS).href;
+      if (!ASSET_HOSTS.test(new URL(abs).hostname)) this.log(`   vehicle picture is on a site the app doesn't fetch from: ${abs.slice(0, 200)}`);
+      return abs;
+    } catch (e) {
+      this.log(`   vehicle picture: ${e.message || e}`);
+      return '';
+    }
   }
 
   // Connected vehicle data (odometer, fuel, oil life, battery, tires, DTCs…): the same request OASIS makes,
