@@ -369,8 +369,7 @@ class ManualService {
     return /DropDownList_SearchType/.test(html) && (!vin || html.toUpperCase().includes(vin.toUpperCase()));
   }
 
-  // Opens SLTS for this VIN. Ford's own menu goes through Generate.aspx, which works out the
-  // vehicle's SLTS model code (e.g. "A8") and moves on to GenerateT.aspx; that code is remembered per VIN.
+  // Opens SLTS for this VIN (GenerateT.aspx). The vehicle's SLTS model code (e.g. "A8") is remembered per VIN.
   async sltsStart(vin) {
     const book = await this.book(vin);
     const p = book.params;
@@ -378,9 +377,9 @@ class ManualService {
     const query = (code) => new URLSearchParams({ strVin: book.vin, strYear: book.vehicle.year || p.modelYear || '',
       strModelDesc: book.vehicle.name || '', strGsltsVehCode: code || '', usercountry: p.country || 'USA',
       isolang: p.isoLang || p.isolang || 'EN-US', masterid: p.vehicleId || '' }).toString();
-    const tries = [];
-    if (known) tries.push(`GenerateT.aspx?${query(known)}`);
-    tries.push(`Generate.aspx?${query('')}`, `Generate.aspx?vin=${encodeURIComponent(book.vin)}`, `GenerateT.aspx?${query('')}`);
+    // GenerateT.aspx works out the model code itself when it's left empty
+    const tries = [`GenerateT.aspx?${query(known || '')}`];
+    if (known) tries.push(`GenerateT.aspx?${query('')}`);
     let last = '';
     for (const t of tries) {
       const url = this.sltsUrl(t);

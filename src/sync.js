@@ -1,7 +1,8 @@
 // Sync between computers (opt-in).
 //
-// What syncs: flags, hours/overrides, renamed lines, RO lines and Review/Completed status, and
-// the shift clock. Never: VINs, customer details, saved logins, settings or open tabs.
+// What syncs: flags, hours/overrides, renamed lines, RO lines and Review/Completed status, the
+// shift clock, and which ROs are open in the Workbench (RO numbers and year/make/model only; each
+// computer gets the VIN from Xtime). Never: VINs, customer details, saved logins, settings or tab layouts.
 //
 // How: every piece of data is a separate record with a timestamp. When two computers changed
 // things, the records are merged one by one and the newest change to each record wins, so
@@ -53,7 +54,8 @@ const stable = (v) => {
 const hashOf = (v) => crypto.createHash('sha1').update(stable(v)).digest('base64');
 
 // Tracker data → { key: value }. Keys: f/RO/LINE flag · r/RO status · l/RO lines · o/RO/LINE hours
-// override · n/RO/LINE renamed line · s/START shift · c/DEVICE when that computer last closed the app
+// override · n/RO/LINE renamed line · s/START shift · c/DEVICE when that computer last closed the app ·
+// w/RO an RO open in the Workbench
 function recordsFrom(data, deviceId) {
   const out = {};
   for (const f of data.flags || []) {
@@ -76,6 +78,8 @@ function recordsFrom(data, deviceId) {
     }
     out[`l/${ro}`] = { order: rec.order || [], lines };
   }
+  for (const [ro, w] of Object.entries(data.openROs || {})) out[`w/${ro}`] = { ymm: w?.ymm || '' };
+  if (deviceId) out[`v/${deviceId}`] = { openROs: 1 }; // this computer's app syncs open ROs
   for (const s of data.shifts || []) out[`s/${s.start}`] = { start: s.start, end: s.end ?? null, auto: !!s.auto };
   if (deviceId && data.lastClosed) out[`c/${deviceId}`] = data.lastClosed;
   return out;
@@ -179,6 +183,15 @@ function applyRecords(data, recs) {
   }
   data.flags = flags;
 
+  const open = {};
+  for (const [k, r] of Object.entries(live)) if (k.startsWith('w/')) open[k.slice(2)] = { ymm: r.v?.ymm || '' };
+  data.openROs = open;
+  // Who closed each RO. An older version of the app on another computer doesn't know about open ROs and
+  // drops them all; only closes from computers whose app syncs open ROs should close them here.
+  const aware = new Set(Object.keys(live).filter((k) => k.startsWith('v/')).map((k) => k.slice(2)));
+  data.openClosedBy = {};
+  for (const [k, r] of Object.entries(recs)) if (k.startsWith('w/') && r.del) data.openClosedBy[k.slice(2)] = aware.has(String(r.d)) ? 'app' : 'old';
+
   data.shifts = normalizeShifts(Object.entries(live).filter(([k]) => k.startsWith('s/')).map(([, r]) => r));
   data.lastClosedAll = Math.max(0, ...Object.entries(live).filter(([k]) => k.startsWith('c/')).map(([, r]) => Number(r.v) || 0));
 }
@@ -187,8 +200,9 @@ function applyRecords(data, recs) {
 class SyncEngine {
   // tracker: the Tracker. identity(): { enabled, storeId, employeeNumber }. url: server address.
   // load()/save(state): this computer's sync bookkeeping. request(method, url, body): HTTP.
-  constructor({ tracker, identity, url, load, save, request, now = () => Date.now(), onStatus = () => {} }) {
-    Object.assign(this, { tracker, identity, url: String(url || '').replace(/\/+$/, ''), saveState: save, request, now, onStatus });
+  // onApplied(): called after changes from other computers were put into the tracker
+  constructor({ tracker, identity, url, load, save, request, now = () => Date.now(), onStatus = () => {}, onApplied = () => {} }) {
+    Object.assign(this, { tracker, identity, url: String(url || '').replace(/\/+$/, ''), saveState: save, request, now, onStatus, onApplied });
     this.state = { deviceId: crypto.randomBytes(8).toString('hex'), version: 0, journal: {}, maxT: 0, who: null, joining: true, ...(load() || {}) };
     this.status = { state: 'off', message: '', lastSync: this.state.lastSync || null };
     this.applying = false;
@@ -309,6 +323,7 @@ class SyncEngine {
       this.state = { ...this.state, who: keys.id, version: got.body.version || 0, journal, maxT, joining: false, dirty: false };
       this.tracker.save();
     } finally { this.applying = false; }
+    try { this.onApplied(); } catch { /* best effort */ }
     this.persist();
     return this.syncNow(); // anything restore tidied up (e.g. joined shifts) goes back, and status updates
   }
@@ -378,6 +393,7 @@ class SyncEngine {
             }
             this.tracker.save();
           } finally { this.applying = false; }
+          try { this.onApplied(); } catch { /* best effort */ }
         }
         local = this.localRecords(); // includes anything the merge itself tidied up (e.g. joined shifts)
 

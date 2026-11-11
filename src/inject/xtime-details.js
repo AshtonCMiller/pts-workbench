@@ -12,7 +12,7 @@
 
   const load = async (id) => {
     try {
-      const res = await fetch(PATH_TEMPLATE.replace('{RO}', encodeURIComponent(id)), { credentials: 'include' });
+      const res = await fetch(PATH_TEMPLATE.replace('{RO}', encodeURIComponent(id)), { credentials: 'include', cache: 'no-store' });
       if (!res.ok) return { error: `HTTP ${res.status}` };
       return { text: await res.text() };
     } catch (e) {
@@ -79,7 +79,7 @@
   // 2) not found: look the RO up on the dashboard (it lists every tech's ROs) and try its internal ID
   if (!raw && API_PATH) {
     try {
-      const res = await fetch(API_PATH, { credentials: 'include', headers: { Accept: 'application/json' } });
+      const res = await fetch(API_PATH, { credentials: 'include', cache: 'no-store', headers: { Accept: 'application/json' } });
       const data = res.ok ? await res.json() : null;
       let match = null;
       const walk = (n) => {

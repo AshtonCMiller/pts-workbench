@@ -8,6 +8,7 @@ contextBridge.exposeInMainWorld('manual', {
   proc: (link) => ipcRenderer.invoke('manual', 'proc', link),
   oasis: () => ipcRenderer.invoke('manual', 'oasis'),
   cv: () => ipcRenderer.invoke('manual', 'cv'),
+  openArticle: (url, title) => ipcRenderer.invoke('manual', 'open-article', { url, title }),
   slts: (req) => ipcRenderer.invoke('manual', 'slts', req),
   svcList: () => ipcRenderer.invoke('manual', 'svc-list'),
   svc: (fsa) => ipcRenderer.invoke('manual', 'svc', { fsa }),

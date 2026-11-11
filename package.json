@@ -52,6 +52,7 @@
     "electron-updater": "^6.3.9"
   },
   "ptsWorkbench": {
-    "syncUrl": "https://pts-sync.parkourdev.workers.dev"
+    "syncUrl": "https://pts-sync.parkourdev.workers.dev",
+    "feedbackAdmin": "95385"
   }
 }

@@ -98,12 +98,12 @@ function renderFsa(fsa) {
     return box;
   }
   const rows = fsa.items.map((f) => el('div', { class: 'o-fsa' },
-    f.url ? el('button', { class: 'o-fsa-num', text: f.num, title: `Open ${f.num}`, onclick: () => api.openUrl(f.url) })
+    f.url ? el('button', { class: 'o-fsa-num', text: f.num, title: `Open ${f.num}`, onclick: () => api.openArticle(f.url, `FSA ${f.num}`) })
       : el('span', { class: 'o-fsa-num', text: f.num }),
     el('span', { class: 'o-fsa-desc', text: f.desc }),
     el('span', { class: 'o-svc', 'data-fsa': f.num }),
     el('button', { class: 'ghost small', text: 'Copy FSA', title: `Copy ${f.num}`, onclick: () => copy(f.num) })));
-  const notes = fsa.links.map((l) => el('div', { class: 'o-note' }, el('button', { class: 'link', text: l.text, onclick: () => api.openUrl(l.url) })));
+  const notes = fsa.links.map((l) => el('div', { class: 'o-note' }, el('button', { class: 'link', text: l.text, onclick: () => api.openArticle(l.url, l.label || 'Notice') })));
   box.append(el('div', { class: 'o-card o-fsas' }, ...rows), ...(notes.length ? [el('div', { class: 'o-notes' }, ...notes)] : []));
   return box;
 }

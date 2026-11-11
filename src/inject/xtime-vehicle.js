@@ -26,7 +26,7 @@
 
   // 1) the dashboard
   try {
-    const res = await fetch(API_PATH, { credentials: 'include', headers: { Accept: 'application/json' } });
+    const res = await fetch(API_PATH, { credentials: 'include', cache: 'no-store', headers: { Accept: 'application/json' } });
     const type = res.headers.get('content-type') || '';
     if (res.status === 401 || res.status === 403 || res.redirected || !/json/i.test(type)) {
       return { ok: false, error: 'Xtime session expired' };

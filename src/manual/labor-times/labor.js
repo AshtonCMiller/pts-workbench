@@ -20,6 +20,8 @@ function el(tag, props = {}, ...kids) {
 // replaceChildren would show a skipped (null) piece as the text "null"
 const fill = (node, ...kids) => node.replaceChildren(...kids.filter((k) => k != null && k !== false));
 const clean = (t) => String(t || '').replace(/ /g, ' ').replace(/\s+/g, ' ').trim();
+// 18124A → 18124, 19700D12 → 19700, 19700A4WA → 19700
+const baseNumber = (code) => code.replace(/[A-Z]{1,2}\d*[A-Z]*$/, '') || code;
 const CUSTOMER_PAY = 1.5; // customer pay time = warranty time × 1.5
 const hrs = (n) => (Math.round(n * 100) / 100).toFixed(2).replace(/0$/, '');
 const num = (t) => (/^\d+(\.\d+)?$/.test(String(t).trim()) ? Number(t) : null);
@@ -64,8 +66,11 @@ function formFields() {
     if (!name) continue;
     const type = (n.getAttribute('type') || '').toLowerCase();
     if (n.tagName === 'SELECT') {
-      const opt = n.querySelector('option[selected]') || n.querySelector('option');
-      out[name] = opt ? (opt.getAttribute('value') ?? opt.textContent) : '';
+      // Like a browser: a list box (size > 1) with nothing picked, or an empty list, sends nothing;
+      // sending '' for it makes ASP.NET reject the whole post ("Invalid postback argument")
+      const listBox = n.hasAttribute('multiple') || Number(n.getAttribute('size') || 1) > 1;
+      const opt = n.querySelector('option[selected]') || (listBox ? null : n.querySelector('option'));
+      if (opt) out[name] = opt.getAttribute('value') ?? opt.textContent;
     } else if (type === 'image' || type === 'submit' || type === 'button' || type === 'reset') continue;
     else if (type === 'checkbox' || type === 'radio') { if (n.hasAttribute('checked')) out[name] = n.getAttribute('value') || 'on'; }
     else out[name] = n.getAttribute('value') || n.textContent || '';
@@ -75,6 +80,12 @@ function formFields() {
 async function request(req) {
   const res = await api.slts(req);
   if (res?.error) { const e = new Error(res.message || 'SLTS failed'); e.needsLogin = res.needsLogin; throw e; }
+  // An SLTS page without its form is an error page: put what it says in the log
+  if (!/<form\b/i.test(res.html || '')) {
+    const title = (String(res.html).match(/<title>([\s\S]*?)<\/title>/i) || [])[1] || '';
+    const text = String(res.html).replace(/<(script|style)\b[\s\S]*?<\/\1>/gi, ' ').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+    api.log(`labor: SLTS sent a page with no form (${clean(title)}): ${text.slice(0, 500)}`);
+  }
   return res;
 }
 async function start() {
@@ -137,8 +148,18 @@ function renderForm() {
   }
 }
 
+// SLTS opens Word Search in its own little window (AlphaIndex1.aspx) instead of on its main form
+const WORD = (t) => /^word/i.test(t || '');
+function showWordForm() {
+  $('l-pick').hidden = true;
+  $('l-q').hidden = false;
+  $('l-q').placeholder = 'Words in the operation name, e.g. compressor, water pump…';
+  for (const o of $('l-type').options) o.selected = o.value === 'Word' || WORD(o.value);
+}
+
 async function changeType(type) {
   if (busy) return;
+  if (WORD(type)) { saved.type = type; saved.pick = ''; save(); showWordForm(); hint(); $('l-q').focus(); return; }
   busy = true;
   showState(el('div', { class: 'spinner' }), 'Opening SLTS…');
   try {
@@ -154,18 +175,89 @@ async function search() {
   const type = $('l-type').value;
   const q = $('l-q').value.trim();
   if (!$('l-q').hidden && !q) { $('l-q').focus(); return; }
+  if (WORD(type)) return wordSearch(q);
   busy = true;
   showState(el('div', { class: 'spinner' }), 'Asking SLTS…');
   try {
     if (currentType() !== type) { await postBack({ DropDownList_SearchType: type }, { eventTarget: 'DropDownList_SearchType' }); renderForm(); }
     const over = { DropDownList_SearchType: type };
     if (!$('l-pick').hidden) over.DropDownList_SearchFor = $('l-pick').value;
-    if (!$('l-q').hidden) over[$('l-q').dataset.name || 'TextBox_OperationOrPartNumber'] = q;
+    // SLTS's operation search takes the base number (19700); a full code (19700A4) is looked up and jumped to
+    if (!$('l-q').hidden) over[$('l-q').dataset.name || 'TextBox_OperationOrPartNumber'] = /^operation/i.test(type) ? baseNumber(q.toUpperCase().replace(/\s+/g, '')) : q;
     const doc = await postBack(over, { click: true });
     saved.type = type; saved.pick = $('l-pick').hidden ? '' : $('l-pick').value; saved.q = $('l-q').hidden ? '' : q; save();
     renderForm();
     showResults(doc, q);
   } catch (e) { failed(e, search); } finally { busy = false; }
+}
+
+// ---------- Word Search (SLTS's "Keyword Search for Operation Description" window) ----------
+// 1. open AlphaIndex1.aspx for this vehicle, 2. post the words → a list of matching operation names,
+// 3. post the one picked with "View" → SLTS then shows that operation on its main page.
+let word = null; // { doc, url, raw } — the keyword window's last page
+function hidden(name) { return page?.doc.getElementById(name)?.getAttribute('value') || ''; }
+function wordUrl() {
+  const q = new URLSearchParams({ year_select: hidden('hidden_Year'), model_select: hidden('hidden_Model'), vin: hidden('hidden_Vin'),
+    fileName: hidden('hidden_FileName').replace(/\\/g, '|'), cookie_tps_membership: decodeURIComponent(hidden('hidden_cookie_tps_membership')), tab: 'tab' });
+  return `AlphaIndex1.aspx?${q}`;
+}
+function fieldsOf(doc) { const keep = page; page = { doc, url: '' }; const f = formFields(); page = keep; return f; }
+function actionOf(doc, url) {
+  const f = doc.querySelector('form');
+  try { return new URL(f?.getAttribute('action') || url, url).href; } catch { return url; }
+}
+async function wordPost(overrides) {
+  const fields = { ...fieldsOf(word.doc), __EVENTTARGET: '', __EVENTARGUMENT: '', ...overrides };
+  const res = await request({ op: 'post', method: 'POST', url: actionOf(word.doc, word.url), fields });
+  return { raw: res.html, url: res.url, doc: parse(res.html) };
+}
+
+async function wordSearch(q) {
+  if (busy) return;
+  busy = true;
+  showState(el('div', { class: 'spinner' }), 'Asking SLTS…');
+  try {
+    if (!page) await start();
+    const first = await request({ op: 'get', url: wordUrl() });
+    word = { raw: first.html, url: first.url, doc: parse(first.html) };
+    if (!word.doc.getElementById('TextBox_OperationDesc')) throw new Error("SLTS's word search didn't open");
+    word = await wordPost({ TextBox_OperationDesc: q, 'ImageButton_View_OperationDesc.x': '9', 'ImageButton_View_OperationDesc.y': '9' });
+    saved.q = q; save();
+    const list = [...(word.doc.getElementById('ListBox_OperationDesc')?.querySelectorAll('option') || [])]
+      .map((o) => ({ value: o.getAttribute('value') ?? o.textContent, text: clean(o.textContent) })).filter((o) => o.text);
+    api.log(`labor: word search "${q}": ${list.length} match${list.length === 1 ? '' : 'es'}${list.length ? ` (e.g. ${list.slice(0, 3).map((o) => `${o.text} = ${o.value}`).join('; ')})` : ''}`);
+    if (!list.length) {
+      const msg = clean(word.doc.querySelector('form')?.textContent).replace(/Keyword Search for Operation Description|View\s+Cancel/g, '').trim();
+      $('l-body').replaceChildren(el('div', { class: 'd-empty', text: `SLTS found no operations named “${q}”.` }));
+      if (msg) api.log(`labor: word search page said: ${msg.slice(0, 300)}`);
+      return;
+    }
+    $('l-body').replaceChildren(
+      el('div', { class: 'l-title', text: `${list.length} operation${list.length === 1 ? '' : 's'} matching “${q}”: pick one to see its times` }),
+      el('div', { class: 'l-matches' }, ...list.map((o) => {
+        const m = o.text.match(/^([0-9A-Z]+)\s+-+\s+(.*)$/i); // "18124A ---- Shock Absorber - Front - …"
+        return el('button', { class: 'l-match', onclick: () => wordOpen(o) },
+          m ? el('span', { class: 'l-code', text: m[1] }) : null, el('span', { text: m ? m[2] : o.text }), el('span', { class: 'go', text: 'View ›' }));
+      })));
+  } catch (e) { failed(e, () => wordSearch(q)); } finally { busy = false; }
+}
+
+// One match: its value is the operation code (e.g. "18124A", "19700D12"). Search SLTS by that
+// operation's base number (18124, 19700) like the Operation Number search does, then jump to it.
+async function wordOpen(o) {
+  if (busy) return;
+  const code = (clean(o.value) || clean(o.text).split(/\s/)[0]).toUpperCase().replace(/[^0-9A-Z]/g, '');
+  if (!code) return;
+  busy = true;
+  showState(el('div', { class: 'spinner' }), 'Asking SLTS…');
+  try {
+    if (currentType() !== 'Operation') await postBack({ DropDownList_SearchType: 'Operation' }, { eventTarget: 'DropDownList_SearchType' });
+    const box = searchBox(page.doc)?.getAttribute('name') || 'TextBox_OperationOrPartNumber';
+    const doc = await postBack({ DropDownList_SearchType: 'Operation', [box]: baseNumber(code) }, { click: true });
+    showResults(doc, code);
+    showWordForm();
+    $('l-body').prepend(el('button', { class: 'ghost small l-back', text: '‹ Back to the matches', onclick: () => wordSearch(saved.q) }));
+  } catch (e) { failed(e, () => wordOpen(o)); } finally { busy = false; }
 }
 
 // ---------- reading SLTS's report ----------
@@ -201,28 +293,57 @@ function overlapRules(lines) {
 }
 const matches = (pattern, code) => (pattern.endsWith('*') ? code.startsWith(pattern.slice(0, -1)) : code === pattern);
 
+// 5212BF → 5212B, 18125AT → 18125A, 5649ARB → 5649A: the operation an option belongs to
+const opIdOf = (code) => (String(code || '').match(/^[0-9A-Z]*?\d[A-Z]/) || [code || ''])[0];
+// Row kinds in SLTS's report
+const isOptionRow = (r) => r.cells[1]?.getAttribute('align') === 'right' && !!codeOf(r.cells[3]);
+const opAnchor = (r) => [...r.querySelectorAll('a[name]')].find((a) => !/^(top|bottom)$/i.test(a.getAttribute('name')));
+// An operation's title: bold name in a small table with SLTS's ▲▼ (top / bottom) links, or its own <a name>
+const isTitleRow = (r) => !isOptionRow(r) && !!(opAnchor(r) || (r.cells[1]?.querySelector('table b') && r.cells[1].querySelector('a[href$="#top"], a[href$="#bottom"]')));
+// The first option row after an operation's title row (before the next title)
+function nextOptionRow(row) {
+  for (let r = row.nextElementSibling; r; r = r.nextElementSibling) {
+    if (isTitleRow(r)) return null;
+    if (isOptionRow(r)) return r;
+  }
+  return null;
+}
 function parseReport(doc) {
   const xml = doc.getElementById('TableRow_XmlContent');
   if (!xml) return null;
-  const outer = xml.querySelector('table[border="1"]');
-  const inner = outer?.querySelector('table');
-  if (!inner) return null;
+  // A section can come back as several report tables (one per group of operations): read them all, in order
+  // The report table: rows of six cells (gap, description, gap, operation number, gap, time). Keep only
+  // the innermost such tables, so a wrapper table's rows aren't read twice.
+  const opRow = (r) => r.cells.length === 6 && r.cells[3].getAttribute('width') === '100';
+  let tables = [...xml.querySelectorAll('table')].filter((t) => [...t.rows].some(opRow));
+  tables = tables.filter((t) => !tables.some((o) => o !== t && t.contains(o)));
+  if (!tables.length) return null;
   const title = clean(xml.querySelector('td.copysubtitle')?.textContent);
   const ops = [];
   let cur = null, base = null, mode = 'base', suppParent = null, group = '';
-  for (const row of inner.rows) {
+  for (const row of tables.flatMap((t) => [...t.rows])) {
+    if (!opRow(row)) continue;
     const tds = row.cells;
     if (tds.length < 2) continue;
     const text = clean(row.textContent);
     if (!text || /^Operation Description\s+Operation Number\s+Time$/i.test(text)) continue;
-    const head = row.querySelector('a[name]');
-    if (head) {
-      const code = head.getAttribute('name').toUpperCase();
+    // A section list puts a coloured group title ("DIAGNOSTIC OPERATIONS", "ALL OPERATIONS - …") between operations
+    if (tds[1] && !tds[1].querySelector('table') && tds[1].querySelector('b font') && !codeOf(tds[3])) {
+      group = clean(tds[1].textContent); cur = null; base = null; mode = 'base'; suppParent = null;
+      continue;
+    }
+    // An operation's title row: its name in bold (with part numbers) in a small table of its own. It carries
+    // <a name="CODE"> only when the operation has a single time; otherwise the code comes from its options.
+    if (codeOf(tds[3]) === 'OPERATIONNUMBER') continue; // the column headings
+    if (isTitleRow(row)) {
+      const anchor = opAnchor(row);
+      let code = anchor ? anchor.getAttribute('name').toUpperCase() : '';
+      if (!code) code = opIdOf(codeOf(nextOptionRow(row)?.cells[3]));
       const b = tds[1]?.querySelector('b');
       const parts = [...(b?.querySelectorAll('a[href*="partlink"]') || [])].map((a) => clean(a.textContent));
       const name = clean(b?.textContent).replace(/\(\s*[^)]*\)\s*/g, (m) => (parts.some((p) => m.includes(p)) ? '' : m)).replace(/\s+-\s+/, ' - ').trim();
       let kind = 'base', parent = null;
-      if (isBase(code)) { mode = 'base'; suppParent = null; }
+      if (!code || isBase(code)) { mode = 'base'; suppParent = null; }
       else if (mode === 'supp' && suppParent && code.startsWith(suppParent.code)) { kind = 'supp'; parent = suppParent; }
       else if (mode === 'supp') { mode = 'combo'; }
       if (kind !== 'supp' && mode === 'combo' && base) { kind = 'combo'; parent = base; }
@@ -318,7 +439,8 @@ function showResults(doc, q) {
   const want = String(q || '').toUpperCase().replace(/\s+/g, '');
   if (want) {
     const hit = document.querySelector(`[data-op="${CSS.escape(want)}"]`) || document.querySelector(`[data-opt="${CSS.escape(want)}"]`);
-    if (hit) { hit.scrollIntoView({ block: 'center' }); hit.classList.add('l-flash'); }
+    // after the page has settled (a "Back" button may be added above), glide down to it
+    if (hit) setTimeout(() => { hit.scrollIntoView({ block: 'center', behavior: 'smooth' }); hit.classList.add('l-flash'); }, 150);
   }
 }
 
@@ -554,8 +676,9 @@ async function init() {
   busy = true;
   try {
     await start();
-    if (saved.type && saved.type !== currentType()) await postBack({ DropDownList_SearchType: saved.type }, { eventTarget: 'DropDownList_SearchType' });
+    if (saved.type && !WORD(saved.type) && saved.type !== currentType()) await postBack({ DropDownList_SearchType: saved.type }, { eventTarget: 'DropDownList_SearchType' });
     renderForm();
+    if (WORD(saved.type)) showWordForm();
     if (saved.q) $('l-q').value = saved.q;
     hint();
   } catch (e) { failed(e, init); } finally { busy = false; }

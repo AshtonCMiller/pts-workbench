@@ -1088,6 +1088,12 @@ function render() {
   lastMsgCount = s.msgCount;
   $('btn-chat').classList.toggle('on', !!s.chatOpen);
   renderChat();
+  // Feedback: the button for everyone; the admin also gets a count of new reports
+  $('btn-feedback').hidden = !s.feedback?.on;
+  const fbNew = s.feedback?.admin ? s.feedback.newCount || 0 : 0;
+  $('feedback-count').hidden = !fbNew; $('feedback-count').textContent = fbNew ? String(fbNew) : '';
+  $('fbtab-all').hidden = !s.feedback?.admin;
+  $('fb-all-count').hidden = !fbNew; $('fb-all-count').textContent = fbNew ? String(fbNew) : '';
   $('btn-dash').classList.toggle('on', !!s.settings.xtimeDashboard);
   $('btn-dash').textContent = s.settings.xtimeDashboard ? 'Xtime page' : 'Dashboard';
   if (s.mode === 'xtime' && s.settings.xtimeDashboard) { renderSignin(s); renderDashboard(s); }
@@ -1177,6 +1183,7 @@ function tabEl(ws, t, activeId) {
     }),
   );
   tab.addEventListener('click', () => { if (t.id !== activeId) api.send('select-tab', { ro: ws.ro, id: t.id }); });
+  makeTabDraggable(ws, t, tab);
   tab.addEventListener('dblclick', () => {
     const input = el('input', { value: t.title });
     let finished = false;
@@ -1192,6 +1199,54 @@ function tabEl(ws, t, activeId) {
     input.focus(); input.select();
   });
   return tab;
+}
+
+// ---------- drag tabs to reorder (within their own row) ----------
+// While dragging, state updates don't redraw the tabs.
+let dragTab = null; // { ro, id, row: the strip's element id }
+function makeTabDraggable(ws, t, tab) {
+  tab.draggable = true;
+  tab.dataset.id = t.id;
+  const rowOf = () => tab.parentElement?.id || '';
+  tab.addEventListener('dragstart', (e) => {
+    if (e.target.closest('input')) { e.preventDefault(); return; } // renaming
+    dragTab = { ro: ws.ro, id: t.id, row: rowOf() };
+    editingTab = true;
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', String(t.id));
+    requestAnimationFrame(() => tab.classList.add('dragging'));
+  });
+  tab.addEventListener('dragend', () => {
+    tab.classList.remove('dragging');
+    document.querySelectorAll('.tab.drop-before, .tab.drop-after').forEach((n) => n.classList.remove('drop-before', 'drop-after'));
+    dragTab = null;
+    editingTab = false;
+    render();
+  });
+  tab.addEventListener('dragover', (e) => {
+    if (!dragTab || dragTab.id === t.id || dragTab.row !== rowOf()) return; // only within the same row
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    const r = tab.getBoundingClientRect();
+    const after = e.clientX > r.left + r.width / 2;
+    tab.classList.toggle('drop-after', after);
+    tab.classList.toggle('drop-before', !after);
+  });
+  tab.addEventListener('dragleave', () => tab.classList.remove('drop-before', 'drop-after'));
+  tab.addEventListener('drop', (e) => {
+    e.preventDefault();
+    if (!dragTab || dragTab.id === t.id || dragTab.row !== rowOf()) return;
+    const after = tab.classList.contains('drop-after');
+    const strip = tab.parentElement;
+    const ids = [...strip.querySelectorAll('.tab')].map((n) => Number(n.dataset.id)).filter((id) => id !== dragTab.id);
+    let i = ids.indexOf(t.id);
+    if (after) i++;
+    ids.splice(i, 0, dragTab.id);
+    // Move it on screen right away, then tell the app (which saves it)
+    const moved = strip.querySelector(`.tab[data-id="${dragTab.id}"]`);
+    if (moved) (after ? tab.after(moved) : tab.before(moved));
+    api.send('reorder-tabs', { ro: dragTab.ro, ids });
+  });
 }
 
 function renderTabs(ws) {
@@ -1593,3 +1648,107 @@ document.addEventListener('keydown', (e) => {
 });
 api.onState((s) => { state = s; render(); renderAddLookup(); maybeShowSetup(); });
 api.send('ui-ready');
+
+
+// ---------- Feedback: bug reports & ideas (and, for the app's admin, everyone's) ----------
+const FB_STATUS = { new: 'New', planned: 'Planned', 'in-progress': 'Working on it', done: 'Done', 'wont-do': "Won't do" };
+const fbDate = (t) => new Date(t).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' });
+let fbTab = 'send';
+let fbAllFilter = 'open';
+let fbAll = [];
+function fbShow(tab) {
+  fbTab = tab;
+  document.querySelectorAll('[data-fbtab]').forEach((b) => b.classList.toggle('on', b.dataset.fbtab === tab));
+  $('fb-send').hidden = tab !== 'send';
+  $('fb-mine').hidden = tab !== 'mine';
+  $('fb-all').hidden = tab !== 'all';
+  if (tab === 'mine') { $('fb-mine').replaceChildren(el('div', { class: 'muted', text: 'Loading…' })); api.send('feedback-mine'); }
+  if (tab === 'all') { $('fb-all').replaceChildren(el('div', { class: 'muted', text: 'Loading…' })); api.send('feedback-all'); }
+}
+document.querySelectorAll('[data-fbtab]').forEach((b) => { b.onclick = () => fbShow(b.dataset.fbtab); });
+$('btn-feedback').onclick = () => {
+  const ws = typeof activeWs === 'function' ? activeWs() : null;
+  const sub = ws?.sub?.tabs.find((t) => t.id === ws.sub.active);
+  const top = ws?.tabs.find((t) => t.id === ws.activeTab);
+  $('fb-screen').textContent = state?.mode !== 'manual' ? 'Xtime' : ['Workbench', top?.title, top?.kind === 'service' ? sub?.title : ''].filter(Boolean).join(' › ');
+  $('fb-sent').textContent = '';
+  openModal('modal-feedback');
+  fbShow(state?.feedback?.admin && state.feedback.newCount ? 'all' : 'send');
+  if (fbTab === 'send') setTimeout(() => $('fb-send').elements.title.focus(), 0);
+};
+$('fb-send').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const f = $('fb-send');
+  if (!f.elements.title.value.trim()) { f.elements.title.focus(); return; }
+  $('fb-submit').disabled = true;
+  $('fb-sent').textContent = 'Sending…';
+  api.send('feedback-send', { kind: f.elements.kind.value, title: f.elements.title.value, body: f.elements.body.value, screen: $('fb-screen').textContent });
+});
+
+function fbStatusChip(st) { return el('span', { class: `fb-status ${st}`, text: FB_STATUS[st] || st }); }
+
+function fbMine(list) {
+  if (!list.length) return [el('div', { class: 'muted fb-empty', text: "You haven't sent anything yet." })];
+  return list.map((r) => el('div', { class: 'fb-item' },
+    el('div', { class: 'fb-top' }, el('span', { class: `fb-kind-tag ${r.kind}`, text: r.kind === 'bug' ? 'Bug' : 'Idea' }),
+      el('b', { text: r.title }), el('span', { class: 'fb-grow' }), fbStatusChip(r.status), el('span', { class: 'muted small', text: fbDate(r.created_at) })),
+    r.reply ? el('div', { class: 'fb-reply' }, el('b', { text: 'Reply: ' }), r.reply) : null));
+}
+
+function fbAllView() {
+  const pane = $('fb-all');
+  const shown = fbAll.filter((r) => fbAllFilter === 'all' || (fbAllFilter === 'open' ? !['done', 'wont-do'].includes(r.status)
+    : fbAllFilter === 'new' ? r.status === 'new' : r.kind === fbAllFilter));
+  const filter = el('select', { class: 'fb-filter', onchange: (e) => { fbAllFilter = e.target.value; fbAllView(); } },
+    ...[['open', 'Open'], ['new', 'New'], ['bug', 'Bugs'], ['feature', 'Ideas'], ['all', 'Everything']].map(([v, t]) => {
+      const o = el('option', { value: v, text: t }); o.selected = v === fbAllFilter; return o; }));
+  const items = shown.map((r) => {
+    const status = el('select', { class: 'fb-status-pick' }, ...Object.entries(FB_STATUS).map(([v, t]) => { const o = el('option', { value: v, text: t }); o.selected = v === r.status; return o; }));
+    status.onchange = () => api.send('feedback-update', { id: r.id, status: status.value });
+    const reply = el('textarea', { rows: '2', maxlength: '3000', placeholder: 'Reply (shown to them in "My reports")' });
+    reply.value = r.reply || '';
+    return el('div', { class: `fb-item${r.status === 'new' ? ' is-new' : ''}` },
+      el('div', { class: 'fb-top' }, el('span', { class: `fb-kind-tag ${r.kind}`, text: r.kind === 'bug' ? 'Bug' : 'Idea' }),
+        el('b', { text: r.title }), el('span', { class: 'fb-grow' }), status),
+      el('div', { class: 'fb-meta muted small', text: [r.name || 'Someone', fbDate(r.created_at), r.version && `v${r.version}`, r.screen, r.platform].filter(Boolean).join(' · ') }),
+      r.body ? el('div', { class: 'fb-body', text: r.body }) : null,
+      el('div', { class: 'fb-actions' }, reply,
+        el('div', { class: 'fb-btns' },
+          el('button', { class: 'ghost small', type: 'button', text: 'Save reply', onclick: () => api.send('feedback-update', { id: r.id, reply: reply.value }) }),
+          el('button', { class: 'ghost small danger', type: 'button', text: 'Delete', onclick: (e) => {
+            if (e.target.dataset.sure) { api.send('feedback-delete', r.id); return; }
+            e.target.dataset.sure = '1'; e.target.textContent = 'Really delete?';
+          } }))));
+  });
+  pane.replaceChildren(
+    el('div', { class: 'fb-bar' }, el('span', { class: 'muted small', text: `${shown.length} of ${fbAll.length}` }), el('span', { class: 'fb-grow' }), filter,
+      el('button', { class: 'ghost small', type: 'button', text: '↻', title: 'Refresh', onclick: () => api.send('feedback-all') })),
+    ...(items.length ? items : [el('div', { class: 'muted fb-empty', text: 'Nothing here.' })]));
+}
+
+function fbKeyForm(message) {
+  const input = el('input', { type: 'password', placeholder: 'Feedback password', autocomplete: 'off' });
+  const form = el('form', { class: 'fb-key', onsubmit: (e) => { e.preventDefault(); if (input.value.trim()) api.send('feedback-key', input.value); } },
+    el('p', { text: "Enter the Feedback password (the REPORTS_ADMIN_KEY you set in GitHub). It's kept on this computer, encrypted." }),
+    message ? el('p', { class: 'fb-err', text: message }) : null,
+    el('div', { class: 'row-end' }, input, el('button', { class: 'primary', type: 'submit', text: 'Unlock' })));
+  setTimeout(() => input.focus(), 0);
+  return form;
+}
+
+api.onFeedback?.((d) => {
+  if (d.kind === 'sent') {
+    $('fb-submit').disabled = false;
+    if (d.ok) {
+      $('fb-send').reset();
+      $('fb-sent').textContent = '✓ Sent. Thanks! You can check on it under My reports.';
+    } else $('fb-sent').textContent = d.message || "Couldn't send it.";
+  } else if (d.kind === 'mine') {
+    $('fb-mine').replaceChildren(...(d.error ? [el('div', { class: 'fb-err', text: d.error })] : fbMine(d.list || [])));
+  } else if (d.kind === 'all') {
+    if (d.needsKey) { $('fb-all').replaceChildren(fbKeyForm(d.message)); return; }
+    if (d.error) { $('fb-all').replaceChildren(el('div', { class: 'fb-err', text: d.error })); return; }
+    fbAll = d.list || [];
+    fbAllView();
+  }
+});

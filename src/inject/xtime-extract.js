@@ -11,7 +11,7 @@
 
   let data;
   try {
-    const res = await fetch(API_PATH, { credentials: 'include', headers: { Accept: 'application/json' } });
+    const res = await fetch(API_PATH, { credentials: 'include', cache: 'no-store', headers: { Accept: 'application/json' } });
     if (res.status === 401 || res.status === 403) return { ok: false, expired: true, error: 'Xtime session expired' };
     if (!res.ok) return { ok: false, error: `Xtime returned HTTP ${res.status}` };
     // An expired session usually comes back as a redirect to the sign-in page (HTML, not data)

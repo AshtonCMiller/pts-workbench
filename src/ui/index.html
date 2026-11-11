@@ -32,6 +32,7 @@
       <button id="btn-refresh" class="icon" title="Refresh my ROs">↻</button>
       <button id="btn-dash" class="ghost" title="Switch between Xtime's page and the app's own dashboard">Dashboard</button>
       <button id="btn-drawer" class="ghost" title="Show or hide My ROs">My ROs</button>
+      <button id="btn-feedback" class="ghost" title="Report a bug or suggest an idea" hidden>Feedback <span id="feedback-count" class="count" hidden></span></button>
       <button id="btn-settings" class="icon" title="Settings">⚙</button>
     </div>
   </header>
@@ -124,6 +125,36 @@
   </main>
 
   <!-- Dialogs -->
+  <!-- Feedback: report a bug or suggest an idea; the app's admin also reads everyone's here -->
+  <div id="modal-feedback" class="modal" hidden>
+    <div class="dialog wide fb">
+      <div class="fb-head">
+        <h2>Feedback</h2>
+        <nav class="seg fb-tabs">
+          <button type="button" data-fbtab="send" class="on">Send</button>
+          <button type="button" data-fbtab="mine">My reports</button>
+          <button type="button" data-fbtab="all" id="fbtab-all" hidden>Everyone's <span id="fb-all-count" class="count" hidden></span></button>
+        </nav>
+        <button type="button" class="ghost small" data-close>Close</button>
+      </div>
+
+      <form id="fb-send" class="fb-pane" autocomplete="off">
+        <div class="fb-kinds">
+          <label class="fb-kind"><input type="radio" name="kind" value="bug" checked><span><b>🐞 Something's wrong</b><small>A bug: something broke or doesn't work right</small></span></label>
+          <label class="fb-kind"><input type="radio" name="kind" value="feature"><span><b>💡 An idea</b><small>Something new, or a way to make it easier</small></span></label>
+        </div>
+        <label>Short title <input name="title" maxlength="140" required placeholder="e.g. Labor Times search shows nothing"></label>
+        <label>Details <textarea name="body" rows="7" maxlength="6000"
+          placeholder="What happened, and what did you expect? What were you doing (which screen, which button)?"></textarea></label>
+        <p class="muted small">Sent with your name, the app version and the screen you're on (<span id="fb-screen"></span>). No VINs, RO numbers or customer details are sent: leave those out of the text too.</p>
+        <div class="row-end"><span id="fb-sent" class="muted small"></span><button type="submit" class="primary" id="fb-submit">Send</button></div>
+      </form>
+
+      <div id="fb-mine" class="fb-pane" hidden></div>
+      <div id="fb-all" class="fb-pane" hidden></div>
+    </div>
+  </div>
+
   <div id="modal-settings" class="modal" hidden>
     <form class="dialog" id="form-settings">
       <h2>Settings <span class="muted small" id="settings-for"></span></h2>
@@ -169,7 +200,7 @@
         <p class="muted small" id="logins-note">Logins are saved when you sign in to Xtime, PTS or ProDemand in this window, encrypted with your Windows account.</p>
         <div id="logins-list"></div>
         <label class="check"><input name="autoLogin" type="checkbox"> Sign in automatically with a saved login (e.g. when Xtime's session expires)</label>
-        <label class="check"><input name="notifications" type="checkbox"> Windows notifications when an RO is assigned to me, a line is approved, or I get an Xtime message</label>
+        <label class="check"><input name="notifications" type="checkbox"> Windows notifications when an RO is assigned to me, a line is approved or declined, parts come in, the customer or warranty answers, or I get an Xtime message</label>
       </div>
       <label>ProDemand start page <input name="prodemandUrl" required placeholder="https://prodemand.com/"></label>
       <label>Refresh Xtime in the background every (minutes) <input name="xtimeRefreshMinutes" type="number" min="20" max="600" required></label>

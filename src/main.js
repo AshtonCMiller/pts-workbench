@@ -15,13 +15,16 @@ const XTIME_DETAILS = fs.readFileSync(path.join(__dirname, 'inject', 'xtime-deta
 const XTIME_VEHICLE = fs.readFileSync(path.join(__dirname, 'inject', 'xtime-vehicle.js'), 'utf8').trim();
 const XTIME_EMPLOYEE = fs.readFileSync(path.join(__dirname, 'inject', 'xtime-employee.js'), 'utf8').trim();
 const { Tracker } = require('./tracker');
-const { ManualService, PTS: PTS_ORIGIN } = require('./manual');
+const { ManualService, PTS: PTS_ORIGIN, ASSET_HOSTS } = require('./manual');
+const { pathToFileURL } = require('url');
 
 // Pictures in the app's own manual viewer come through ptsasset://, fetched with the window's PTS login
 protocol.registerSchemesAsPrivileged([{ scheme: 'ptsasset', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }]);
 const { SyncEngine } = require('./sync');
 // The sync server's address is set in package.json ("ptsWorkbench": { "syncUrl": … })
 const SYNC_URL = (() => { try { return require('../package.json').ptsWorkbench?.syncUrl || ''; } catch { return ''; } })();
+// Feedback (bug reports / feature ideas) goes to the same server; this employee number can read it all
+const FEEDBACK_ADMIN = (() => { try { return String(require('../package.json').ptsWorkbench?.feedbackAdmin || ''); } catch { return ''; } })();
 
 const TOP_BAR = 48;
 const TAB_STRIP = 38;
@@ -54,7 +57,7 @@ const DEFAULT_SETTINGS = {
   sidebarWidth: 380,
   sidebarHidden: false,
   xtimeDashboard: false,   // show the app's own Xtime dashboard instead of Xtime's page
-  notifications: true,     // Windows pop-ups: RO assigned, line approved, new Xtime messages
+  notifications: true,     // Windows pop-ups: RO assigned, line approved/declined, parts in, customer/warranty answered, new Xtime messages
 };
 const BOOLEAN_SETTINGS = ['autoLogin', 'setupDone', 'syncEnabled', 'xtimeDashboard', 'notifications', 'sidebarHidden'];
 // Not shown in Settings (too technical): always the built-in values, updated with the app
@@ -291,6 +294,7 @@ function createWorkbench(profile) {
     save: (st) => writeJsonAt(profileFile(profile.id, 'sync.json'), st),
     request: syncRequest,
     onStatus: (st) => { Object.assign(syncStatus, st); pushState(); },
+    onApplied: () => setTimeout(() => reconcileOpenROs(), 0),
   });
   syncStatus.lastSync = sync.state.lastSync || null;
   let syncFlushed = false;
@@ -430,15 +434,197 @@ function createWorkbench(profile) {
       activeRO,
       hidden: [...hiddenROs],
       xtimeName,
-      list: [...workspaces.values()].map((ws) => ({
+      list: [...workspaces.values()].map((ws) => {
+        const kept = ws.tabs.filter((t) => t.kind !== 'doc'); // downloaded PDFs aren't kept
+        return {
         ro: ws.ro, vin: ws.vin, ymm: ws.ymm,
-        tabs: ws.tabs.map((t) => ({ kind: t.kind, title: t.title, ...(t.manualState ? { state: t.manualState } : {}) })),
-        activeIndex: Math.max(0, ws.tabs.findIndex((t) => t.id === ws.activeTab)),
-        svcIndex: ws.tabs.findIndex((t) => t.id === ws.svcTab),
+        tabs: kept.map((t) => ({ kind: t.kind, title: t.title, ...(t.url ? { url: t.url } : {}), ...(t.manualState ? { state: t.manualState } : {}) })),
+        activeIndex: Math.max(0, kept.findIndex((t) => t.id === ws.activeTab)),
+        svcIndex: kept.findIndex((t) => t.id === ws.svcTab),
         layout: 3,
-      })),
+        };
+      }),
     });
+    syncOpenList();
   }
+
+  // ---------- Feedback: bug reports & feature ideas ----------
+  // Sent to the sync server's /v1/reports. A report carries the person's name, what they wrote, the app
+  // version and which screen they were on: never VINs, RO numbers or customer details. Each computer has a
+  // random reporter ID so people can see their own reports' status. The admin (FEEDBACK_ADMIN) reads them
+  // all with a password (the server's ADMIN_KEY), kept on this computer encrypted.
+  let feedbackNew = 0;
+  const isFeedbackAdmin = () => !!FEEDBACK_ADMIN && String(settings.employeeNumber || '').trim() === FEEDBACK_ADMIN;
+  function reporterId() {
+    const f = profileFile(profile.id, 'reporter.json');
+    let r = readJsonAt(f, null);
+    if (!/^[a-f0-9]{32}$/.test(r?.id || '')) { r = { id: require('crypto').randomBytes(16).toString('hex') }; writeJsonAt(f, r); }
+    return r.id;
+  }
+  function adminKey() {
+    const rec = readJson('feedback-key.json', null);
+    if (!rec?.k) return '';
+    try { return canEncrypt() ? safeStorage.decryptString(Buffer.from(rec.k, 'base64')) : ''; } catch { return ''; }
+  }
+  function setAdminKey(key) {
+    if (!key) { writeJson('feedback-key.json', {}); return; }
+    if (!canEncrypt()) return;
+    writeJson('feedback-key.json', { k: safeStorage.encryptString(key).toString('base64') });
+  }
+  function screenName() {
+    if (mode !== 'manual') return 'Xtime';
+    const ws = workspaces.get(activeRO);
+    const t = ws && currentTab(ws);
+    if (!t) return 'Workbench';
+    return ['Workbench', inService(t.kind) ? 'Service Manual' : '', TAB_NAMES[t.kind] || t.kind].filter(Boolean).join(' › ');
+  }
+  const sendFeedback = (data) => { if (chrome && !chrome.webContents.isDestroyed()) chrome.webContents.send('feedback', data); };
+  async function feedbackCall(method, pathPart, body, admin = false) {
+    const headers = { 'content-type': 'application/json' };
+    if (admin) headers.authorization = `Bearer ${adminKey()}`;
+    const res = await net.fetch(`${SYNC_URL.replace(/\/+$/, '')}${pathPart}`, { method, headers, body: body ? JSON.stringify(body) : undefined });
+    let json = null;
+    try { json = await res.json(); } catch { /* not JSON */ }
+    return { status: res.status, body: json || {} };
+  }
+  async function loadAllFeedback() {
+    if (!isFeedbackAdmin()) return;
+    if (!adminKey()) { sendFeedback({ kind: 'all', needsKey: true }); return; }
+    try {
+      const r = await feedbackCall('GET', '/v1/reports', null, true);
+      if (r.status === 401) { sendFeedback({ kind: 'all', needsKey: true, message: 'That password was wrong.' }); return; }
+      if (r.status === 503) { sendFeedback({ kind: 'all', error: 'The server has no admin password set up yet (REPORTS_ADMIN_KEY).' }); return; }
+      if (r.status !== 200) throw new Error(r.body.error || `server said ${r.status}`);
+      const list = r.body.reports || [];
+      feedbackNew = list.filter((x) => x.status === 'new').length;
+      sendFeedback({ kind: 'all', list });
+      pushState();
+    } catch (e) { sendFeedback({ kind: 'all', error: `Couldn't load feedback: ${e.message || e}` }); }
+  }
+  // The admin's badge: how many new reports (checked at start and every 15 minutes)
+  async function countNewFeedback() {
+    if (!isFeedbackAdmin() || !adminKey() || !SYNC_URL) return;
+    try {
+      const r = await feedbackCall('GET', '/v1/reports', null, true);
+      if (r.status === 200) { const n = (r.body.reports || []).filter((x) => x.status === 'new').length; if (n !== feedbackNew) { feedbackNew = n; pushState(); } }
+    } catch { /* try again later */ }
+  }
+  const feedbackHandlers = {
+    'feedback-send': async (p) => {
+      const kind = p?.kind === 'feature' ? 'feature' : 'bug';
+      const title = String(p?.title || '').trim().slice(0, 140);
+      const body = String(p?.body || '').trim().slice(0, 6000);
+      if (!title) { sendFeedback({ kind: 'sent', ok: false, message: 'Give it a short title first.' }); return; }
+      if (!SYNC_URL) { sendFeedback({ kind: 'sent', ok: false, message: 'This version has no server to send feedback to.' }); return; }
+      try {
+        const r = await feedbackCall('POST', '/v1/reports', {
+          kind, title, body, reporter: reporterId(), name: displayName(), version: app.getVersion(),
+          platform: `${process.platform} ${require('os').release()}`, screen: String(p?.screen || screenName()).slice(0, 120),
+        });
+        if (r.status === 429) throw new Error("you've sent a lot in the last hour; try again later");
+        if (r.status !== 200) throw new Error(r.body.error || `server said ${r.status}`);
+        sendFeedback({ kind: 'sent', ok: true });
+        feedbackHandlers['feedback-mine']();
+        if (isFeedbackAdmin()) countNewFeedback();
+      } catch (e) { sendFeedback({ kind: 'sent', ok: false, message: `Couldn't send it: ${e.message || e}` }); }
+    },
+    'feedback-mine': async () => {
+      if (!SYNC_URL) return;
+      try {
+        const r = await feedbackCall('GET', `/v1/reports/mine?reporter=${reporterId()}`);
+        if (r.status !== 200) throw new Error(r.body.error || `server said ${r.status}`);
+        sendFeedback({ kind: 'mine', list: r.body.reports || [] });
+      } catch (e) { sendFeedback({ kind: 'mine', error: `Couldn't load your reports: ${e.message || e}` }); }
+    },
+    'feedback-all': () => loadAllFeedback(),
+    'feedback-key': async (key) => {
+      if (!isFeedbackAdmin()) return;
+      key = String(key || '').trim();
+      if (!canEncrypt()) { sendFeedback({ kind: 'all', error: "This computer can't store the password safely." }); return; }
+      setAdminKey(key);
+      loadAllFeedback();
+    },
+    'feedback-update': async (p) => {
+      if (!isFeedbackAdmin()) return;
+      const id = Number(p?.id);
+      if (!Number.isInteger(id)) return;
+      const body = {};
+      if (p.status !== undefined) body.status = String(p.status);
+      if (p.reply !== undefined) body.reply = String(p.reply).slice(0, 3000);
+      try {
+        const r = await feedbackCall('PATCH', `/v1/reports/${id}`, body, true);
+        if (r.status !== 200) throw new Error(r.body.error || `server said ${r.status}`);
+        notice('Saved');
+      } catch (e) { notice(`Couldn't save: ${e.message || e}`); }
+      loadAllFeedback();
+    },
+    'feedback-delete': async (id) => {
+      if (!isFeedbackAdmin() || !Number.isInteger(Number(id))) return;
+      try {
+        const r = await feedbackCall('DELETE', `/v1/reports/${Number(id)}`, null, true);
+        if (r.status !== 200) throw new Error(r.body.error || `server said ${r.status}`);
+      } catch (e) { notice(`Couldn't delete: ${e.message || e}`); }
+      loadAllFeedback();
+    },
+  };
+  setTimeout(countNewFeedback, 20 * 1000);
+  setInterval(countNewFeedback, 15 * 60 * 1000);
+
+  // ---------- open ROs, synced between computers (RO number + year/make/model only) ----------
+  // The tracker keeps the list of open ROs so sync carries it; the VIN never syncs, so a computer
+  // that gets an RO from elsewhere finds the VIN itself (this computer's records, your Xtime list,
+  // or an Xtime lookup). ROs it can't open yet wait here and are retried after each Xtime refresh.
+  const syncWaiting = new Map(); // ro → ymm
+  const syncOpening = new Set();
+  function syncOpenList() {
+    let t;
+    try { t = tracker; } catch { return; } // not created yet
+    if (!t) return;
+    const next = {};
+    for (const ws of workspaces.values()) next[ws.ro] = { ymm: ws.ymm || '' };
+    for (const [ro, ymm] of syncWaiting) if (!next[ro]) next[ro] = { ymm };
+    if (JSON.stringify(next) !== JSON.stringify(t.data.openROs || {})) { t.data.openROs = next; t.save(); }
+  }
+  function reconcileOpenROs() {
+    const want = tracker.data.openROs || {};
+    let changed = false;
+    // closed on another computer
+    let keep = false;
+    for (const ro of [...workspaces.keys()]) {
+      if (ro in want) continue;
+      if (tracker.data.openClosedBy?.[ro] === 'app') { handlers['close-ro'](ro); changed = true; }
+      else keep = true; // dropped by an older app version (or never known there): keep it open, and say so again
+    }
+    if (keep) syncOpenList();
+    for (const ro of [...syncWaiting.keys()]) if (!(ro in want)) syncWaiting.delete(ro);
+    // opened on another computer
+    for (const [ro, w] of Object.entries(want)) {
+      if (workspaces.has(ro) || syncOpening.has(ro)) continue;
+      syncWaiting.set(ro, w?.ymm || '');
+      openSyncedRO(ro, w?.ymm || '');
+      changed = true;
+    }
+    if (changed) pushState();
+  }
+  async function openSyncedRO(ro, ymm) {
+    const mine = myROs.find((r) => r.ro === ro);
+    let vin = tracker.data.ros?.[ro]?.vin || mine?.vin || '';
+    if (!ymm && mine) ymm = [mine.year, mine.make, mine.model].filter(Boolean).join(' ');
+    if (!vin) {
+      const frame = findXtimeDataFrame();
+      if (!frame) return; // waits for Xtime
+      syncOpening.add(ro);
+      try {
+        const res = await frame.executeJavaScript(
+          `${XTIME_VEHICLE}(${JSON.stringify(ro)}, ${JSON.stringify(settings.xtimeApiPath)}, ${JSON.stringify(settings.xtimeDetailsPath)})`, true);
+        if (res?.ok && res.vin) { vin = res.vin; ymm = ymm || res.ymm || ''; }
+      } catch { /* tried again after the next Xtime refresh */ } finally { syncOpening.delete(ro); }
+    }
+    if (!vin || !(ro in (tracker.data.openROs || {})) || workspaces.has(ro)) return;
+    syncWaiting.delete(ro);
+    openWorkspace({ ro, vin, ymm, quiet: true });
+  }
+  function retrySyncedROs() { for (const [ro, ymm] of syncWaiting) if (!workspaces.has(ro) && !syncOpening.has(ro)) openSyncedRO(ro, ymm); }
 
   function loadWorkspaces() {
     const saved = readJson('workspaces.json', null);
@@ -447,7 +633,8 @@ function createWorkbench(profile) {
     if (!saved?.list) return;
     for (const w of saved.list) {
       const tabs = (w.tabs?.length ? w.tabs : [{ kind: 'pts', title: 'PTS' }])
-        .map((t) => ({ id: nextTabId++, kind: t.kind, title: t.title, view: null, status: '', manualState: t.state || null }));
+        .map((t) => ({ id: nextTabId++, kind: t.kind, title: t.title, view: null, status: '', manualState: t.state || null, ...(t.url ? { url: String(t.url) } : {}) }))
+        .filter((t) => t.kind !== 'doc' && (t.kind !== 'article' || /^https:/i.test(t.url || ''))); // a Ford article (FSA…) opened from OASIS
       const ws = { ro: w.ro, vin: w.vin, ymm: w.ymm || '', tabs, activeTab: tabs[w.activeIndex || 0]?.id ?? tabs[0].id,
         svcTab: w.svcIndex >= 0 ? tabs[w.svcIndex]?.id ?? null : null };
       if (w.layout !== 3) upgradeTabs(ws, ws.activeTab); // saved before Xtime | PTS | Service Manual
@@ -467,6 +654,7 @@ function createWorkbench(profile) {
       if (s) roInfo[ro] = s;
     }
     chrome.webContents.send('state', {
+      feedback: { on: !!SYNC_URL, admin: isFeedbackAdmin(), newCount: feedbackNew },
       mode, drawerOpen, chatOpen, settings, xtimeStatus, lastPoll, activeRO, xtimeSignin, msgCount,
       myROs, roInfo,
       tracking: tracker?.summary() ?? null,
@@ -543,7 +731,10 @@ function createWorkbench(profile) {
   // ---------- web views ----------
   function hardenWebContents(wc) {
     // Popups (e.g. wiring diagrams) open as normal windows that share this window's login.
-    wc.setWindowOpenHandler(({ url }) => {
+    wc.setWindowOpenHandler(windowOpenRule);
+    wc.on('will-attach-webview', (e) => e.preventDefault());
+  }
+  function windowOpenRule({ url }) {
       if (!/^https?:/i.test(url)) return { action: 'deny' };
       return {
         action: 'allow',
@@ -555,8 +746,6 @@ function createWorkbench(profile) {
           },
         },
       };
-    });
-    wc.on('will-attach-webview', (e) => e.preventDefault());
   }
 
   function makeWebView() {
@@ -577,15 +766,131 @@ function createWorkbench(profile) {
     .replace('{VIN}', encodeURIComponent(vin));
   const hostOf = (url) => { try { return new URL(url).hostname; } catch { return ''; } };
 
+  // ---------- Ford's PDFs (an FSA's technical instructions, bulletin, owner letter…) ----------
+  // Ford's document server refuses ("Access Denied") PDFs opened in the app's own browser tabs, but
+  // hands them to the app's PTS connection (the one that loads Workshop Manual pictures). So a PDF link
+  // in an FSA page is downloaded that way and shown from this computer, as its own Service Manual tab.
+  const isFordPdf = (url) => { try { const u = new URL(url); return u.protocol === 'https:' && ASSET_HOSTS.test(u.hostname) && /\.pdf$/i.test(u.pathname); } catch { return false; } };
+  const PDF_NAMES = [[/_TECHX?$/i, 'Technical instructions'], [/_BULL$/i, 'Dealer bulletin'], [/_MSRA$/i, 'Mobile repair assessment'],
+    [/_DELIV_REC$/i, 'Pick-up & delivery record'], [/_Reimbursement/i, 'Reimbursement'], [/_Owner_Letter_SPN$/i, 'Owner letter (Spanish)'],
+    [/_Owner_Letter/i, 'Owner letter']];
+  function pdfTitle(url) {
+    const file = decodeURIComponent(new URL(url).pathname.split('/').pop() || 'Document').replace(/\.pdf$/i, '');
+    const id = (file.match(/^(\d{2}[A-Z]\d{2})_/i) || [])[1];
+    const known = PDF_NAMES.find(([re]) => re.test(file));
+    return (known ? `${id ? `${id} ` : ''}${known[1]}` : file.replace(/_/g, ' ')).slice(0, 40);
+  }
+  function catchFordPdfs(ws, wc) {
+    // a link that loads the PDF into the page (Ford's FSA page shows them in its right-hand frame)
+    wc.on('will-frame-navigate', (e) => {
+      if (!isFordPdf(e.url)) return;
+      e.preventDefault();
+      openFordPdf(ws, e.url, e.frame?.parent?.url || e.frame?.url || wc.getURL());
+    });
+    // a link that opens the PDF in a new window
+    wc.setWindowOpenHandler((details) => {
+      if (isFordPdf(details.url)) { openFordPdf(ws, details.url, wc.getURL()); return { action: 'deny' }; }
+      return windowOpenRule(details);
+    });
+  }
+  // Ford's document server lets you in with CONTENT_AUTH / CONTENT_PERMISSIONS cookies on fordservicecontent.com.
+  // The app gets them the way PTS's home page does when they're missing or out of date. Only names (never
+  // values) are logged.
+  async function contentCookies() {
+    const all = await manualSes.cookies.get({}).catch(() => []);
+    return all.filter((c) => /^CONTENT_(AUTH|PERMISSIONS)$/i.test(c.name) && (!c.expirationDate || c.expirationDate * 1000 > Date.now() + 60 * 1000));
+  }
+  // PTS's home page carries a one-time signed address on sso.fordservicecontent.com (a script tag that
+  // answers akamaiCallback(...)); loading it is what hands out the cookies. CheckCookie only checks them.
+  async function ensureContentCookies(force = false) {
+    if (!force && (await contentCookies()).some((c) => /AUTH/i.test(c.name))) return true;
+    const where = (u) => { try { const x = new URL(u); return `${x.host}${x.pathname}`; } catch { return '?'; } };
+    try {
+      const home = await manualService.text(`${PTS_ORIGIN}/`, { headers: { Accept: 'text/html,*/*' } });
+      const srcs = [...home.matchAll(/<script\b[^>]*\bsrc\s*=\s*["']([^"']+)["']/gi)].map((m) => m[1].replace(/&amp;/g, '&'));
+      const sso = srcs.filter((u) => /fordservicecontent\.com/i.test(u) && !/CheckCookie/i.test(u) && /^https:/i.test(u))
+        .concat(srcs.filter((u) => /akamaiCallback/i.test(u) && !/CheckCookie/i.test(u)));
+      if (!sso.length) {
+        manualService.log(`content sign-on: no sign-on address on PTS's home page; its scripts: ${[...new Set(srcs.map(where))].join(', ').slice(0, 900)}`);
+        return false;
+      }
+      for (const u of [...new Set(sso)].slice(0, 3)) {
+        const abs = new URL(u, `${PTS_ORIGIN}/`).href;
+        const res = await manualSes.fetch(abs, { credentials: 'include', referrer: `${PTS_ORIGIN}/`, headers: { Accept: 'text/javascript, application/javascript, */*' } });
+        const body = await res.text();
+        manualService.log(`content sign-on ${where(abs)} → ${res.status}: ${body.replace(/\s+/g, ' ').slice(0, 80)}`);
+      }
+      const have = await contentCookies();
+      manualService.log(`   now have: ${have.map((c) => c.name).join(', ') || 'none'}`);
+      return have.some((c) => /AUTH/i.test(c.name));
+    } catch (e) {
+      manualService.log(`content sign-on failed: ${e.message || e}`);
+      return false;
+    }
+  }
+  async function openFordPdf(ws, url, referrer) {
+    const title = pdfTitle(url);
+    const existing = ws.tabs.find((t) => t.kind === 'doc' && t.src === url);
+    if (existing) { setActive(ws, existing); layout(); pushState(); return; }
+    notice(`Opening ${title}…`);
+    try {
+      await ensureContentCookies();
+      const get = () => manualService.fetch(url, { headers: { Accept: 'application/pdf,*/*' }, ...(referrer && /^https:/i.test(referrer) ? { referrer } : {}) });
+      let res;
+      try { res = await get(); } catch (e) {
+        if (!e.needsLogin) throw e;
+        // refused: get fresh cookies from Ford's sign-on and try once more
+        if (!(await ensureContentCookies(true))) throw e;
+        res = await get();
+      }
+      const buf = Buffer.from(await res.arrayBuffer());
+      if (buf.subarray(0, 5).toString() !== '%PDF-') {
+        manualService.log(`   not a PDF (${buf.length} bytes): ${buf.subarray(0, 200).toString().replace(/\s+/g, ' ')}`);
+        throw new Error("Ford didn't send the document");
+      }
+      const dir = profileFile(profile.id, 'docs');
+      fs.mkdirSync(dir, { recursive: true });
+      // keep the folder small: documents older than a week go
+      for (const f of fs.readdirSync(dir)) { try { const p = path.join(dir, f); if (Date.now() - fs.statSync(p).mtimeMs > 7 * 24 * 3600 * 1000) fs.unlinkSync(p); } catch {} }
+      const file = path.join(dir, decodeURIComponent(new URL(url).pathname.split('/').pop()).replace(/[^\w.-]+/g, '_') || 'document.pdf');
+      fs.writeFileSync(file, buf);
+      const t = addTab(ws, 'doc', { activate: false });
+      t.src = url;
+      t.url = pathToFileURL(file).href;
+      t.title = title;
+      ws.tabs.splice(ws.tabs.indexOf(t), 1);
+      ws.tabs.splice(ws.tabs.map((x) => inService(x.kind)).lastIndexOf(true) + 1, 0, t);
+      setActive(ws, t);
+      saveWorkspaces(); layout(); pushState();
+    } catch (e) {
+      manualService.log(`PDF ${url.slice(0, 160)}: ${e.message || e}`);
+      // Ford's document server wants its CONTENT_AUTH / CONTENT_PERMISSIONS cookies: does the app have them?
+      // (names, domains and expiry only; never the values)
+      try {
+        const all = await manualSes.cookies.get({});
+        const mine = all.filter((c) => /^CONTENT_/i.test(c.name) || /fordservicecontent/i.test(c.domain || ''));
+        manualService.log(`   cookies for Ford's document server: ${mine.map((c) => `${c.name} (${c.domain}${c.path || ''}, ${c.expirationDate ? `expires ${new Date(c.expirationDate * 1000).toISOString()}` : 'session'})`).join('; ') || 'none'}`);
+      } catch { /* best effort */ }
+      notice(e.needsLogin ? `Ford refused ${title} (signed out of PTS, or access denied). Sign in to PTS and try again.` : `Couldn't open ${title}: ${e.message || e}`);
+    }
+  }
+
   function ensureView(ws, tab) {
     if (tab.view || tab.kind === 'service') return; // Service Manual is only a row of tabs
     if (tab.kind === 'manual') { tab.view = makeManualView(ws, tab); return; }
-    if (tab.kind === 'oasisview') { tab.view = makeManualView(ws, tab, 'oasis.html'); return; }
-    if (tab.kind === 'diag') { tab.view = makeManualView(ws, tab, 'diag.html'); return; }
-    if (tab.kind === 'labor') { tab.view = makeManualView(ws, tab, 'labor.html'); return; }
+    if (tab.kind === 'oasisview') { tab.view = makeManualView(ws, tab, 'oasis/oasis.html'); return; }
+    if (tab.kind === 'diag') { tab.view = makeManualView(ws, tab, 'diagnostics/diag.html'); return; }
+    if (tab.kind === 'labor') { tab.view = makeManualView(ws, tab, 'labor-times/labor.html'); return; }
     tab.view = makeWebView();
     const wc = tab.view.webContents;
-    if (tab.kind === 'wiring') {
+    if (tab.kind === 'article') { // Ford's own page for an FSA (or other article) opened from OASIS, inside Service Manual
+      tab.status = '';
+      catchFordPdfs(ws, wc);
+      wc.loadURL(tab.url);
+    } else if (tab.kind === 'doc') { // a Ford PDF the app downloaded (see openFordPdf)
+      tab.status = '';
+      wc.loadURL(tab.url);
+    } else if (tab.kind === 'wiring') {
       openWiring(ws, tab);
     } else if (FORD_LINKS[tab.kind]) {
       setupFordTab(ws, tab);
@@ -846,6 +1151,25 @@ function createWorkbench(profile) {
         saveWorkspaces(); layout(); pushState();
         return t.id;
       }
+      // A Ford article (FSA, notice) from OASIS: its own tab in Service Manual instead of a window
+      case 'open-article': {
+        let url = String(payload?.url || '');
+        try { url = new URL(url, PTS_ORIGIN).href; } catch { return false; }
+        if (!/^https:/i.test(url)) return false;
+        let t = ws.tabs.find((x) => x.kind === 'article' && x.url === url);
+        if (!t) {
+          t = addTab(ws, 'article', { activate: false });
+          t.url = url;
+          t.title = String(payload?.title || '').replace(/\s+/g, ' ').trim().slice(0, 40) || 'Article';
+          // next to the other Service Manual tabs (after the last one), not at the end of the top row
+          ws.tabs.splice(ws.tabs.indexOf(t), 1);
+          const lastSvc = ws.tabs.map((x) => inService(x.kind)).lastIndexOf(true);
+          ws.tabs.splice(lastSvc + 1, 0, t);
+        }
+        setActive(ws, t);
+        saveWorkspaces(); layout(); pushState();
+        return true;
+      }
       case 'open-url': {
         let url = String(payload || '');
         try { url = new URL(url, PTS_ORIGIN).href; } catch { return false; }
@@ -917,16 +1241,52 @@ function createWorkbench(profile) {
     }
     knownMine = now;
   }
+  // notify.log: which notifications fired and why (RO numbers and line letters only), to check they work
+  const notifyLog = (line) => {
+    try {
+      const f = userFile('notify.log');
+      try { if (fs.statSync(f).size > 256 * 1024) fs.renameSync(f, f + '.old'); } catch {}
+      fs.appendFileSync(f, `${new Date().toISOString()} ${line}\n`);
+    } catch { /* best effort */ }
+  };
+  // Lines approved or declined since the last look. Every line counts, including the primary (diag)
+  // line, since a tech waits on those too.
+  const declinedSeen = new Map();
   function noteApprovals(r, lines) {
     const key = (l) => l.key || l.dms;
-    const approved = new Set((lines || []).filter((l) => l.approved && !l.primary && !l.declined).map(key));
+    const label = (l) => `${l.dms || ''} ${l.complaint || l.service || ''}`.trim();
+    const approved = new Set((lines || []).filter((l) => l.approved && !l.declined).map(key));
+    const declined = new Set((lines || []).filter((l) => l.declined).map(key));
     const before = approvedSeen.get(r.ro);
+    const beforeDeclined = declinedSeen.get(r.ro);
     approvedSeen.set(r.ro, approved);
-    if (!before) return; // first look at this RO: nothing to compare with
+    declinedSeen.set(r.ro, declined);
+    if (!before) { notifyLog(`RO ${r.ro}: watching ${lines?.length || 0} lines (approved: ${[...approved].join(',') || 'none'})`); return; }
     const fresh = (lines || []).filter((l) => approved.has(key(l)) && !before.has(key(l)));
-    if (!fresh.length) return;
-    const what = fresh.map((l) => `${l.dms || ''} ${l.complaint || l.service || ''}`.trim()).join('; ').slice(0, 140);
-    notifyUser(`RO ${r.ro}: ${fresh.length === 1 ? 'line approved' : `${fresh.length} lines approved`}`, `${what}\n${partsNote(r)}`, r.ro);
+    const lost = (lines || []).filter((l) => declined.has(key(l)) && !beforeDeclined?.has(key(l)));
+    if (fresh.length) {
+      notifyLog(`RO ${r.ro}: approved ${fresh.map(key).join(',')}`);
+      notifyUser(`RO ${r.ro}: ${fresh.length === 1 ? 'line approved' : `${fresh.length} lines approved`}`,
+        `${fresh.map(label).join('; ').slice(0, 140)}\n${partsNote(r)}`, r.ro);
+    }
+    if (lost.length) {
+      notifyLog(`RO ${r.ro}: declined ${lost.map(key).join(',')}`);
+      notifyUser(`RO ${r.ro}: ${lost.length === 1 ? 'line declined' : `${lost.length} lines declined`}`, lost.map(label).join('; ').slice(0, 160), r.ro);
+    }
+  }
+  // Your ROs' waiting flags clearing: parts in, the customer answered, warranty answered
+  const flagsSeen = new Map();
+  function noteRoChanges(list) {
+    for (const r of list) {
+      const now = { parts: !!(r.waitingParts || r.dash?.notInStock), customer: !!r.waitingCustomer, warranty: !!r.waitingWarranty };
+      const was = flagsSeen.get(r.ro);
+      flagsSeen.set(r.ro, now);
+      if (!was) continue;
+      const ymm = [r.year, r.make, r.model].filter(Boolean).join(' ');
+      if (was.parts && !now.parts) { notifyLog(`RO ${r.ro}: parts no longer waiting`); notifyUser(`RO ${r.ro}: parts are in`, [ymm, r.dash?.partsStatus].filter(Boolean).join(' · ') || 'No longer waiting for parts', r.ro); }
+      if (was.customer && !now.customer) { notifyLog(`RO ${r.ro}: customer no longer waiting`); notifyUser(`RO ${r.ro}: customer answered`, `${ymm ? `${ymm} · ` : ''}No longer waiting on the customer`, r.ro); }
+      if (was.warranty && !now.warranty) { notifyLog(`RO ${r.ro}: warranty no longer waiting`); notifyUser(`RO ${r.ro}: warranty answered`, `${ymm ? `${ymm} · ` : ''}No longer waiting on warranty`, r.ro); }
+    }
   }
   // Xtime's unread-messages counter (top right of Xtime's page)
   let msgCount = null;
@@ -1204,8 +1564,10 @@ function createWorkbench(profile) {
       if (!res?.ok) { xtimeFailed(res?.error || 'Could not read Xtime', !!res?.expired); return; }
       xtimeFailures = 0;
       myROs = res.mine;
+      if (syncWaiting.size) setTimeout(retrySyncedROs, 0); // ROs opened on another computer, waiting for Xtime
       if (xtimeSignin?.step === 'loading' || xtimeSignin?.step === 'starting') xtimeSignin = null; // the data is here: close the dialog
       noteAssigned(myROs);
+      noteRoChanges(myROs);
       // Xtime's field names (names only, no values), so dashboard columns that don't match can be fixed
       if (res.fieldNames && !loggedXtimeFields) {
         loggedXtimeFields = true;
@@ -1298,7 +1660,7 @@ function createWorkbench(profile) {
   // ---------- workspaces ----------
   // A vehicle's tabs: Xtime | PTS | Service Manual (+ any added). "Service Manual" holds its own tabs:
   // OASIS | Diagnostics | Workshop Manual | Labor Times (the app's own pages).
-  const SVC_KINDS = new Set(['oasisview', 'diag', 'manual', 'labor']);
+  const SVC_KINDS = new Set(['oasisview', 'diag', 'manual', 'labor', 'article', 'doc']); // article: Ford's page for an FSA etc. · doc: one of its PDFs
   const SVC_DEFAULTS = ['oasisview', 'diag', 'manual', 'labor'];
   const inService = (kind) => SVC_KINDS.has(kind);
   const serviceTab = (ws) => ws.tabs.find((t) => t.kind === 'service') || null;
@@ -1357,7 +1719,7 @@ function createWorkbench(profile) {
     if (was) setActive(ws, was); else ws.activeTab = topTab(ws)?.id ?? null;
   }
 
-  const TAB_NAMES = { service: 'Service Manual', labor: 'Labor Times', diag: 'Diagnostics', xtime: 'Xtime', oasisview: 'OASIS', manual: 'Workshop Manual', wiring: 'Wiring', pts: 'PTS', ota: 'OTA Updates', cvd: 'Connected Data', prodemand: 'ProDemand', oasis: 'OASIS' };
+  const TAB_NAMES = { article: 'Article', doc: 'Document', service: 'Service Manual', labor: 'Labor Times', diag: 'Diagnostics', xtime: 'Xtime', oasisview: 'OASIS', manual: 'Workshop Manual', wiring: 'Wiring', pts: 'PTS', ota: 'OTA Updates', cvd: 'Connected Data', prodemand: 'ProDemand', oasis: 'OASIS' };
   function addTab(ws, kind, { activate = true, front = false } = {}) {
     const n = ws.tabs.filter((t) => t.kind === kind).length;
     const base = TAB_NAMES[kind] || 'Manual';
@@ -1368,7 +1730,8 @@ function createWorkbench(profile) {
     return tab;
   }
 
-  function openWorkspace({ ro, vin, ymm, tab }) {
+  // quiet: opened by sync from another computer, so don't switch what you're looking at
+  function openWorkspace({ ro, vin, ymm, tab, quiet = false }) {
     ro = String(ro).trim();
     vin = String(vin).trim().toUpperCase();
     if (!ro || vin.length !== 17) return;
@@ -1390,8 +1753,8 @@ function createWorkbench(profile) {
       const t = ws.tabs.find((x) => x.kind === tab) || (tab === 'xtime' ? addTab(ws, 'xtime', { activate: false }) : null);
       if (t) setActive(ws, t);
     }
-    activeRO = ro;
-    mode = 'manual';
+    if (!quiet || !activeRO) activeRO = ro;
+    if (!quiet) mode = 'manual';
     saveWorkspaces();
     layout();
     pushState();
@@ -1662,6 +2025,7 @@ function createWorkbench(profile) {
       if (!lookup || lookup.ro !== ro) lookup = { ro, status: 'ok', message: '' };
       pushAll();
     },
+    ...feedbackHandlers,
     'toggle-sidebar': (hide) => {
       settings = { ...settings, sidebarHidden: hide == null ? !settings.sidebarHidden : !!hide };
       writeJson('settings.json', settings);
@@ -1757,6 +2121,20 @@ function createWorkbench(profile) {
       pushState();
     },
     'print-page': () => printVisible(),
+    // Tabs dragged into a new order, one row at a time (the top row, or the Service Manual's row):
+    // ids = that row's tab ids in the new order. They take the places that row's tabs already had.
+    'reorder-tabs': ({ ro, ids }) => {
+      const ws = workspaces.get(ro);
+      if (!ws || !Array.isArray(ids)) return;
+      const moving = ids.map((id) => ws.tabs.find((t) => t.id === id));
+      if (!moving.length || moving.some((t) => !t) || new Set(moving).size !== moving.length) return;
+      const svc = inService(moving[0].kind);
+      const row = ws.tabs.filter((t) => inService(t.kind) === svc);
+      if (row.length !== moving.length || moving.some((t) => inService(t.kind) !== svc)) return; // must be the whole row
+      const spots = ws.tabs.map((t, i) => (row.includes(t) ? i : -1)).filter((i) => i >= 0);
+      spots.forEach((spot, i) => { ws.tabs[spot] = moving[i]; });
+      saveWorkspaces(); pushState();
+    },
     'reload-tab': ({ ro, id }) => {
       const tab = workspaces.get(ro)?.tabs.find((t) => t.id === id);
       tab?.view?.webContents.reload();
@@ -1831,6 +2209,7 @@ function createWorkbench(profile) {
   // ---------- window ----------
   function open() {
     loadWorkspaces();
+    syncOpenList(); // what's open here goes into the first sync (and isn't mistaken for closed)
     tracker.prune(60, [...workspaces.keys()]);
     // Sync: "forgot to clock out" waits for the first sync (at most 15 s when offline)
     if (syncOn()) {

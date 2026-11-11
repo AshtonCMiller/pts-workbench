@@ -1,5 +1,6 @@
 # Deploys the sync server to your Cloudflare account whenever sync-server/ changes.
 # Needs two repository secrets: CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID (see README).
+# Optional third: REPORTS_ADMIN_KEY, the password for reading Feedback (bug reports / feature ideas) in the app.
 name: Deploy sync server
 
 on:
@@ -82,3 +83,14 @@ jobs:
 
       - name: Deploy
         run: npx wrangler deploy
+
+      - name: Set the Feedback admin key
+        env:
+          REPORTS_ADMIN_KEY: ${{ secrets.REPORTS_ADMIN_KEY }}
+        shell: bash
+        run: |
+          if [ -z "$REPORTS_ADMIN_KEY" ]; then
+            echo "::warning::No REPORTS_ADMIN_KEY secret: people can send feedback, but nobody can read it in the app yet."
+            exit 0
+          fi
+          printf '%s' "$REPORTS_ADMIN_KEY" | npx wrangler secret put ADMIN_KEY
