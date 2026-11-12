@@ -663,6 +663,16 @@ function linesSummary(info) {
   return el('div', { class: 'sum' }, `${info.flaggedCount}/${info.lines.length} lines flagged`);
 }
 
+// Fetching this vehicle's manual, OASIS, TSBs, labor times and wiring in the background (see prefetchVehicle)
+function fetchChip(ws) {
+  if (!ws?.fetching) return null;
+  const loading = ws.fetching === 'loading';
+  return el('span', { class: 'fetch' + (loading ? ' on' : ''),
+    title: loading ? 'Getting this vehicle ready in the background: manual, OASIS, TSBs, labor times and wiring'
+      : 'Waiting its turn to get ready in the background' },
+    el('span', { class: 'spin' }), loading ? 'Loading' : 'Queued');
+}
+
 // ---------- compact rows (sidebar) ----------
 // Two short lines: RO / tag / pays, then vehicle · stage · waiting · flagged count.
 function compactRow(r, { ws = null } = {}) {
@@ -673,7 +683,7 @@ function compactRow(r, { ws = null } = {}) {
   const row = el('div', { class: 'ro compact' + (asleep ? ' asleep' : '') },
     el('div', { class: 't' },
       `RO ${r.ro}`, r.tag ? el('span', { class: 'tag', text: `  · Tag ${r.tag}` }) : null,
-      asleep ? el('span', { class: 'zz', text: 'Asleep' }) : null,
+      asleep ? el('span', { class: 'zz', text: 'Asleep' }) : fetchChip(ws),
       info && info.lines.length ? el('span', { class: 'pays', text: fmtH(info.total) }) : null),
     el('div', { class: 'c2' },
       el('span', { class: 'cap', text: ymmOf(r) || ws?.ymm || info?.ymm || '' }),
@@ -693,7 +703,7 @@ function roCard(r, { inDrawer = false, ws = null } = {}) {
   const card = el('div', { class: 'ro' + (active ? ' sel' : '') + (asleep ? ' asleep' : '') },
     el('div', { class: 't' },
       `RO ${r.ro}`, r.tag ? el('span', { class: 'tag', text: `  · Tag ${r.tag}` }) : null,
-      asleep ? el('span', { class: 'zz', text: 'Asleep' }) : null,
+      asleep ? el('span', { class: 'zz', text: 'Asleep' }) : fetchChip(ws),
       info && info.lines.length ? el('span', { class: 'pays', title: 'What the approved lines on this job pay', text: `Pays ${fmtH(info.total)}` }) : null),
     badgesFor(r),
     el('div', { class: 'v', text: ymmOf(r) || ws?.ymm || info?.ymm || '' }),

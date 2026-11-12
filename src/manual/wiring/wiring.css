@@ -1,0 +1,75 @@
+/* Wiring Diagrams: the contents, and one page with zoom / drag */
+:root { --w-paper: #ffffff; --w-ink: #1b1f24; --w-tint: #eef1f5; --w-link: #1a5fb4; --w-hover: #d92d20; }
+@media screen and (prefers-color-scheme: dark) {
+  :root { --w-paper: #1d2126; --w-ink: #d6dbe1; --w-tint: #262b31; --w-link: #6aa6ef; --w-hover: #ff7b6e; }
+}
+body.wiring { overflow: hidden; display: flex; flex-direction: column; height: 100%; }
+body.wiring .o-head { flex: none; flex-wrap: wrap; }
+.w-headtext { min-width: 0; }
+#w-title { white-space: pre; overflow: hidden; text-overflow: ellipsis; }
+.o-actions { flex-wrap: wrap; align-items: center; }
+.w-pager { display: inline-flex; gap: 4px; align-items: center; }
+.w-pager[hidden] { display: none; }
+#w-page, #w-sort { font: inherit; font-size: 12px; padding: 3px 6px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--text); }
+#w-sort { font-size: 13px; padding: 8px 10px; border-radius: 8px; }
+option.na { color: var(--muted); }
+
+/* contents */
+#w-list-view { flex: 1; overflow: auto; }
+#w-list-view[hidden], #w-page-view[hidden] { display: none; }
+#w-body { padding: 12px 20px 60px; max-width: 1200px; }
+.w-only { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); cursor: pointer; user-select: none; }
+.w-only[hidden] { display: none; }
+.t-count { color: var(--muted); font-size: 12.5px; margin: 0 0 8px; }
+.w-list { display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: var(--panel); }
+.w-item { display: flex; align-items: baseline; gap: 14px; text-align: left; background: none; border: 0; border-bottom: 1px solid var(--line);
+  padding: 8px 14px; font-size: 13.5px; }
+.w-item:last-child { border-bottom: 0; }
+.w-item:hover { background: var(--hover); }
+.w-item .num { font-family: Consolas, ui-monospace, monospace; color: var(--muted); min-width: 34px; flex: none; }
+.w-item .name { font-weight: 600; }
+.w-item .tag { margin-left: auto; font-size: 11px; color: var(--muted); white-space: nowrap; }
+.w-item.na .name, .w-item.na .num { color: var(--muted); font-weight: 400; opacity: .7; }
+
+/* one page */
+#w-page-view { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+.w-stage { position: relative; flex: 1; overflow: hidden; cursor: grab; background: var(--bg); outline: none; touch-action: none; }
+.w-stage.dragging { cursor: grabbing; }
+.w-paper { position: absolute; left: 0; top: 0; background: var(--w-paper); border: 1px solid var(--line); border-radius: 6px; transform-origin: 0 0; }
+.w-paper svg { display: block; width: 100%; height: 100%; user-select: none; }
+/* Ford's black / white / gray / blue, in the app's colors (wire colors stay as drawn) */
+.w-paper .f-ink { fill: var(--w-ink); } .w-paper .s-ink { stroke: var(--w-ink); }
+.w-paper .f-paper { fill: var(--w-paper); } .w-paper .s-paper { stroke: var(--w-paper); }
+.w-paper .f-tint { fill: var(--w-tint); } .w-paper .s-tint { stroke: var(--w-tint); }
+.w-paper .f-link { fill: var(--w-link); } .w-paper .s-link { stroke: var(--w-link); }
+.w-paper text { font-family: inherit; }
+.w-paper .w-link { cursor: pointer; }
+.w-paper .w-link:hover text { fill: var(--w-hover); text-decoration: underline; }
+.w-paper .w-mark { fill: #facc15; fill-opacity: .4; stroke: #dc2626; stroke-width: 1.5; pointer-events: none; }
+.w-msg { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: var(--muted); }
+.w-msg[hidden] { display: none; }
+.w-msg .actions { display: flex; gap: 8px; }
+.w-hint { flex: none; font-size: 11.5px; color: var(--muted); padding: 4px 12px; border-top: 1px solid var(--line); background: var(--panel); }
+
+/* a connector / splice / ground */
+.w-pop { position: fixed; z-index: 10; width: 300px; max-height: 70vh; overflow: auto; background: var(--panel); border: 1px solid var(--line);
+  border-radius: 8px; box-shadow: 0 6px 24px rgba(0, 0, 0, .25); padding: 10px 12px; font-size: 13px; }
+.w-pop[hidden] { display: none; }
+.w-pop-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.w-pop-head b { font-size: 15px; }
+.w-pop-head .icon { margin-left: auto; width: 26px; height: 24px; }
+.w-pop .w-face { width: 100%; text-align: left; font-weight: 600; margin-bottom: 8px; }
+.w-locs { display: flex; flex-direction: column; gap: 4px; }
+.w-locs p { margin: 4px 0; }
+.w-loc { text-align: left; white-space: normal; }
+.w-loc.na { color: var(--muted); }
+
+@media print {
+  @page { size: landscape; margin: 8mm; }
+  body.wiring { display: block; height: auto; overflow: visible; }
+  .o-head .o-actions, #w-list-view, .w-hint, .w-pop, .w-msg { display: none !important; }
+  #w-page-view, .w-stage { display: block; overflow: visible; background: #fff; }
+  .w-paper { position: static; transform: none !important; width: 100% !important; height: auto !important; border: 0; }
+  .w-paper svg { height: auto; max-height: 180mm; }
+  .w-paper .w-mark { display: none; }
+}

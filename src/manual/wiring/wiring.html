@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: ptsasset:">
+  <title>Wiring Diagrams</title>
+  <link rel="stylesheet" href="../viewer.css">
+  <link rel="stylesheet" href="../oasis/oasis.css">
+  <link rel="stylesheet" href="../diagnostics/diag.css">
+  <link rel="stylesheet" href="wiring.css">
+</head>
+<!-- The vehicle's wiring book: Ford's list of diagrams (gray = doesn't apply to this VIN), and each page drawn
+     here with zoom / drag, page buttons, and clickable connectors and page links -->
+<body class="oasis diag wiring">
+  <header class="o-head">
+    <div class="w-headtext">
+      <div class="o-title" id="w-title">Wiring Diagrams</div>
+      <div class="o-sub" id="w-sub">Ford's wiring book for this vehicle</div>
+    </div>
+    <div class="o-actions">
+      <button id="btn-contents" class="ghost small" hidden title="All the diagrams">‹ Contents</button>
+      <button id="btn-back" class="ghost small" hidden title="The page you were on (Backspace)">‹ Back</button>
+      <span id="w-pager" class="w-pager" hidden>
+        <button id="btn-prev" class="ghost small" title="Previous page (Page Up)">‹</button>
+        <select id="w-page" title="Pages of this diagram"></select>
+        <button id="btn-next" class="ghost small" title="Next page (Page Down)">›</button>
+      </span>
+      <span id="w-zoom" class="w-pager" hidden>
+        <button id="btn-out" class="ghost small" title="Zoom out (−)">−</button>
+        <button id="btn-fit" class="ghost small" title="Whole page (0)">Fit</button>
+        <button id="btn-in" class="ghost small" title="Zoom in (+)">+</button>
+      </span>
+      <button id="btn-print" class="ghost small" hidden title="Print this page">Print</button>
+      <button id="btn-ford" class="ghost small" title="Open Ford's own wiring page as a tab">Ford's page</button>
+    </div>
+  </header>
+
+  <div id="w-list-view">
+    <form id="w-form" class="d-search" autocomplete="off">
+      <input id="w-q" type="search" spellcheck="false" placeholder="Filter by name or number — e.g. charging, 151, power windows">
+      <select id="w-sort" title="Order">
+        <option value="cell">By number</option>
+        <option value="title">By name</option>
+      </select>
+      <label class="w-only" id="w-only-label" hidden title="Hide the diagrams that don't apply to this VIN">
+        <input id="w-only" type="checkbox"> Only this vehicle
+      </label>
+    </form>
+    <main id="w-body"></main>
+  </div>
+
+  <div id="w-page-view" hidden>
+    <div id="w-stage" class="w-stage" tabindex="0">
+      <div id="w-paper" class="w-paper"></div>
+      <div id="w-msg" class="w-msg" hidden></div>
+    </div>
+    <div class="w-hint">Drag to move · scroll to zoom · double-click to zoom in · click a blue page number or connector</div>
+  </div>
+
+  <div id="w-pop" class="w-pop" hidden></div>
+  <div id="o-toast" class="o-toast" hidden></div>
+  <script src="wiring.js"></script>
+</body>
+</html>

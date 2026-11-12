@@ -603,3 +603,12 @@ button.danger { color: var(--danger); }
   :root { color-scheme: light; }
   html, body { background: #fff !important; color: #000; }
 }
+
+/* A vehicle getting ready in the background (its manual, OASIS, TSBs, labor times and wiring) */
+.ro .fetch { margin-left: 6px; display: inline-flex; align-items: center; gap: 4px; font-size: 10px; font-weight: 700; letter-spacing: .3px;
+  text-transform: uppercase; padding: 0 6px; border-radius: 999px; color: var(--muted); border: 1px solid var(--line);
+  vertical-align: 1px; }
+.ro .fetch.on { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+.ro .fetch .spin { width: 8px; height: 8px; border-radius: 50%; border: 1.5px solid currentColor; border-right-color: transparent; }
+.ro .fetch.on .spin { animation: fetch-spin .8s linear infinite; }
+@keyframes fetch-spin { to { transform: rotate(360deg); } }

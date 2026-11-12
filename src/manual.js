@@ -320,6 +320,7 @@ class ManualService {
     if (pacode) await ahead('tsb', `tsb|${v}|${pacode}`, 'TSBs', () => this.loadTsbList(v, pacode));
     if (!skip.has('oasisview')) await this.svcForm(v).then(() => done.push('SVC list'), () => failed.push('SVC list'));
     await ahead('labor', `slts|${v}`, 'SLTS', () => this.loadSlts(v));
+    await ahead('wiring', `wtoc|${v}`, 'wiring contents', () => this.loadWiringToc(v));
     this.log(`ahead ${v}: ${done.join(', ') || 'nothing new to fetch'}${failed.length ? ` (failed: ${failed.join(', ')})` : ''} in ${((Date.now() - t0) / 1000).toFixed(1)} s`);
   }
 
@@ -445,6 +446,196 @@ class ManualService {
       return { html, url: at };
     }
     throw new Error("Couldn't find the article in Ford's page");
+  }
+
+  // ---- Wiring diagrams (Ford's wiring book for this vehicle, as PTS's /wiring pages load it):
+  //   /wiring/TableOfContents?…         → the book's settings (written into the page: environment, vehicle ID, title)
+  //   …/wiring/TableofContent (JSON)    → the cells: { Title, Type: Page | Connectors | LocIndex, Number, Code: [option codes] }
+  //   …/wiring/PageList (JSON)          → one cell's pages: { page, Code, Startdate, Enddate }
+  //   …/wiring/svg/{env}/{vehicle}/~W{book}/{lang}/svg/{cell}/0/{page}.svg → one page's drawing
+  //   …/wiring/GetLocationComponentType → where a connector / splice / ground is (location charts, cell 151)
+  async wiringInfo(vin) {
+    const book = await this.book(vin);
+    this.wiring ||= new Map();
+    const hit = this.wiring.get(book.vin);
+    if (hit && Date.now() - hit.at < 2 * 60 * 60 * 1000) return hit;
+    const p = book.params;
+    let code = String(p.WiringBookCode || '').split(',')[0].trim();
+    if (!code) code = ((await this.diagContext(vin).catch(() => null))?.wiringBooks || [])[0] || '';
+    if (!code) throw new Error('Ford has no wiring diagrams for this vehicle');
+    const vid = String(p.vehicleId || '');
+    const tocUrl = `${PTS}/wiring/TableOfContents?vin=${encodeURIComponent(book.vin)}&vehicleId=${encodeURIComponent(vid)}` +
+      `&bookType=${encodeURIComponent(String(p.WiringFormat || 'svg').toLowerCase())}&country=&language=&languageCode=ENUSA&book=${encodeURIComponent(code)}`;
+    const html = await this.text(tocUrl);
+    const m = (re) => (html.match(re) || [])[1] || '';
+    const tocApi = m(/["'](https:\/\/[^"']+?\/wiring\/TableofContent\?environment=[^"']*)["']/i);
+    const info = {
+      at: Date.now(), vin: book.vin, tocUrl,
+      book: m(/book\s*:\s*'([A-Z0-9]+)'/) || code,
+      bookType: (m(/bookType\s*:\s*'([a-z]+)'/) || p.WiringFormat || 'svg').toLowerCase(),
+      vehicleId: m(/vehicleId=['"]?\s*\+\s*['"]?(\d+)/) || vid,
+      lang: m(/languageCode\s*:\s*'([A-Za-z]+)'/) || 'ENUSA',
+      env: m(/TableofContent\?environment=([^"'&\s]+)/i) || p.environment || '',
+      // https://www.fordservicecontent.com/Ford_Content/PublicationRuntimeRefreshPTS/
+      base: tocApi ? tocApi.slice(0, tocApi.search(/\/+wiring\/TableofContent/i)) + '/' : 'https://www.fordservicecontent.com/Ford_Content/PublicationRuntimeRefreshPTS/',
+      title: m(/booktitle=['"]?\s*\+\s*'([^']*)'/) || p.WiringBookTitle || book.title,
+    };
+    if (!/^https:\/\/[^/]*fordservicecontent\.com\//i.test(info.base)) info.base = 'https://www.fordservicecontent.com/Ford_Content/PublicationRuntimeRefreshPTS/';
+    this.log(`   wiring: book ${info.book} (${info.bookType}), vehicle ${info.vehicleId}, ${info.env || 'no environment'}`);
+    this.wiring.set(book.vin, info);
+    return info;
+  }
+
+  // A request to Ford's content server, as the wiring pages make it (with the PTS page as referrer).
+  // It wants its sign-on cookies (onDenied gets them) and sometimes refuses the first request.
+  async content(url, accept = 'application/json') {
+    const get = () => this.fetch(url, { headers: { Accept: accept }, referrer: `${PTS}/` });
+    try { return await get(); } catch (e) {
+      if (!e.needsLogin) throw e;
+      if (this.onDenied) await this.onDenied().catch(() => {}); else await new Promise((r) => setTimeout(r, 400));
+      return get();
+    }
+  }
+  wiringApi(info, name, extra = {}) {
+    const q = new URLSearchParams({ book: info.book, bookType: info.bookType, contentmarket: '', contentlanguage: '',
+      ...extra, languageCode: info.lang, fromPageBase: PTS });
+    return `${info.base}/wiring/${name}?environment=${encodeURIComponent(info.env)}&${q}`;
+  }
+  async contentJson(url) {
+    const res = await this.content(url);
+    const text = await res.text();
+    try { return JSON.parse(text); } catch {
+      this.log(`   not JSON: ${text.replace(/\s+/g, ' ').slice(0, 200)}`);
+      throw new Error("Ford's wiring server sent something unexpected");
+    }
+  }
+
+  // The vehicle's option codes and build date (the "FeaturesAttributes" cookie PTS sets for the VIN it's
+  // working on), for graying out the cells and pages that don't apply. Only used when it's this vehicle's.
+  async wiringFeatures(book) {
+    try {
+      const cookies = await this.ses.cookies.get({ name: 'FeaturesAttributes' });
+      const c = cookies.find((x) => /dealerconnection\.com$/i.test(x.domain.replace(/^\./, '')));
+      if (!c) return null;
+      let raw = c.value;
+      try { raw = decodeURIComponent(raw); } catch {}
+      const out = {};
+      for (const pair of raw.split('&')) {
+        const [k, v] = pair.split('=');
+        if (k && v != null) out[k] = v;
+      }
+      const list = (v) => String(v || '').split('|').filter(Boolean);
+      const build = String(out.BuildDate || '');
+      if (!build || (book.vehicle.buildDate && build.replace(/\D/g, '') !== String(book.vehicle.buildDate).replace(/\D/g, ''))) return null;
+      return { pfc: list(out.PrimaryFeatureCodes), mfc: list(out.MinorFeatureCodes), buildDate: build.replace(/\D/g, ''),
+        vehicleLine: out.VehicleLine ? [String(out.VehicleLine).toLowerCase() + (out.VehicleType || '')] : [] };
+    } catch { return null; }
+  }
+
+  async wiringToc(vin) {
+    return (await this.takeAhead(`wtoc|${String(vin).toUpperCase()}`)) || this.loadWiringToc(vin);
+  }
+  // kept a few minutes, so the tab and the loading-ahead don't both fetch it
+  loadWiringToc(vin) {
+    const v = String(vin).toUpperCase();
+    this.wiringTocs ||= new Map();
+    const hit = this.wiringTocs.get(v);
+    if (hit && Date.now() - hit.at < 10 * 60 * 1000) return hit.promise;
+    const promise = this.fetchWiringToc(v);
+    this.wiringTocs.set(v, { at: Date.now(), promise });
+    promise.catch(() => { if (this.wiringTocs.get(v)?.promise === promise) this.wiringTocs.delete(v); });
+    return promise;
+  }
+  async fetchWiringToc(vin) {
+    const info = await this.wiringInfo(vin);
+    const items = await this.contentJson(this.wiringApi(info, 'TableofContent'));
+    if (!Array.isArray(items)) throw new Error("Ford's wiring server sent something unexpected");
+    this.log(`   wiring contents: ${items.length} cells`);
+    this.wiringWarm();
+    const book = await this.book(vin);
+    return { info: { book: info.book, bookType: info.bookType, title: info.title, vehicleId: info.vehicleId, lang: info.lang },
+      items, features: await this.wiringFeatures(book) };
+  }
+
+  // Ford's wiring files for one release ("environment", e.g. prod_1_3_11112026) don't change, so each page
+  // and page list is kept on disk under wiring/<release>/ (older releases are removed) and in memory
+  wiringDisk(info, name) {
+    if (!this.cacheDir || !info.env) return null;
+    const dir = path.join(this.cacheDir, 'wiring', info.env.replace(/[^A-Za-z0-9_.-]/g, ''));
+    if (this.wiringDir !== dir) {
+      this.wiringDir = dir;
+      try { // a new release: drop the old ones
+        const root = path.dirname(dir);
+        for (const f of fs.existsSync(root) ? fs.readdirSync(root) : []) if (f !== path.basename(dir)) fs.rmSync(path.join(root, f), { recursive: true, force: true });
+      } catch { /* best effort */ }
+    }
+    return path.join(dir, `${info.book}_${name}`.replace(/[^A-Za-z0-9_.-]/g, ''));
+  }
+  async wiringCached(info, name, load) {
+    this.wiringMem ||= new Map();
+    const key = `${info.env}|${info.book}|${name}`;
+    if (this.wiringMem.has(key)) return this.wiringMem.get(key);
+    const file = this.wiringDisk(info, name);
+    const promise = (async () => {
+      if (file) { try { return JSON.parse(await fs.promises.readFile(file, 'utf8')); } catch { /* not kept yet */ } }
+      const value = await load();
+      if (file) fs.promises.mkdir(path.dirname(file), { recursive: true }).then(() => fs.promises.writeFile(file, JSON.stringify(value))).catch(() => {});
+      return value;
+    })();
+    this.wiringMem.set(key, promise);
+    promise.catch(() => { if (this.wiringMem.get(key) === promise) this.wiringMem.delete(key); });
+    while (this.wiringMem.size > 200) this.wiringMem.delete(this.wiringMem.keys().next().value);
+    return promise;
+  }
+
+  async wiringPages(vin, cell) {
+    const info = await this.wiringInfo(vin);
+    const c = String(cell).replace(/\D/g, '').padStart(3, '0');
+    return this.wiringCached(info, `pages_${c}.json`, async () => {
+      const list = await this.contentJson(this.wiringApi(info, 'PageList', { cell: c, page: '1' }));
+      return Array.isArray(list) ? list : [];
+    });
+  }
+
+  async wiringSvg(vin, cell, page) {
+    const info = await this.wiringInfo(vin);
+    const c = String(cell).replace(/\D/g, '').padStart(3, '0');
+    const pg = String(Number(page) || 1);
+    return this.wiringCached(info, `${c}_${pg}.json`, async () => {
+      const url = `${info.base.replace(/\/Ford_Content\//, '/ford_content/')}wiring/svg/${encodeURIComponent(info.env)}/${encodeURIComponent(info.vehicleId)}/~W${encodeURIComponent(info.book)}` +
+        `/${encodeURIComponent(info.lang)}/svg/${c}/0/${pg}.svg?fromPageBase=${encodeURIComponent(PTS)}`;
+      const res = await this.content(url, 'image/svg+xml,text/html,*/*');
+      const svg = await res.text();
+      if (!/<svg[\s>]/i.test(svg)) {
+        this.log(`   wiring page ${c}-${pg}: no drawing (${svg.replace(/\s+/g, ' ').slice(0, 160)})`);
+        throw new Error(`Ford has no drawing for ${Number(c)}-${pg}`);
+      }
+      return { svg };
+    });
+  }
+
+  // The drawings need Ford's content sign-on cookies; getting them before the first drawing is asked for
+  // saves the refused first request (about a second)
+  async wiringWarm() {
+    try {
+      const have = await this.ses.cookies.get({ name: 'CONTENT_PERMISSIONS' });
+      if (!have.some((c) => /fordservicecontent\.com$/i.test(c.domain.replace(/^\./, ''))) && this.onDenied) await this.onDenied();
+    } catch { /* tried again when a drawing is refused */ }
+  }
+
+  // item: "C1689", "S105", "G101" → [{ Page, Qual, LocationDesc }] (pages of the location charts, cell 151)
+  async wiringLocations(vin, item) {
+    const info = await this.wiringInfo(vin);
+    const kind = /^C/i.test(item) ? 'CONNECTOR' : /^S/i.test(item) ? 'SPLICE' : 'GROUND';
+    const list = await this.contentJson(this.wiringApi(info, 'GetLocationComponentType', { Item: item, componentType: kind }));
+    return Array.isArray(list) ? list : [];
+  }
+
+  // Ford's own wiring pages (for what the app doesn't draw itself: connector faces, the connector list…)
+  wiringFordUrl(info, vin, kind, { cell = '', page = 1, item = '', title = '' } = {}) {
+    const q = new URLSearchParams({ book: info.book, vehicleId: info.vehicleId, vin, cell: String(cell), page: String(page),
+      ...(item ? { item } : {}), sortby: '', bookType: info.bookType, languageCode: info.lang, ...(title ? { title } : {}), booktitle: info.title || '' });
+    return `${PTS}/wiring/${kind}/?${q.toString().replace(/\+/g, '%20')}`;
   }
 
   // ---- Labor times (Ford SLTS WebView: an ASP.NET page that works by posting its form back to itself).

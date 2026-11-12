@@ -151,6 +151,10 @@ function open(r) {
   } else if (['tsb', 'gsb', 'ssm'].includes(r.source) && r.article) {
     api.openTsb({ id: r.article, type: r.source, title: r.title, url: r.url });
     toast('Opening in the TSBs tab…');
+  } else if (r.source === 'wiring' && /^\/wiring\/page\?/i.test(r.url || '')) {
+    const sp = new URL(r.url, 'https://x/').searchParams;
+    api.openWiring({ cell: sp.get('cell'), page: sp.get('page'), item: sp.get('item') || '', title: r.title });
+    toast('Opening in the Wiring Diagrams tab…');
   } else if (r.url) {
     api.openUrl(r.url);
   } else toast("Ford didn't give a link for this one");

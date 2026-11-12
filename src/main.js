@@ -453,7 +453,7 @@ function createWorkbench(profile) {
         tabs: kept.map((t) => ({ kind: t.kind, title: t.title, ...(t.url ? { url: t.url } : {}), ...(t.manualState ? { state: t.manualState } : {}) })),
         activeIndex: Math.max(0, kept.findIndex((t) => t.id === ws.activeTab)),
         svcIndex: kept.findIndex((t) => t.id === ws.svcTab),
-        layout: 4,
+        layout: 5,
         };
       }),
     });
@@ -656,6 +656,14 @@ function createWorkbench(profile) {
         const diag = ws.tabs.findIndex((x) => x.kind === 'diag');
         ws.tabs.splice(diag >= 0 ? diag + 1 : ws.tabs.length, 0, t);
       }
+      if (w.layout >= 3 && w.layout < 5 && serviceTab(ws)) { // saved before Wiring Diagrams was in the Service Manual
+        const t = ws.tabs.find((x) => x.kind === 'wiring') || addTab(ws, 'wiring', { activate: false });
+        if (t.title === 'Wiring') t.title = TAB_NAMES.wiring;
+        ws.tabs.splice(ws.tabs.indexOf(t), 1);
+        const man = ws.tabs.findIndex((x) => x.kind === 'manual');
+        const lab = ws.tabs.findIndex((x) => x.kind === 'labor');
+        ws.tabs.splice(man >= 0 ? man + 1 : lab >= 0 ? lab : ws.tabs.length, 0, t);
+      }
       workspaces.set(w.ro, ws);
     }
     if (saved.activeRO && workspaces.has(saved.activeRO)) activeRO = saved.activeRO;
@@ -698,7 +706,7 @@ function createWorkbench(profile) {
       workspaces: [...workspaces.values()].map((ws) => {
         const pick = (t) => ({ id: t.id, kind: t.kind, title: t.title, status: t.status });
         return {
-          ro: ws.ro, vin: ws.vin, ymm: ws.ymm, activeTab: topTab(ws)?.id ?? null, viewTab: currentTab(ws)?.id ?? null, asleep: !!ws.asleep,
+          ro: ws.ro, vin: ws.vin, ymm: ws.ymm, activeTab: topTab(ws)?.id ?? null, viewTab: currentTab(ws)?.id ?? null, asleep: !!ws.asleep, fetching: ws.fetching || '',
           tabs: ws.tabs.filter((t) => !inService(t.kind)).map(pick),
           sub: serviceTab(ws) ? { active: subTab(ws)?.id ?? null, tabs: ws.tabs.filter((t) => inService(t.kind)).map(pick) } : null,
         };
@@ -906,6 +914,7 @@ function createWorkbench(profile) {
     if (tab.kind === 'diag') { tab.view = makeManualView(ws, tab, 'diagnostics/diag.html'); return; }
     if (tab.kind === 'tsb') { tab.view = makeManualView(ws, tab, 'tsb/tsb.html'); return; }
     if (tab.kind === 'labor') { tab.view = makeManualView(ws, tab, 'labor-times/labor.html'); return; }
+    if (tab.kind === 'wiring') { tab.view = makeManualView(ws, tab, 'wiring/wiring.html'); return; }
     tab.view = makeWebView();
     const wc = tab.view.webContents;
     if (tab.kind === 'article') { // Ford's own page for an FSA (or other article) opened from OASIS, inside Service Manual
@@ -915,8 +924,6 @@ function createWorkbench(profile) {
     } else if (tab.kind === 'doc') { // a Ford PDF the app downloaded (see openFordPdf)
       tab.status = '';
       wc.loadURL(tab.url);
-    } else if (tab.kind === 'wiring') {
-      openWiring(ws, tab);
     } else if (FORD_LINKS[tab.kind]) {
       setupFordTab(ws, tab);
     } else if (tab.kind === 'xtime') {
@@ -1039,32 +1046,6 @@ function createWorkbench(profile) {
     return view;
   }
 
-  // Wiring opens straight to the vehicle (Ford's wiring page works on its own)
-  async function openWiring(ws, tab) {
-    const wc = tab.view.webContents;
-    tab.status = 'Finding the vehicle…'; pushState();
-    try {
-      const book = await manualService.book(ws.vin);
-      if (wc.isDestroyed()) return;
-      tab.status = ''; pushState();
-      wc.loadURL(`${PTS_ORIGIN}/wiring?vin=${encodeURIComponent(ws.vin)}&vehicleId=${encodeURIComponent(book.params.vehicleId)}`);
-    } catch (e) {
-      if (wc.isDestroyed()) return;
-      tab.status = e.needsLogin ? 'Sign in to PTS, then press ↻' : (e.message || "Couldn't open wiring");
-      pushState();
-      wc.loadURL(settings.ptsUrl);
-      if (e.needsLogin) {
-        // once you're signed in, try again
-        const retry = () => {
-          if (hostOf(wc.getURL()) !== hostOf(PTS_ORIGIN)) return;
-          wc.off('did-finish-load', retry);
-          if (tab.view) openWiring(ws, tab);
-        };
-        wc.on('did-finish-load', retry);
-      }
-    }
-  }
-
   // Sign in to PTS in a small window; resolves once PTS itself has loaded (or the window is closed)
   let signInWindow = null;
   function signInToPts() {
@@ -1122,6 +1103,35 @@ function createWorkbench(profile) {
         const pacode = String(settings.dealerCode || '').replace(/^[A-Z]+/i, '');
         if (!pacode) return { needsDealer: true };
         try { return await manualService.tsbList(ws.vin, pacode); } catch (e) { return fail(e); }
+      }
+      case 'wiring-toc': // Wiring Diagrams tab: the vehicle's wiring book
+        try { return await manualService.wiringToc(ws.vin); } catch (e) { return fail(e); }
+      case 'wiring-pages':
+        try { return await manualService.wiringPages(ws.vin, String(payload?.cell || '')); } catch (e) { return fail(e); }
+      case 'wiring-svg':
+        try { return await manualService.wiringSvg(ws.vin, String(payload?.cell || ''), Number(payload?.page) || 1); } catch (e) { return fail(e); }
+      case 'wiring-locations':
+        try { return await manualService.wiringLocations(ws.vin, String(payload?.item || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 20)); } catch (e) { return fail(e); }
+      case 'wiring-ford': { // Ford's own wiring page (connector faces, the connector list…) as a tab in Service Manual
+        try {
+          const info = await manualService.wiringInfo(ws.vin);
+          const q = payload || {};
+          const kind = ['face', 'Connectors', 'LocIndex', 'page', 'TableOfContents'].includes(q.kind) ? q.kind : 'page';
+          const url = kind === 'TableOfContents' ? info.tocUrl : manualService.wiringFordUrl(info, ws.vin, kind,
+            { cell: String(q.cell || '').replace(/\D/g, ''), page: q.page === '' ? '' : Number(q.page) || 1, item: String(q.item || '').slice(0, 40), title: String(q.title || '').slice(0, 120) });
+          return await manualCall(sender, 'open-article', { url, title: String(q.title || 'Wiring').slice(0, 40) });
+        } catch (e) { return fail(e); }
+      }
+      case 'open-wiring': { // Diagnostics: show this wiring page in the vehicle's Wiring Diagrams tab
+        const q = payload || {};
+        const wiring = { cell: String(q.cell || '').replace(/\D/g, '').slice(0, 4), page: Number(q.page) || 1, item: String(q.item || '').slice(0, 40), title: String(q.title || '').slice(0, 120) };
+        if (!wiring.cell) return false;
+        const wt = ws.tabs.find((t) => t.kind === 'wiring') || addTab(ws, 'wiring', { activate: false });
+        setActive(ws, wt); mode = 'manual';
+        if (wt.view && !wt.view.webContents.isDestroyed() && !wt.view.webContents.isLoading()) wt.view.webContents.send('manual-open', { wiring });
+        else wt.pendingOpen = { wiring };
+        saveWorkspaces(); layout(); pushState();
+        return true;
       }
       case 'tsb-article':
         try { return await manualService.tsbArticle(String(payload?.url || '')); } catch (e) { return fail(e); }
@@ -1715,8 +1725,8 @@ function createWorkbench(profile) {
   // ---------- workspaces ----------
   // A vehicle's tabs: Xtime | PTS | Service Manual (+ any added). "Service Manual" holds its own tabs:
   // OASIS | Diagnostics | Workshop Manual | Labor Times (the app's own pages).
-  const SVC_KINDS = new Set(['oasisview', 'diag', 'tsb', 'manual', 'labor', 'article', 'doc']); // article: Ford's page for an FSA etc. · doc: one of its PDFs
-  const SVC_DEFAULTS = ['oasisview', 'diag', 'tsb', 'manual', 'labor'];
+  const SVC_KINDS = new Set(['oasisview', 'diag', 'tsb', 'manual', 'wiring', 'labor', 'article', 'doc']); // article: Ford's page for an FSA etc. · doc: one of its PDFs
+  const SVC_DEFAULTS = ['oasisview', 'diag', 'tsb', 'manual', 'wiring', 'labor'];
   const inService = (kind) => SVC_KINDS.has(kind);
   const serviceTab = (ws) => ws.tabs.find((t) => t.kind === 'service') || null;
   // The vehicle's chosen tab in the top row
@@ -1774,7 +1784,7 @@ function createWorkbench(profile) {
     if (was) setActive(ws, was); else ws.activeTab = topTab(ws)?.id ?? null;
   }
 
-  const TAB_NAMES = { tsb: 'TSBs', article: 'Article', doc: 'Document', service: 'Service Manual', labor: 'Labor Times', diag: 'Diagnostics', xtime: 'Xtime', oasisview: 'OASIS', manual: 'Workshop Manual', wiring: 'Wiring', pts: 'PTS', ota: 'OTA Updates', cvd: 'Connected Data', prodemand: 'ProDemand', oasis: 'OASIS' };
+  const TAB_NAMES = { tsb: 'TSBs', article: 'Article', doc: 'Document', service: 'Service Manual', labor: 'Labor Times', diag: 'Diagnostics', xtime: 'Xtime', oasisview: 'OASIS', manual: 'Workshop Manual', wiring: 'Wiring Diagrams', pts: 'PTS', ota: 'OTA Updates', cvd: 'Connected Data', prodemand: 'ProDemand', oasis: 'OASIS' };
   function addTab(ws, kind, { activate = true, front = false } = {}) {
     const n = ws.tabs.filter((t) => t.kind === kind).length;
     const base = TAB_NAMES[kind] || 'Manual';
@@ -1834,17 +1844,20 @@ function createWorkbench(profile) {
     ws.aheadAt = Date.now();
     if (!isFordVehicle(ws.vin, ws.ymm)) { manualService.log(`ahead RO ${ws.ro}: not a Ford/Lincoln, nothing to fetch`); return; }
     prefetchQueue = [ws, ...prefetchQueue.filter((w) => w !== ws)];
+    if (ws.fetching !== 'loading') { ws.fetching = 'queued'; pushState(); } // shown next to the RO
     if (!prefetchBusy) runPrefetch();
   }
   async function runPrefetch() {
     prefetchBusy = true;
     while (prefetchQueue.length) {
       const ws = prefetchQueue.shift();
-      if (workspaces.get(ws.ro) !== ws) continue; // closed meanwhile
+      if (workspaces.get(ws.ro) !== ws) { ws.fetching = ''; continue; } // closed meanwhile
       const loaded = new Set(ws.tabs.filter((t) => t.view).map((t) => t.kind));
       const pacode = String(settings.dealerCode || '').replace(/^[A-Z]+/i, '');
       manualService.log(`ahead RO ${ws.ro}: starting${loaded.size ? ` (already open: ${[...loaded].join(', ')})` : ''}`);
+      ws.fetching = 'loading'; pushState();
       try { await manualService.prefetch(ws.vin, { pacode, skip: loaded }); } catch (e) { manualService.log(`ahead RO ${ws.ro} failed: ${e.message || e}`); }
+      ws.fetching = prefetchQueue.includes(ws) ? 'queued' : ''; pushState();
     }
     prefetchBusy = false;
   }
