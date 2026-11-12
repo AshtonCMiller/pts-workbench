@@ -92,6 +92,102 @@ async function loadToc() {
 }
 
 const TYPE_NOTE = { Connectors: 'Connector views', LocIndex: 'Location charts' };
+
+// ---------- search (Ford's search, wiring only: components, connectors, splices, grounds, diagrams) ----------
+const KINDS = [['all', 'All'], ['component', 'Components'], ['connector', 'Connectors'], ['splice', 'Splices'], ['ground', 'Grounds'], ['diagram', 'Diagrams']];
+const KIND_LABEL = { component: 'COMPONENT', connector: 'CONNECTOR', splice: 'SPLICE', ground: 'GROUND', diagram: 'DIAGRAM', other: 'WIRING' };
+let search = { q: '', results: null, busy: false, error: '', kind: 'all', seq: 0, timer: null };
+// The search window: opened from the Search button (or Ctrl+K) anywhere in Wiring Diagrams; it keeps its last search
+function openSearch() {
+  hidePop();
+  $('w-modal').hidden = false;
+  const q = $('w-sq');
+  q.focus(); q.select();
+  drawSearch();
+}
+function closeSearch() {
+  $('w-modal').hidden = true;
+  if (!$('w-page-view').hidden) $('w-stage').focus({ preventScroll: true });
+}
+function drawSearch() {
+  if ($('w-modal').hidden) return;
+  const found = searchSection();
+  $('w-sbody').replaceChildren(found || el('div', { class: 'w-hintbox' },
+    el('p', { text: 'Search this vehicle’s wiring for a component, connector, splice, ground or diagram.' }),
+    el('p', { class: 'muted', text: 'For example: C1689 · G100 · S124 · battery monitoring sensor · PCM · power windows' })));
+}
+function kindOf(r) {
+  const t = String(r.type || '').toLowerCase(), c = String(r.conn || '').toUpperCase();
+  if (t === 'celttl') return 'diagram';
+  if (/^S\d/.test(c) || t.includes('splice')) return 'splice';
+  if (/^G\d/.test(c) || t.includes('ground')) return 'ground';
+  if (t.includes('component')) return 'component';
+  if (c || t === 'cfc' || t.includes('conn')) return 'connector';
+  return 'other';
+}
+function runSearch() {
+  clearTimeout(search.timer);
+  const q = $('w-sq').value.trim();
+  if (q.length < 2) { search = { ...search, q: '', results: null, busy: false, error: '' }; drawSearch(); return; }
+  if (q === search.q && (search.results || search.busy)) return;
+  search.q = q; search.busy = true; search.error = '';
+  const seq = ++search.seq;
+  search.timer = setTimeout(async () => {
+    let res;
+    try { res = await api.wiringSearch(q); } catch (e) { res = { error: true, message: String(e?.message || e) }; }
+    if (seq !== search.seq) return;
+    search.busy = false;
+    if (res?.error) { search.results = []; search.error = res.needsLogin ? 'Sign in to PTS to search' : res.message || "Ford's search didn't answer"; }
+    else search.results = (res.results || []).map((r) => ({ ...r, kind: kindOf(r) }));
+    drawSearch();
+  }, 350);
+  drawSearch();
+}
+function openResult(r) {
+  const cell = cellNo(r.cell);
+  if (r.type === 'cfc' || cell === '150' || (!cell && r.url)) { // connector faces and the connector list: Ford's pages
+    if (r.url) { closeSearch(); api.openArticle(r.url, clean(r.conn ? `${r.conn} face` : r.title).slice(0, 40)); toast("Opening Ford's page as a tab…"); }
+    return;
+  }
+  if (!cell) return;
+  closeSearch();
+  // Ford's component titles end with where they are ("HEATED WIPER PARK RELAY: Power Distribution/BCM"): the name is before that
+  const item = r.conn || (r.kind === 'component' ? clean(r.title).split(/:\s/)[0] : '');
+  openPage({ cell, page: Number(r.page) || 1, item, title: r.kind === 'diagram' ? clean(r.title).replace(/^\d+\s+/, '') : '' });
+}
+function searchSection() {
+  if (!search.q) return null;
+  const box = el('section', { class: 'w-search' });
+  if (search.busy && !search.results) { box.append(el('p', { class: 'muted', text: 'Searching Ford’s wiring…' })); return box; }
+  if (search.error) { box.append(el('p', { class: 'muted', text: search.error })); return box; }
+  const all = search.results || [];
+  const counts = {};
+  for (const r of all) counts[r.kind] = (counts[r.kind] || 0) + 1;
+  if (search.kind !== 'all' && !counts[search.kind]) search.kind = 'all';
+  const tabs = el('nav', { class: 'd-tabs w-kinds' });
+  for (const [k, label] of KINDS) {
+    const n = k === 'all' ? all.length : counts[k] || 0;
+    if (k !== 'all' && !n) continue;
+    tabs.append(el('button', { class: `d-tab${search.kind === k ? ' on' : ''}`, onclick: () => { search.kind = k; drawSearch(); } }, label, el('span', { class: 'n', text: String(n) })));
+  }
+  box.append(tabs);
+  const list = all.filter((r) => search.kind === 'all' || r.kind === search.kind);
+  const order = { component: 0, connector: 1, splice: 2, ground: 3, diagram: 4, other: 5 };
+  list.sort((a, b) => (order[a.kind] - order[b.kind]) || (a.applies === b.applies ? 0 : a.applies ? -1 : 1));
+  const ul = el('div', { class: 'w-list' });
+  for (const r of list) {
+    const cell = cellNo(r.cell);
+    const where = r.type === 'cfc' ? 'Pin view · Ford’s page' : cell === '151' ? `Location view 151-${Number(r.page) || 1}`
+      : cell === '150' ? 'Connector list · Ford’s page' : cell ? `${cell}-${Number(r.page) || 1}${titleOf(cell) ? ` ${titleOf(cell)}` : ''}` : '';
+    ul.append(el('button', { class: `w-item w-res${r.applies === false ? ' na' : ''}`, title: r.applies === false ? "Doesn't apply to this VIN" : '', onclick: () => openResult(r) },
+      el('span', { class: `w-kind ${r.kind}`, text: KIND_LABEL[r.kind] }),
+      el('span', { class: 'name', text: clean(r.title) }),
+      el('span', { class: 'tag', text: where })));
+  }
+  if (!list.length) ul.append(el('p', { class: 'muted w-none', text: 'Ford’s search found nothing for this.' }));
+  box.append(ul);
+  return box;
+}
 function drawList() {
   if (!toc) return;
   const q = state.q.toLowerCase();
@@ -114,7 +210,8 @@ function drawList() {
       el('span', { class: 'name', text: clean(it.Title) }),
       TYPE_NOTE[it.Type] ? el('span', { class: 'tag', text: `${TYPE_NOTE[it.Type]} · Ford's page` }) : null));
   }
-  if (!list.length) ul.append(el('p', { class: 'muted', text: 'Nothing matches.' }));
+  if (!list.length) ul.append(el('p', { class: 'muted w-none' }, q ? 'No diagram has this in its name. ' : 'Nothing matches.',
+    q ? el('button', { class: 'ghost small', text: `Search the wiring for “${state.q}” ›`, onclick: () => { $('w-sq').value = state.q; runSearch(); openSearch(); } }) : null));
   $('w-body').replaceChildren(head, ul);
 }
 
@@ -204,14 +301,16 @@ async function openPage(at, { push = true } = {}) {
       el('button', { class: 'ghost', text: "Ford's page", onclick: fordPage }));
     return;
   }
-  try { draw(res.svg); } catch (e) {
+  try { draw(res.svg, res.url); } catch (e) {
     api.log(`wiring: couldn't draw ${at.cell}-${at.page}: ${e.message || e}`);
     $('w-paper').replaceChildren();
     message("Couldn't draw this diagram", el('button', { class: 'ghost', text: "Ford's page", onclick: fordPage }));
     return;
   }
   message('');
-  if (at.item) markItem(at.item); else fit();
+  finds = []; findAt = -1;
+  if ($('w-find').value.trim()) findOnPage($('w-find').value);
+  if (at.item) markItem(at.item); else if (!finds.length) fit();
   $('w-stage').focus({ preventScroll: true });
 }
 
@@ -239,13 +338,46 @@ function message(text, ...buttons) {
 
 // Ford's drawing, without its scripts, click handlers or inline styles (this page's rules don't allow them)
 let size = { w: 1100, h: 850 };
-function draw(text) {
+// Ford's own styles (inline style="…" and <style> rules) as plain drawing attributes: this page's security rules
+// don't allow inline styles, and the location views draw the vehicle (engine, body…) with them.
+// visibility / display aren't carried over: Ford's file starts with its sheet hidden and its page script shows it.
+const STYLE_PROPS = new Set(['fill', 'fill-opacity', 'fill-rule', 'stroke', 'stroke-width', 'stroke-opacity', 'stroke-dasharray', 'stroke-dashoffset',
+  'stroke-linecap', 'stroke-linejoin', 'stroke-miterlimit', 'opacity', 'font-size', 'font-family', 'font-weight', 'font-style', 'text-anchor',
+  'dominant-baseline', 'letter-spacing', 'clip-path', 'clip-rule', 'mask', 'stop-color', 'stop-opacity', 'color']);
+function styleToAttrs(n, css, overwrite) {
+  for (const part of String(css).split(';')) {
+    const i = part.indexOf(':');
+    if (i < 0) continue;
+    const k = part.slice(0, i).trim().toLowerCase(), v = part.slice(i + 1).replace(/!important/i, '').trim();
+    if (!STYLE_PROPS.has(k) || !v || /expression|javascript:|url\(\s*['"]?(?!#)/i.test(v)) continue;
+    if (overwrite || !n.hasAttribute(k)) n.setAttribute(k, v);
+  }
+}
+function applyStyleSheets(svg) {
+  const rules = [];
+  for (const st of svg.querySelectorAll('wstyle, style')) {
+    const css = st.textContent.replace(/\/\*[\s\S]*?\*\//g, '').replace(/<!\[CDATA\[|\]\]>/g, '');
+    for (const m of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) rules.push([m[1].trim(), m[2]]);
+    st.remove();
+  }
+  for (const [sel, body] of rules) {
+    for (const one of sel.split(',')) {
+      let hits = [];
+      try { hits = svg.querySelectorAll(one.trim()); } catch { continue; }
+      for (const n of hits) styleToAttrs(n, body, true);
+    }
+  }
+  return rules.length;
+}
+
+function draw(text, base = 'https://www.fordservicecontent.com/') {
+  stopAnim();
   let src = String(text).replace(/<\?xml[\s\S]*?\?>/i, '').replace(/<!DOCTYPE[\s\S]*?>/i, '').replace(/<script\b[\s\S]*?<\/script>/gi, '');
-  // inline styles are dropped: Ford's file starts with its sheet hidden ("visibility:hidden") and its page script shows it
-  src = src.replace(/\sstyle\s*=\s*("[^"]*"|'[^']*')/gi, '');
   // Ford's notes about the drawing (<desc>, <metadata>) aren't drawn, and read as a web page they can swallow the
   // whole drawing (an empty <Qualifier/> there isn't closed in a web page), so they're taken out first
   src = src.replace(/<(desc|metadata)\b[\s\S]*?<\/\1\s*>/gi, '').replace(/<(desc|metadata)\b[^>]*\/>/gi, '');
+  // styles renamed before reading, so this page's security rules don't complain (they're turned into attributes below)
+  src = src.replace(/(<[^<>]*?\s)style(\s*=)/gi, '$1data-wstyle$2').replace(/<(\/?)style\b/gi, '<$1wstyle');
   // read as a drawing (SVG / XML) first; if Ford's file isn't tidy enough for that, as a web page
   let svg = null;
   const xml = new DOMParser().parseFromString(/xmlns\s*=\s*["']http:\/\/www\.w3\.org\/2000\/svg/i.test(src) ? src
@@ -257,29 +389,45 @@ function draw(text) {
   }
   if (!svg) throw new Error('no drawing in the reply');
   svg.querySelectorAll('script, foreignObject, iframe, object, embed').forEach((n) => n.remove());
-  const hidden = [];
+  const sheetRules = applyStyleSheets(svg);
+  const hidden = [], pictures = [];
   for (const n of [svg, ...svg.querySelectorAll('*')]) {
     const tag = n.localName.toLowerCase();
     for (const a of [...n.attributes]) {
       const name = a.name.toLowerCase();
       if (name.startsWith('on')) n.removeAttribute(a.name);
-      else if (name === 'style') n.removeAttribute(a.name);
+      else if (name === 'style' || name === 'data-wstyle') { styleToAttrs(n, a.value, true); n.removeAttribute(a.name); }
       else if (name === 'visibility' && /hidden/i.test(a.value)) { hidden.push(`${tag}#${n.id || '?'} visibility`); n.removeAttribute(a.name); } // Ford's page script shows these
       else if (name === 'display' && /none/i.test(a.value)) hidden.push(`${tag}#${n.id || '?'} display:none`);
       else if (name === 'href' || name === 'xlink:href') {
         const v = a.value.trim();
         if (tag === 'a') { n.setAttribute('data-href', v); n.removeAttribute(a.name); }
         else if (v.startsWith('#')) { /* a shape drawn from elsewhere in the drawing (<use>): kept */ }
-        else if (tag === 'image' && /^data:image\//i.test(v)) { /* a picture inside the file: kept */ }
-        else if (tag === 'image' && /^(https?:)?\/\//i.test(v) || (tag === 'image' && /^\//.test(v))) {
+        else if (tag === 'image' && /^data:(image\/[a-z0-9.+-]+)?[;,]/i.test(v)) {
+          // a picture inside the file (the location views' vehicle). Ford leaves out its type ("data:;base64,…"),
+          // so it's filled in from the picture's first bytes
+          if (/^data:[;,]/i.test(v)) {
+            const b64 = v.slice(v.indexOf(',') + 1, v.indexOf(',') + 9);
+            const type = b64.startsWith('iVBOR') ? 'image/png' : b64.startsWith('/9j/') ? 'image/jpeg' : b64.startsWith('R0lG') ? 'image/gif'
+              : b64.startsWith('UklGR') ? 'image/webp' : b64.startsWith('PHN2Zy') || b64.startsWith('PD94bW') ? 'image/svg+xml' : 'image/png';
+            n.setAttribute(a.name, `data:${type}${v.slice(5)}`);
+          }
+          pictures.push(v.slice(0, 40));
+        }
+        else if (tag === 'image' || tag === 'feimage') { // a picture (the location views' vehicle): fetched with the PTS login
           let abs = '';
-          try { abs = new URL(v, 'https://www.fordservicecontent.com/').href; } catch { /* bad address */ }
-          if (abs) n.setAttribute(a.name, `ptsasset://f/?u=${encodeURIComponent(abs)}`); else n.removeAttribute(a.name);
+          // as on Ford's page (the drawing is put into a PTS page): /ford_content/… is Ford's content server, other
+          // /… addresses are PTS, and the rest are next to the drawing's own file
+          const from = /^\/ford_content\//i.test(v) ? 'https://www.fordservicecontent.com/' : /^\//.test(v) ? 'https://www.fordtechservice.dealerconnection.com/' : base;
+          try { abs = new URL(v, from).href; } catch { /* bad address */ }
+          pictures.push(abs || v);
+          if (/^https:/i.test(abs)) n.setAttribute(a.name, `ptsasset://f/?u=${encodeURIComponent(abs)}`); else n.removeAttribute(a.name);
         } else n.removeAttribute(a.name);
       }
     }
   }
   if (hidden.length) api.log(`wiring: hidden in Ford's file: ${hidden.slice(0, 20).join(', ')}`);
+  if (pictures.length || sheetRules) api.log(`wiring: ${pictures.length} picture(s)${pictures.length ? ` e.g. ${pictures[0].slice(0, 200)}` : ''}, ${sheetRules} style rule(s)`);
   const vb = (svg.getAttribute('viewBox') || '').trim().split(/[\s,]+/).map(Number);
   size = vb.length === 4 && vb[2] > 0 && vb[3] > 0 ? { x: vb[0], y: vb[1], w: vb[2], h: vb[3] }
     : { x: 0, y: 0, w: parseFloat(svg.getAttribute('width')) || 1100, h: parseFloat(svg.getAttribute('height')) || 850 };
@@ -350,6 +498,7 @@ function apply() {
   p.style.transform = `translate(${view.x}px, ${view.y}px)`;
 }
 function fit() {
+  stopAnim();
   const st = $('w-stage');
   view.s = fitScale();
   view.x = (st.clientWidth - size.w * view.s) / 2;
@@ -358,6 +507,7 @@ function fit() {
   apply();
 }
 function zoomAt(factor, mx, my) {
+  stopAnim();
   const st = $('w-stage');
   if (mx == null) { mx = st.clientWidth / 2; my = st.clientHeight / 2; }
   const min = fitScale() * 0.5, max = fitScale() * 14;
@@ -370,6 +520,7 @@ function zoomAt(factor, mx, my) {
 }
 // Centre on part of the drawing (drawing units), zoomed in
 function zoomTo(box) {
+  stopAnim();
   const st = $('w-stage');
   view.s = Math.min(fitScale() * 3, Math.max(fitScale(), Math.min(st.clientWidth / (box.width + 80), st.clientHeight / (box.height + 80))));
   const cx = (box.x + box.width / 2 - size.x) * view.s, cy = (box.y + box.height / 2 - size.y) * view.s;
@@ -379,33 +530,127 @@ function zoomTo(box) {
   apply();
 }
 
-// A connector / splice / ground the page was opened for (from a location chart): marked and zoomed to
+// Opened for one part: it starts zoomed in on it, then eases back out to the whole page. Anything you do
+// (drag, scroll, zoom, a key, another page) stops it where it is. While it runs, the page is scaled as a picture
+// (smooth); at the end (or when stopped) it's drawn sharp at that size.
+let anim = null;
+function stopAnim() {
+  if (!anim) return;
+  const a = anim;
+  anim = null;
+  clearTimeout(a.wait); cancelAnimationFrame(a.frame);
+  if (a.started) { Object.assign(view, a.now); $('w-paper').style.transformOrigin = ''; apply(); }
+}
+function zoomOutLater(delay = 900, ms = 1100) {
+  const st = $('w-stage');
+  const from = { ...view };
+  const s = fitScale();
+  const to = { s, x: (st.clientWidth - size.w * s) / 2, y: (st.clientHeight - size.h * s) / 2 };
+  const a = { now: { ...from }, started: false };
+  anim = a;
+  const ease = (t) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
+  a.wait = setTimeout(() => {
+    if (anim !== a) return;
+    a.started = true;
+    const t0 = performance.now();
+    const p = $('w-paper');
+    p.style.transformOrigin = '0 0';
+    const step = (now) => {
+      if (anim !== a) return;
+      const t = Math.min(1, (now - t0) / ms), k = ease(t);
+      a.now = { s: from.s * Math.pow(to.s / from.s, k), x: from.x + (to.x - from.x) * k, y: from.y + (to.y - from.y) * k };
+      // the page stays drawn at its starting size and is scaled as a picture while moving
+      p.style.transform = `translate(${a.now.x}px, ${a.now.y}px) scale(${a.now.s / from.s})`;
+      if (t < 1) { a.frame = requestAnimationFrame(step); return; }
+      anim = null;
+      p.style.transformOrigin = '';
+      Object.assign(view, to);
+      zoomed = false;
+      apply();
+    };
+    a.frame = requestAnimationFrame(step);
+  }, delay);
+}
+
+// A connector / splice / ground / component the page was opened for: marked, zoomed to, then the whole page shown
+// The box of part of the drawing, in the drawing's units (it may sit inside moved / scaled groups)
+function boxOf(svg, h) {
+  let b;
+  try { b = h.getBBox(); } catch { return null; }
+  if (!b || (!b.width && !b.height)) return null;
+  let m = null;
+  try { m = svg.getScreenCTM().inverse().multiply(h.getScreenCTM()); } catch { /* use the box as it is */ }
+  const pt = (x, y) => { if (!m) return { x, y }; const p = new DOMPoint(x, y).matrixTransform(m); return { x: p.x, y: p.y }; };
+  const a = pt(b.x, b.y), c = pt(b.x + b.width, b.y + b.height);
+  return { x: Math.min(a.x, c.x), y: Math.min(a.y, c.y), width: Math.abs(c.x - a.x), height: Math.abs(c.y - a.y) };
+}
+function addMark(svg, box, cls = 'w-mark') {
+  const r = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+  r.setAttribute('x', box.x - 4); r.setAttribute('y', box.y - 4);
+  r.setAttribute('width', box.width + 8); r.setAttribute('height', box.height + 8);
+  r.setAttribute('rx', 3); r.setAttribute('class', cls);
+  svg.append(r); // on top, see-through (Ford draws wires as white lines over black ones)
+  return r;
+}
+
+// A connector / splice / ground (or a component, by name) the page was opened for: marked and zoomed to
 function markItem(item) {
   fit();
   const svg = $('w-paper').querySelector('svg');
-  const want = item.toUpperCase();
-  const hits = [...svg.querySelectorAll('a[name]')].filter((a) => a.getAttribute('name').toUpperCase() === want);
-  if (!hits.length) for (const t of svg.querySelectorAll('text')) if (clean(t.textContent).toUpperCase() === want) hits.push(t);
-  if (!hits.length) { toast(`${item} isn't labeled on this page`); return; }
+  // compared without spaces / punctuation ("C1689", "c1689-2", "Battery Monitoring Sensor (BMS)")
+  const norm = (t) => String(t || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  const want = norm(item);
+  const short = norm(String(item).replace(/\(.*?\)/g, '')); // without "(BMS)"
+  const code = (String(item).match(/\(([^)]+)\)/) || [])[1]; // "BMS"
+  const same = (t) => { const n = norm(t); return n && (n === want || n === short || (code && n === norm(code))); };
+  // connectors / splices / grounds: Ford's clickable names (name="C1689"); a pin number on the end doesn't matter
+  let hits = [...svg.querySelectorAll('a[name]')].filter((a) => same(a.getAttribute('name')) || (want.length > 3 && want.startsWith(norm(a.getAttribute('name'))) && /^[CSG]\d/i.test(a.getAttribute('name'))));
+  // components: Ford names their groups "COMP_<code>~INDEX~<NAME>"
+  if (!hits.length) hits = [...svg.querySelectorAll('g[id^="COMP_"], g[id^="comp_"]')].filter((g) => g.id.split('~').some((x) => same(x.replace(/^COMP_/i, ''))));
+  // anything else: its label
+  if (!hits.length) hits = [...svg.querySelectorAll('text')].filter((t) => same(t.textContent));
+  if (!hits.length && short.length >= 4) hits = [...svg.querySelectorAll('g[id^="COMP_"], g[id^="comp_"]')].filter((g) => norm(g.id).includes(short));
+  if (!hits.length) {
+    const comps = [...svg.querySelectorAll('g[id^="COMP_"], g[id^="comp_"]')].slice(0, 8).map((g) => g.id).join(' | ');
+    const names = [...svg.querySelectorAll('a[name]')].slice(0, 12).map((a) => a.getAttribute('name')).join(',');
+    api.log(`wiring: "${item}" not found on ${state.at?.cell}-${state.at?.page}; components: ${comps}; names: ${names}`);
+    toast(`${item} isn't labeled on this page`);
+    return;
+  }
   let first = null;
   for (const h of hits) {
-    let b;
-    try { b = h.getBBox(); } catch { continue; }
-    if (!b || (!b.width && !b.height)) continue;
-    // the box in the drawing's units (the element may sit inside transformed groups)
-    let m = null;
-    try { m = svg.getScreenCTM().inverse().multiply(h.getScreenCTM()); } catch { /* use the box as it is */ }
-    const pt = (x, y) => { if (!m) return { x, y }; const p = new DOMPoint(x, y).matrixTransform(m); return { x: p.x, y: p.y }; };
-    const a = pt(b.x, b.y), c = pt(b.x + b.width, b.y + b.height);
-    const box = { x: Math.min(a.x, c.x), y: Math.min(a.y, c.y), width: Math.abs(c.x - a.x), height: Math.abs(c.y - a.y) };
-    const r = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
-    r.setAttribute('x', box.x - 4); r.setAttribute('y', box.y - 4);
-    r.setAttribute('width', box.width + 8); r.setAttribute('height', box.height + 8);
-    r.setAttribute('rx', 3); r.setAttribute('class', 'w-mark');
-    svg.append(r); // on top, see-through (Ford draws wires as white lines over black ones)
+    const box = boxOf(svg, h);
+    if (!box) continue;
+    addMark(svg, box);
     first ||= box;
   }
-  if (first) zoomTo(first);
+  if (first) { zoomTo(first); zoomOutLater(); }
+}
+
+// ---------- find on this page (Ctrl+F) ----------
+let finds = [], findAt = -1;
+function findOnPage(q) {
+  const svg = $('w-paper').querySelector('svg');
+  svg?.querySelectorAll('.w-findmark').forEach((n) => n.remove());
+  finds = []; findAt = -1;
+  q = clean(q).toUpperCase();
+  if (!svg || !q) { $('w-find-n').textContent = ''; return; }
+  for (const t of svg.querySelectorAll('text')) {
+    if (!clean(t.textContent).toUpperCase().includes(q)) continue;
+    const box = boxOf(svg, t);
+    if (box) finds.push({ box, mark: addMark(svg, box, 'w-mark w-findmark') });
+  }
+  finds.sort((a, b) => (a.box.y - b.box.y) || (a.box.x - b.box.x));
+  $('w-find-n').textContent = finds.length ? `${finds.length} found` : 'not on this page';
+  if (finds.length) findNext();
+}
+function findNext(back = false) {
+  if (!finds.length) return;
+  finds[findAt]?.mark.classList.remove('cur');
+  findAt = (findAt + (back ? -1 : 1) + finds.length) % finds.length;
+  finds[findAt].mark.classList.add('cur');
+  $('w-find-n').textContent = `${findAt + 1} of ${finds.length}`;
+  zoomTo(finds[findAt].box);
 }
 
 let drag = null;
@@ -422,11 +667,13 @@ function stageEvents() {
     if (sp) warm(sp.get('cell'), sp.get('page'));
   });
   st.addEventListener('wheel', (e) => {
+    stopAnim();
     e.preventDefault();
     const r = st.getBoundingClientRect();
     zoomAt(Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.0015)), e.clientX - r.left, e.clientY - r.top);
   }, { passive: false });
   st.addEventListener('pointerdown', (e) => {
+    stopAnim();
     if (e.button !== 0) return;
     drag = { x: e.clientX, y: e.clientY, vx: view.x, vy: view.y, moved: false, id: e.pointerId };
   });
@@ -522,10 +769,39 @@ $('btn-out').addEventListener('click', () => zoomAt(1 / 1.4));
 $('btn-fit').addEventListener('click', fit);
 $('w-form').addEventListener('submit', (e) => e.preventDefault());
 $('w-q').addEventListener('input', () => { state.q = $('w-q').value.trim(); save(); drawList(); });
+$('btn-search').addEventListener('click', openSearch);
+$('w-sq').addEventListener('input', runSearch);
+$('w-sq').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); clearTimeout(search.timer); search.q = ''; runSearch(); }
+  if (e.key === 'ArrowDown') { e.preventDefault(); $('w-sbody').querySelector('.w-res')?.focus(); }
+});
+$('w-sclose').addEventListener('click', closeSearch);
+$('w-modal').addEventListener('pointerdown', (e) => { if (e.target === $('w-modal')) closeSearch(); });
+$('w-sbody').addEventListener('keydown', (e) => {
+  const items = [...$('w-sbody').querySelectorAll('.w-res')];
+  const i = items.indexOf(document.activeElement);
+  if (i < 0) return;
+  if (e.key === 'ArrowDown') { e.preventDefault(); items[Math.min(items.length - 1, i + 1)].focus(); }
+  if (e.key === 'ArrowUp') { e.preventDefault(); (i ? items[i - 1] : $('w-sq')).focus(); }
+});
+$('w-find').addEventListener('input', () => findOnPage($('w-find').value));
+$('w-find').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); findNext(e.shiftKey); }
+  else if (e.key === 'Escape') { $('w-find').value = ''; findOnPage(''); $('w-stage').focus(); }
+});
 $('w-sort').addEventListener('change', () => { state.sort = $('w-sort').value; save(); drawList(); });
 $('w-only').addEventListener('change', () => { state.only = $('w-only').checked; save(); drawList(); });
 document.addEventListener('keydown', (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); openSearch(); return; }
+  if (!$('w-modal').hidden) { if (e.key === 'Escape') { e.preventDefault(); closeSearch(); } return; }
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {
+    e.preventDefault();
+    const box = $('w-page-view').hidden ? $('w-q') : $('w-find');
+    box.focus(); box.select();
+    return;
+  }
   if ($('w-page-view').hidden || e.target.closest?.('input, select, textarea')) return;
+  if (!['Shift', 'Control', 'Alt', 'Meta'].includes(e.key)) stopAnim();
   if (e.key === '+' || e.key === '=') zoomAt(1.4);
   else if (e.key === '-' || e.key === '_') zoomAt(1 / 1.4);
   else if (e.key === '0') fit();

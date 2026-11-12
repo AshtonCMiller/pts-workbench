@@ -704,7 +704,7 @@ function createWorkbench(profile) {
       })),
       // Each vehicle's top row of tabs, and the Service Manual's own tabs
       workspaces: [...workspaces.values()].map((ws) => {
-        const pick = (t) => ({ id: t.id, kind: t.kind, title: t.title, status: t.status });
+        const pick = (t) => ({ id: t.id, kind: t.kind, title: t.title, status: t.status, fixed: isFixedTab(ws, t) });
         return {
           ro: ws.ro, vin: ws.vin, ymm: ws.ymm, activeTab: topTab(ws)?.id ?? null, viewTab: currentTab(ws)?.id ?? null, asleep: !!ws.asleep, fetching: ws.fetching || '',
           tabs: ws.tabs.filter((t) => !inService(t.kind)).map(pick),
@@ -1110,6 +1110,8 @@ function createWorkbench(profile) {
         try { return await manualService.wiringPages(ws.vin, String(payload?.cell || '')); } catch (e) { return fail(e); }
       case 'wiring-svg':
         try { return await manualService.wiringSvg(ws.vin, String(payload?.cell || ''), Number(payload?.page) || 1); } catch (e) { return fail(e); }
+      case 'wiring-search':
+        try { return await manualService.wiringSearch(ws.vin, String(payload?.text || '')); } catch (e) { return fail(e); }
       case 'wiring-locations':
         try { return await manualService.wiringLocations(ws.vin, String(payload?.item || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 20)); } catch (e) { return fail(e); }
       case 'wiring-ford': { // Ford's own wiring page (connector faces, the connector list…) as a tab in Service Manual
@@ -1728,6 +1730,9 @@ function createWorkbench(profile) {
   const SVC_KINDS = new Set(['oasisview', 'diag', 'tsb', 'manual', 'wiring', 'labor', 'article', 'doc']); // article: Ford's page for an FSA etc. · doc: one of its PDFs
   const SVC_DEFAULTS = ['oasisview', 'diag', 'tsb', 'manual', 'wiring', 'labor'];
   const inService = (kind) => SVC_KINDS.has(kind);
+  // The Service Manual's main tabs (OASIS, Diagnostics, TSBs, Workshop Manual, Wiring Diagrams, Labor Times) can't be
+  // closed (nor Service Manual itself, which would close them); extra ones (a second Workshop Manual, an FSA, a TSB…) can
+  const isFixedTab = (ws, t) => t.kind === 'service' || (SVC_DEFAULTS.includes(t.kind) && ws.tabs.find((x) => x.kind === t.kind) === t);
   const serviceTab = (ws) => ws.tabs.find((t) => t.kind === 'service') || null;
   // The vehicle's chosen tab in the top row
   function topTab(ws) {
@@ -2219,6 +2224,7 @@ function createWorkbench(profile) {
       const i = ws.tabs.findIndex((t) => t.id === id);
       if (i < 0) return;
       const closing = ws.tabs[i];
+      if (isFixedTab(ws, closing)) return; // the Service Manual's main tabs stay
       // Closing Service Manual closes its tabs too; closing its last tab closes Service Manual
       const gone = closing.kind === 'service' ? ws.tabs.filter((t) => t === closing || inService(t.kind)) : [closing];
       if (inService(closing.kind) && ws.tabs.filter((t) => inService(t.kind)).length === 1) gone.push(serviceTab(ws));

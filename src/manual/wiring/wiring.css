@@ -31,6 +31,18 @@ option.na { color: var(--muted); }
 .w-item .tag { margin-left: auto; font-size: 11px; color: var(--muted); white-space: nowrap; }
 .w-item.na .name, .w-item.na .num { color: var(--muted); font-weight: 400; opacity: .7; }
 
+/* search results */
+.w-search { margin-bottom: 18px; }
+.w-sec-head { margin: 4px 0 8px; font-size: 14px; }
+.w-kinds { padding: 0 0 0 0; margin-bottom: 8px; }
+.w-kind { flex: none; font-size: 10px; font-weight: 800; letter-spacing: .3px; padding: 1px 6px; border-radius: 4px; min-width: 74px; text-align: center;
+  background: var(--hover); color: var(--muted); }
+.w-kind.component { background: #1d4ed8; color: #fff; } .w-kind.connector { background: #0f766e; color: #fff; }
+.w-kind.splice { background: #7c3aed; color: #fff; } .w-kind.ground { background: #a16207; color: #fff; }
+.w-res { align-items: center; }
+.w-res.na .w-kind { opacity: .55; }
+.w-none { padding: 10px 14px; margin: 0; }
+
 /* one page */
 #w-page-view { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 .w-stage { position: relative; flex: 1; overflow: hidden; cursor: grab; background: var(--bg); outline: none; touch-action: none; }
@@ -45,11 +57,18 @@ option.na { color: var(--muted); }
 .w-paper text { font-family: inherit; }
 .w-paper .w-link { cursor: pointer; }
 .w-paper .w-link:hover text { fill: var(--w-hover); text-decoration: underline; }
+/* the location views' pictures of the vehicle are shown as Ford made them (colored harnesses, see-through background) */
 .w-paper .w-mark { fill: #facc15; fill-opacity: .4; stroke: #dc2626; stroke-width: 1.5; pointer-events: none; }
 .w-msg { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: var(--muted); }
 .w-msg[hidden] { display: none; }
 .w-msg .actions { display: flex; gap: 8px; }
-.w-hint { flex: none; font-size: 11.5px; color: var(--muted); padding: 4px 12px; border-top: 1px solid var(--line); background: var(--panel); }
+.w-hint { flex: none; display: flex; align-items: center; gap: 12px; justify-content: space-between; font-size: 11.5px; color: var(--muted);
+  padding: 4px 12px; border-top: 1px solid var(--line); background: var(--panel); }
+.w-findbox { display: inline-flex; align-items: center; gap: 8px; }
+#w-find { font: inherit; font-size: 12px; width: 220px; padding: 4px 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--text); }
+#w-find:focus { outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent); outline-offset: -1px; }
+.w-paper .w-findmark { fill: #38bdf8; fill-opacity: .25; stroke: #0284c7; stroke-width: 1; }
+.w-paper .w-findmark.cur { fill: #facc15; fill-opacity: .45; stroke: #dc2626; stroke-width: 1.5; }
 
 /* a connector / splice / ground */
 .w-pop { position: fixed; z-index: 10; width: 300px; max-height: 70vh; overflow: auto; background: var(--panel); border: 1px solid var(--line);
@@ -68,8 +87,26 @@ option.na { color: var(--muted); }
   @page { size: landscape; margin: 8mm; }
   body.wiring { display: block; height: auto; overflow: visible; }
   .o-head .o-actions, #w-list-view, .w-hint, .w-pop, .w-msg { display: none !important; }
+  .w-paper .w-findmark { display: none; }
   #w-page-view, .w-stage { display: block; overflow: visible; background: #fff; }
   .w-paper { position: static; transform: none !important; width: 100% !important; height: auto !important; border: 0; }
   .w-paper svg { height: auto; max-height: 180mm; }
   .w-paper .w-mark { display: none; }
 }
+
+/* the search window */
+.w-sbtn { padding: 3px 12px; font-size: 12px; }
+.w-modal { position: fixed; inset: 0; z-index: 20; background: rgba(0, 0, 0, .35); display: flex; justify-content: center; align-items: flex-start; padding: 8vh 16px 16px; }
+.w-modal[hidden] { display: none; }
+.w-modal-box { width: min(860px, 100%); max-height: 80vh; display: flex; flex-direction: column; background: var(--panel); border: 1px solid var(--line);
+  border-radius: 10px; box-shadow: 0 12px 40px rgba(0, 0, 0, .35); overflow: hidden; }
+.w-modal-head { display: flex; gap: 8px; align-items: center; padding: 12px; border-bottom: 1px solid var(--line); }
+#w-sq { flex: 1; font: inherit; font-size: 15px; padding: 9px 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--text); }
+#w-sq:focus { outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent); outline-offset: -1px; }
+.w-modal-body { overflow: auto; padding: 10px 12px 14px; }
+.w-modal-body .w-search { margin: 0; }
+.w-modal-body .w-res:focus { outline: 2px solid var(--accent); outline-offset: -2px; background: var(--hover); }
+.w-hintbox { padding: 6px 4px; font-size: 13.5px; }
+.w-hintbox p { margin: 4px 0; }
+.w-none .ghost { margin-left: 8px; }
+@media print { .w-modal { display: none !important; } }

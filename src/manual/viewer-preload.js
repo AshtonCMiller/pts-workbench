@@ -16,6 +16,7 @@ contextBridge.exposeInMainWorld('manual', {
   wiringPages: (cell) => ipcRenderer.invoke('manual', 'wiring-pages', { cell }),
   wiringSvg: (cell, page) => ipcRenderer.invoke('manual', 'wiring-svg', { cell, page }),
   wiringLocations: (item) => ipcRenderer.invoke('manual', 'wiring-locations', { item }),
+  wiringSearch: (text) => ipcRenderer.invoke('manual', 'wiring-search', { text }),
   wiringFord: (q) => ipcRenderer.invoke('manual', 'wiring-ford', q),
   openWiring: (q) => ipcRenderer.invoke('manual', 'open-wiring', q),
   slts: (req) => ipcRenderer.invoke('manual', 'slts', req),

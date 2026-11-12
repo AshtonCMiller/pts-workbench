@@ -1193,7 +1193,7 @@ function tabEl(ws, t, activeId) {
   const tab = el('div', { class: `tab kind-${t.kind}` + (t.id === activeId ? ' on' : ''), title: 'Double-click to rename' },
     el('span', { class: 'tab-dot' }),
     title,
-    el('button', {
+    t.fixed ? null : el('button', { // the Service Manual's main tabs have no ×
       class: 'close', text: '×', title: t.kind === 'service' ? 'Close the Service Manual and its tabs' : 'Close tab',
       onclick: (e) => { e.stopPropagation(); api.send('close-tab', { ro: ws.ro, id: t.id }); },
     }),

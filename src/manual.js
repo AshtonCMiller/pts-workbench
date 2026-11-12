@@ -601,9 +601,9 @@ class ManualService {
     const info = await this.wiringInfo(vin);
     const c = String(cell).replace(/\D/g, '').padStart(3, '0');
     const pg = String(Number(page) || 1);
-    return this.wiringCached(info, `${c}_${pg}.json`, async () => {
-      const url = `${info.base.replace(/\/Ford_Content\//, '/ford_content/')}wiring/svg/${encodeURIComponent(info.env)}/${encodeURIComponent(info.vehicleId)}/~W${encodeURIComponent(info.book)}` +
-        `/${encodeURIComponent(info.lang)}/svg/${c}/0/${pg}.svg?fromPageBase=${encodeURIComponent(PTS)}`;
+    const url = `${info.base.replace(/\/Ford_Content\//, '/ford_content/')}wiring/svg/${encodeURIComponent(info.env)}/${encodeURIComponent(info.vehicleId)}/~W${encodeURIComponent(info.book)}` +
+      `/${encodeURIComponent(info.lang)}/svg/${c}/0/${pg}.svg?fromPageBase=${encodeURIComponent(PTS)}`;
+    const out = await this.wiringCached(info, `${c}_${pg}.json`, async () => {
       const res = await this.content(url, 'image/svg+xml,text/html,*/*');
       const svg = await res.text();
       if (!/<svg[\s>]/i.test(svg)) {
@@ -612,6 +612,7 @@ class ManualService {
       }
       return { svg };
     });
+    return { svg: out.svg, url }; // url: for the pictures in it (their addresses can be relative to it)
   }
 
   // The drawings need Ford's content sign-on cookies; getting them before the first drawing is asked for
@@ -898,6 +899,21 @@ class ManualService {
       contentMarket: ctx.contentMarket, isoLang: ctx.isoLang }, counts, dtcInfo, results: (json.data || []).map((r) => diagResult(r, ctx)) };
   }
 
+  // Wiring Diagrams tab: Ford's search, wiring only (components, connectors, splices, grounds, diagrams).
+  // The same search engine as Ford's Diagnostics tab, limited to this vehicle's wiring book.
+  async wiringSearch(vin, text) {
+    const q = String(text || '').trim().slice(0, 100);
+    if (!q) return { results: [] };
+    const out = await this.diagSearch(vin, { text: q, sources: ['wiring'], rows: 150 });
+    if (!this.loggedWiringTypes) {
+      this.loggedWiringTypes = true;
+      const kinds = {};
+      for (const r of out.results) kinds[r.wtype] = (kinds[r.wtype] || 0) + 1;
+      this.log(`   wiring search "${q}": ${out.results.length} results, types ${JSON.stringify(kinds)}${out.results[0] ? `, e.g. ${JSON.stringify(out.results[0]).slice(0, 300)}` : ''}`);
+    }
+    return { results: out.results.map((r) => ({ type: r.wtype, title: r.title, cell: r.cell, page: r.page, conn: r.conn, book: r.book, applies: r.applies, url: r.url })) };
+  }
+
   // Newer ("SPA") pinpoint tests keep their steps in a separate file, fetched when the test is opened
   async spaSteps(vin, { file, procUid }) {
     const book = await this.book(vin);
@@ -1004,6 +1020,9 @@ function diagResult(r, ctx = {}) {
     // The same wiring addresses Ford's search builds
     const book = String(r.articleNumber || ''), conn = String(r.wiringConnector || ''), lang = ctx.lang || 'enusa';
     const vid = encodeURIComponent(ctx.vehicleId || '1');
+    // kept for the Wiring Diagrams tab's search
+    // (location results — "…_index" — are pages of the location views, cell 151, which Ford leaves out)
+    Object.assign(out, { wtype: String(r.type || ''), cell: String(r.wiringCell || (/_index$/.test(r.type || '') ? '151' : '')), page: String(r.wiringPage || ''), conn, book });
     if (r.type === 'cfc') {
       out.title = `${conn}: ${out.title}`;
       out.url = `/wiring/face/?book=${encodeURIComponent(book)}&vehicleId=${vid}&cell=150&page=&item=${encodeURIComponent(book.toLowerCase() + 'cf' + conn.toLowerCase())}&bookType=svg&languageCode=${lang}`;

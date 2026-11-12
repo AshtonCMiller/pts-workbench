@@ -18,6 +18,7 @@
       <div class="o-sub" id="w-sub">Ford's wiring book for this vehicle</div>
     </div>
     <div class="o-actions">
+      <button id="btn-search" class="primary small w-sbtn" title="Search for a component, connector, splice, ground or diagram (Ctrl+K)">Search</button>
       <button id="btn-contents" class="ghost small" hidden title="All the diagrams">‹ Contents</button>
       <button id="btn-back" class="ghost small" hidden title="The page you were on (Backspace)">‹ Back</button>
       <span id="w-pager" class="w-pager" hidden>
@@ -37,7 +38,7 @@
 
   <div id="w-list-view">
     <form id="w-form" class="d-search" autocomplete="off">
-      <input id="w-q" type="search" spellcheck="false" placeholder="Filter by name or number — e.g. charging, 151, power windows">
+      <input id="w-q" type="search" spellcheck="false" placeholder="Filter diagrams by name or number — e.g. charging, 151, power windows">
       <select id="w-sort" title="Order">
         <option value="cell">By number</option>
         <option value="title">By name</option>
@@ -54,9 +55,22 @@
       <div id="w-paper" class="w-paper"></div>
       <div id="w-msg" class="w-msg" hidden></div>
     </div>
-    <div class="w-hint">Drag to move · scroll to zoom · double-click to zoom in · click a blue page number or connector</div>
+    <div class="w-hint">
+      <span>Drag to move · scroll to zoom · double-click to zoom in · click a blue page number or connector</span>
+      <span class="w-findbox"><input id="w-find" type="search" spellcheck="false" placeholder="Find on this page (Ctrl+F)"><span id="w-find-n" class="muted"></span></span>
+    </div>
   </div>
 
+  <!-- the search window (Ford's search, wiring only) -->
+  <div id="w-modal" class="w-modal" hidden>
+    <div class="w-modal-box" role="dialog" aria-label="Search the wiring">
+      <div class="w-modal-head">
+        <input id="w-sq" type="search" spellcheck="false" autocomplete="off" placeholder="Component, connector, splice, ground or diagram — e.g. C1689, G100, PCM">
+        <button id="w-sclose" class="icon" title="Close (Esc)">×</button>
+      </div>
+      <div id="w-sbody" class="w-modal-body"></div>
+    </div>
+  </div>
   <div id="w-pop" class="w-pop" hidden></div>
   <div id="o-toast" class="o-toast" hidden></div>
   <script src="wiring.js"></script>
