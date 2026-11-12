@@ -5,8 +5,10 @@
 const api = window.manual;
 const $ = (id) => document.getElementById(id);
 
-let state = { docs: [], active: null, open: [], query: '', tocWidth: 340, tocHidden: false };
-let tree = null;          // [{ type: 'folder'|'doc'|'link', title, children, link, url, path }]
+let state = { docs: [], active: null, open: [], query: '', tocWidth: 340, tocHidden: false, allOptions: false };
+let tree = null;          // [{ type: 'folder'|'doc'|'link', title, children, link, url, path }] (as shown: this vehicle's, or everything)
+let fullTree = null;      // everything in Ford's contents; entries that don't apply to this vehicle have na: true
+let filterable = false;   // Ford marked which entries apply to which options, and the vehicle's options are known
 let leaves = [];          // every doc/link, for search
 const docCache = new Map(); // doc key -> rendered element
 const backStacks = new Map(); // doc key -> [scrollTop, ...] (this session only)
@@ -73,18 +75,13 @@ async function loadContentsInner() {
   $('tree').replaceChildren(el('div', { class: 'note' }, el('div', { class: 'spinner' }), 'Loading the contents…'));
   const res = await api.tree();
   if (res?.error) return contentsError(res);
-  tree = parseTree(res.html || '');
-  leaves = [];
-  const walk = (nodes, pathTitles) => {
-    for (const n of nodes) {
-      n.path = [...pathTitles, n.title];
-      if (n.type === 'folder') walk(n.children, n.path); else leaves.push(n);
-    }
-  };
-  walk(tree, []);
-  const count = (n) => (n.type === 'folder' ? (n.count = n.children.reduce((a, c) => a + count(c), 0)) : 1);
-  tree.forEach(count);
-  api.log(`contents: ${(res.html || '').length} characters, ${tree.length} top sections, ${leaves.length} entries`);
+  const fit = vehicleFit(res.html || '', res.features);
+  fullTree = parseTree(res.html || '', fit);
+  filterable = !!fit;
+  buildShown();
+  const naCount = filterable ? countLeaves(fullTree, (n) => n.na) : 0;
+  api.log(`contents: ${(res.html || '').length} characters, ${tree.length} top sections, ${leaves.length} entries` +
+    (fit ? `, ${naCount} don't apply to this vehicle (options ${fit.matches.length} of ${fit.codes})` : ', not filtered for this vehicle'));
   if (!leaves.length) {
     tree = null;
     const text = String(res.html || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
@@ -93,7 +90,8 @@ async function loadContentsInner() {
     api.log(`contents were empty; ${(raw.match(/<li/gi) || []).length} <li>, ${(raw.match(/<a\s/gi) || []).length} <a>, data-for ${(raw.match(/data-for/gi) || []).length}; sample: ${raw.slice(Math.max(0, i), i + 1500)}`);
     return contentsError({ message: 'Ford sent the contents back empty.', detail: text.slice(0, 300) || '(nothing at all)' });
   }
-  $('book-title').append(el('small', { text: ` · ${leaves.length.toLocaleString()} entries` }));
+  $('book-title').append(el('small', { id: 'book-count' }));
+  drawFilter();
   $('search').value = state.query || '';
   renderTree();
   if (!state.docs.length) showWelcome();
@@ -104,8 +102,97 @@ function contentsError(res) {
   showProblem(res, loadContents);
 }
 
+// ---------- only what applies to this vehicle ----------
+// Ford marks the contents' sections and procedures with the options they're for (data-qual="#FC~ene3|enr9#SD~20220101":
+// every "#" group must match; in an FC group any one option code will do; SD / ED: built on / after, on / before).
+// The book lists the option codes it uses (data-feature-pfcs / -mfcs); the vehicle's own come from PTS's VIN decode.
+// The same rules as Ford's own manual page (book.js applyFilter).
+function vehicleFit(html, features) {
+  const why = (t) => { api.log(`contents: not filtered — ${t}`); return null; };
+  if (!features || !(features.primary?.length || features.minor?.length)) return why("the vehicle's options aren't known");
+  // read from the page itself (Ford's quoting of these attributes varies)
+  const doc = new DOMParser().parseFromString(stripStyles(html), 'text/html');
+  const holder = doc.querySelector('[data-feature-vl], [data-feature-pfcs]');
+  const marked = [...doc.querySelectorAll('[data-qual]')];
+  if (!marked.length) return why(`Ford's contents don't mark options for this book (${holder ? 'has' : 'no'} vehicle line)`);
+  const list = (v) => String(v || '').toUpperCase().split(/[|,\s]+/).filter(Boolean);
+  // the options the book uses: as Ford's page lists them, or else every code its marks name
+  let pfcs = list(holder?.getAttribute('data-feature-pfcs')), mfcs = list(holder?.getAttribute('data-feature-mfcs'));
+  if (!pfcs.length && !mfcs.length) {
+    const used = new Set();
+    for (const n of marked) for (const g of String(n.getAttribute('data-qual')).split('#')) if (/^FC~/i.test(g)) list(g.slice(3).replace(/\|/g, ' ')).forEach((c) => used.add(c));
+    pfcs = [...used].filter((c) => c.length <= 4); mfcs = [...used].filter((c) => c.length > 4);
+    api.log(`contents: book's option list missing; using the ${used.size} codes its ${marked.length} marks name, e.g. ${marked.slice(0, 3).map((n) => n.getAttribute('data-qual')).join(' ')}`);
+  }
+  const primary = new Set(features.primary || []);
+  const minor = new Set((features.minor || []).map((x) => x.slice(0, 5)));
+  const matches = new Set([...pfcs.filter((c) => primary.has(c)), ...mfcs.filter((c) => minor.has(c))]);
+  // none of the book's main options (engine, transmission…) found in the vehicle's: the codes don't line up, so nothing is hidden
+  if (!pfcs.some((c) => matches.has(c))) {
+    api.log(`contents: not filtered — none of the book's options (${pfcs.slice(0, 12).join(',')}) are in the vehicle's (${[...primary].slice(0, 20).join(',')})`);
+    return null;
+  }
+  // the vehicle's minor options unknown: rules about them are let through rather than hiding everything
+  return { matches: [...matches], set: matches, build: parseInt(features.buildDate, 10) || 0, codes: pfcs.length + mfcs.length,
+    mfcs: new Set(mfcs), minorKnown: minor.size > 0 };
+}
+function qualFits(qual, fit) {
+  if (!fit || !qual) return true;
+  const groups = String(qual).split('#').slice(1).filter(Boolean);
+  if (!groups.length) return true;
+  return groups.every((g) => {
+    const [kind, rest = ''] = g.toUpperCase().split('~');
+    const quals = rest.split('|');
+    if (kind === 'FC') return quals.some((q) => fit.set.has(q) || (!fit.minorKnown && fit.mfcs.has(q)));
+    if (kind === 'SD') return !fit.build || parseInt(quals[0], 10) <= fit.build;
+    if (kind === 'ED') return !fit.build || parseInt(quals[0], 10) >= fit.build;
+    return true; // a kind of rule Ford's page doesn't know either
+  });
+}
+function countLeaves(nodes, test) {
+  let n = 0;
+  for (const x of nodes || []) n += x.type === 'folder' ? countLeaves(x.children, test) : test(x) ? 1 : 0;
+  return n;
+}
+// The contents as shown: this vehicle's only (unless "Show all" is on), with paths, counts and the search list
+function buildShown() {
+  const showAll = !filterable || state.allOptions;
+  const copy = (nodes) => {
+    const out = [];
+    for (const n of nodes) {
+      if (n.type === 'folder') {
+        const children = copy(n.children);
+        if (!children.length) continue;
+        out.push({ ...n, children, na: n.na || children.every((c) => c.na) });
+      } else if (showAll || !n.na) out.push({ ...n });
+    }
+    return out;
+  };
+  tree = copy(fullTree || []);
+  leaves = [];
+  const walk = (nodes, pathTitles) => {
+    for (const n of nodes) {
+      n.path = [...pathTitles, n.title];
+      if (n.type === 'folder') walk(n.children, n.path); else leaves.push(n);
+    }
+  };
+  walk(tree, []);
+  const count = (n) => (n.type === 'folder' ? (n.count = n.children.reduce((a, c) => a + count(c), 0)) : 1);
+  tree.forEach(count);
+}
+function drawFilter() {
+  const total = countLeaves(fullTree, () => true), na = filterable ? countLeaves(fullTree, (n) => n.na) : 0;
+  const c = $('book-count');
+  if (c) c.textContent = ` · ${leaves.length.toLocaleString()} entries`;
+  const box = $('vin-filter');
+  box.hidden = !filterable || !na;
+  if (box.hidden) return;
+  $('vin-only').checked = !state.allOptions;
+  $('vin-note').textContent = state.allOptions ? `gray ones (${na.toLocaleString()}) don't apply` : `${na.toLocaleString()} of ${total.toLocaleString()} hidden`;
+}
+
 // ---------- contents (from Ford's tree HTML) ----------
-function parseTree(html) {
+function parseTree(html, fit = null) {
   const doc = new DOMParser().parseFromString(stripStyles(html), 'text/html');
   const text = (n) => (n?.textContent || '').replace(/\s+/g, ' ').trim();
   // Every procedure/document link, wherever it sits; the folders are the list items around it
@@ -148,14 +235,23 @@ function parseTree(html) {
       list = f.children;
     }
     const title = text(a);
+    // for this vehicle? (its own options, and those of every section it sits in)
+    let na = false;
+    if (fit) {
+      if (!qualFits(a.getAttribute('data-qual'), fit)) na = true;
+      for (let li = a.closest('li'); li && !na; li = li.parentElement?.closest('li')) {
+        const sec = li.querySelector(':scope > span[data-qual], :scope > [data-qual-source="section"]');
+        if (sec && !qualFits(sec.getAttribute('data-qual'), fit)) na = true;
+      }
+    }
     const cls = a.getAttribute('class') || '';
     const forAttr = a.getAttribute('data-for') || '';
     if (/Quicklinkpdf-link/i.test(cls) || /^(https?:)?\//i.test(forAttr)) {
-      list.push({ type: 'link', title, url: forAttr });
+      list.push({ type: 'link', title, url: forAttr, na });
     } else {
       const { searchNumber, hash } = splitTarget(forAttr);
       const linkType = /publication-content/i.test(cls) ? 'PublicationContent' : 'Procedure';
-      list.push({ type: 'doc', title, link: { searchNumber, procUid: a.getAttribute('data-procuid') || '', linkType, hash } });
+      list.push({ type: 'doc', title, na, link: { searchNumber, procUid: a.getAttribute('data-procuid') || '', linkType, hash } });
     }
   }
   return roots;
@@ -176,7 +272,8 @@ function renderTree() {
         const m = n.title.match(/^(\d{3}-\d{2}[A-Z]?\d?)\s+(.*)$/);
         const label = m ? el('span', { class: 'label' }, el('span', { class: 'code', text: m[1] }), m[2]) : el('span', { class: 'label', text: n.title });
         frag.append(el('div', {
-          class: `node folder d${Math.min(depth, 4)}${isOpen ? ' open' : ''} ${kindOf(n.title)}`, style: `--depth:${depth}`, title: n.title,
+          class: `node folder d${Math.min(depth, 4)}${isOpen ? ' open' : ''}${n.na ? ' na' : ''} ${kindOf(n.title)}`, style: `--depth:${depth}`,
+          title: n.na ? `${n.title}\n(doesn't apply to this vehicle)` : n.title,
           onclick: () => { toggleFolder(id); },
         }, el('span', { class: 'tw', text: isOpen ? '▾' : '▸' }), label,
         el('span', { class: 'count', text: String(n.count || '') })));
@@ -205,7 +302,8 @@ function kindOf(title) {
 function leafNode(n, depth, extra) {
   const on = n.type === 'doc' && activeDoc()?.key === docKey(n.link);
   return el('div', {
-    class: `node ${n.type} d${Math.min(depth, 4)}${on ? ' on' : ''}`, style: `--depth:${depth}`, title: n.path.join(' › '),
+    class: `node ${n.type} d${Math.min(depth, 4)}${on ? ' on' : ''}${n.na ? ' na' : ''}`, style: `--depth:${depth}`,
+    title: n.path.join(' › ') + (n.na ? "\n(doesn't apply to this vehicle)" : ''),
     onclick: (e) => openLeaf(n, e),
     onauxclick: (e) => { if (e.button === 1) openLeaf(n, { ...e, newTab: true }); },
   }, el('span', { class: 'tw' }), el('span', { class: 'label' }, extra || n.title));
@@ -966,9 +1064,17 @@ $('content').addEventListener('scroll', () => {
   clearTimeout(scrollTimer);
   scrollTimer = setTimeout(() => { rememberScroll(); save(); }, 300);
 });
+$('vin-only').addEventListener('change', () => {
+  state.allOptions = !$('vin-only').checked;
+  save();
+  buildShown();
+  drawFilter();
+  renderTree();
+});
 window.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') $('zoom').hidden = true;
-  if (e.ctrlKey && e.key.toLowerCase() === 'f') { e.preventDefault(); if (state.tocHidden) { state.tocHidden = false; applyLayout(); } $('search').focus(); $('search').select(); }
+  // Ctrl+F finds words in the page (the app's find bar); Ctrl+K searches the manual's contents
+  if (e.ctrlKey && e.key.toLowerCase() === 'k') { e.preventDefault(); if (state.tocHidden) { state.tocHidden = false; applyLayout(); } $('search').focus(); $('search').select(); }
   if (e.ctrlKey && e.key.toLowerCase() === 'w' && state.active) { e.preventDefault(); closeDoc(state.active); }
   if (e.altKey && e.key === 'ArrowLeft') $('btn-back').click();
 });

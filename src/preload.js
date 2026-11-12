@@ -9,4 +9,5 @@ contextBridge.exposeInMainWorld('workbench', {
   onLines: (fn) => ipcRenderer.on('ro-lines', (_e, data) => fn(data)),
   onChat: (fn) => ipcRenderer.on('chat', (_e, data) => fn(data)),
   onFeedback: (fn) => ipcRenderer.on('feedback', (_e, data) => fn(data)),
+  onFind: (fn) => ipcRenderer.on('find', (_e, data) => fn(data)),
 });

@@ -90,7 +90,34 @@ class ManualService {
       buildDate: d.BuildDate || '',
       productType: d.ProductType || '',
       vehicleLine: d.VehicleLine || '',
+      // the vehicle's option codes, as PTS keeps them (ptsSession.vehicle.features): for showing only the
+      // manual's procedures that apply to it (engine, transmission…)
+      features: {
+        primary: ['ProductType', 'VehicleLine', 'Version', 'BodyStyle', 'Engine', 'FuelType', 'Transmission', 'TransmissionInd', 'Emissions',
+          'TearTag', 'Drive', 'AxleRatio', 'AirConditioning', 'Tire', 'Territory', 'Paint', 'IntColor', 'IntFabric']
+          .map((k) => d[k]).filter((v) => v != null && String(v).trim() !== '').map((v) => String(v).trim().toUpperCase()),
+        minor: (Array.isArray(d.MinorFeatures) ? d.MinorFeatures : String(d.MinorFeatures || '').split(/[|,\s]+/))
+          .map((v) => String(v || '').trim().toUpperCase()).filter(Boolean),
+        buildDate: String(d.BuildDate || '').replace(/\D/g, ''),
+      },
     };
+  }
+
+  // The vehicle's option codes (engine, transmission, options…), for showing only what applies to it: from PTS's VIN
+  // decode, plus the "FeaturesAttributes" cookie PTS keeps for the VIN it's on (when it's this vehicle's)
+  async vehicleFeatures(vin) {
+    const book = await this.book(vin);
+    const f = book.features || { primary: [], minor: [], buildDate: '' };
+    const c = await this.cookieFeatures(book);
+    const norm = (x) => String(x || '').toUpperCase().replace('-', '').replace('_', '0');
+    const out = {
+      primary: [...new Set([...(f.primary || []), ...(c?.pfc || []).map(norm)])],
+      minor: [...new Set([...(f.minor || []), ...(c?.mfc || []).map(norm)])],
+      buildDate: f.buildDate || c?.buildDate || '',
+    };
+    this.log(`   vehicle options: ${out.primary.length} main (${out.primary.slice(0, 24).join(',')}), ${out.minor.length} minor` +
+      ` (e.g. ${out.minor.slice(0, 8).join(',')}), built ${out.buildDate || '?'}; from decode ${f.primary?.length || 0}/${f.minor?.length || 0}, cookie ${c ? `${c.pfc.length}/${c.mfc.length}` : 'none'}`);
+    return out;
   }
 
   // ---- 2. the manual's settings for this vehicle ----
@@ -119,6 +146,7 @@ class ManualService {
           vin, url,
           title: book.params.bookTitle || `${v.year} ${v.marketName}`,
           vehicle: { year: v.year, name: v.marketName, buildDate: v.buildDate, productType: v.productType, vehicleLine: v.vehicleLine },
+          features: v.features,
           params: book.params,
           bases: book.bases,
         };
@@ -135,7 +163,7 @@ class ManualService {
   async tree(vin) {
     const book = await this.book(vin);
     const p = book.params;
-    const key = `${p.vehicleId}_${p.bookcode}_${p.environment || ''}_${vin}`.replace(/[^A-Za-z0-9_.-]/g, '');
+    const key = `${p.vehicleId}_${p.bookcode}_${p.environment || ''}_q_${vin}`.replace(/[^A-Za-z0-9_.-]/g, ''); // q: with Ford's option marks
     const file = this.cacheDir ? path.join(this.cacheDir, `tree_${key}.html`) : null;
     if (!this.trees.has(key)) {
       const load = (async () => {
@@ -165,6 +193,7 @@ class ManualService {
 
   async fetchTree(book) {
     const p = book.params;
+    const filterable = (p.marketGroup === 'EU' || parseInt(p.modelYear, 10) >= 2019) && p.contenttype !== 'pced' && p.booktype === 'ody';
     const url = `${book.bases.publicationBookTreeAndCoverBase}?bookTitle=${encodeURIComponent(p.bookTitle || '')}` +
       `&WiringBookTitle=${encodeURIComponent(p.WiringBookTitle || '')}`;
     // Same fields Ford's own manual page sends
@@ -188,8 +217,10 @@ class ManualService {
       WiringBookCode: p.WiringBookCode || '',
       WiringFormat: p.WiringFormat || '',
       fromPageBase: p.origin || PTS,
-      strVehLine: '',
-      strProdType: '',
+      // Ford only marks which options each procedure is for (data-qual) when it's told the vehicle line and product
+      // type, as its own page does for VIN-filtered books (2019 on, or Europe; workshop "ody" books)
+      strVehLine: filterable ? book.vehicle.vehicleLine || '' : '',
+      strProdType: filterable ? book.vehicle.productType || '' : '',
     });
     const html = await this.text(url, {
       method: 'POST',
@@ -512,7 +543,21 @@ class ManualService {
 
   // The vehicle's option codes and build date (the "FeaturesAttributes" cookie PTS sets for the VIN it's
   // working on), for graying out the cells and pages that don't apply. Only used when it's this vehicle's.
+  // For graying out wiring that doesn't apply: the vehicle's options from PTS's VIN decode (always this vehicle's),
+  // plus the FeaturesAttributes cookie when it's for this vehicle
   async wiringFeatures(book) {
+    const c = await this.cookieFeatures(book);
+    const f = book.features;
+    if (!f || !f.primary?.length) return c;
+    const uniq = (a) => [...new Set(a)];
+    return {
+      pfc: uniq([...f.primary, ...(c?.pfc || [])]),
+      mfc: uniq([...(f.minor || []).map((x) => x.slice(0, 5)), ...(c?.mfc || [])]),
+      buildDate: f.buildDate || c?.buildDate || '',
+      vehicleLine: c?.vehicleLine || [],
+    };
+  }
+  async cookieFeatures(book) {
     try {
       const cookies = await this.ses.cookies.get({ name: 'FeaturesAttributes' });
       const c = cookies.find((x) => /dealerconnection\.com$/i.test(x.domain.replace(/^\./, '')));

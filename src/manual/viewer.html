@@ -10,7 +10,10 @@
   <aside id="toc">
     <div class="toc-head">
       <div class="book" id="book-title">Workshop Manual</div>
-      <input id="search" type="search" placeholder="Search the contents…" autocomplete="off" spellcheck="false">
+      <input id="search" type="search" placeholder="Search the contents… (Ctrl+K)" autocomplete="off" spellcheck="false">
+      <label id="vin-filter" class="vin-filter" hidden title="Hide the procedures for other engines, transmissions and options">
+        <input id="vin-only" type="checkbox" checked> Only this vehicle <span id="vin-note" class="muted"></span>
+      </label>
     </div>
     <div id="tree" class="tree"></div>
     <div id="toc-resize" title="Drag to resize"></div>

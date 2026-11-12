@@ -171,3 +171,10 @@ body.toc-hidden #main { left: 0; }
   :root { color-scheme: light; }
   html, body { background: #fff !important; color: #000; }
 }
+
+/* Only what applies to this vehicle (engine, transmission, options) */
+.vin-filter { display: flex; align-items: center; gap: 6px; font-size: 12px; cursor: pointer; user-select: none; }
+.vin-filter[hidden] { display: none; }
+.vin-filter .muted { margin-left: auto; font-size: 11px; }
+.node.na { opacity: .5; }
+.node.na:hover { opacity: .8; }

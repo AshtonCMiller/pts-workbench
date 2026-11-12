@@ -706,7 +706,7 @@ function createWorkbench(profile) {
       workspaces: [...workspaces.values()].map((ws) => {
         const pick = (t) => ({ id: t.id, kind: t.kind, title: t.title, status: t.status, fixed: isFixedTab(ws, t) });
         return {
-          ro: ws.ro, vin: ws.vin, ymm: ws.ymm, activeTab: topTab(ws)?.id ?? null, viewTab: currentTab(ws)?.id ?? null, asleep: !!ws.asleep, fetching: ws.fetching || '',
+          ro: ws.ro, vin: ws.vin, ymm: ws.ymm, activeTab: topTab(ws)?.id ?? null, viewTab: currentTab(ws)?.id ?? null, asleep: !!ws.asleep || !ws.tabs.some((t) => t.view), /* not opened since the app started: asleep too */ fetching: ws.fetching || '',
           tabs: ws.tabs.filter((t) => !inService(t.kind)).map(pick),
           sub: serviceTab(ws) ? { active: subTab(ws)?.id ?? null, tabs: ws.tabs.filter((t) => inService(t.kind)).map(pick) } : null,
         };
@@ -751,8 +751,44 @@ function createWorkbench(profile) {
     }
     for (const v of allContentViews()) v.setVisible(v === visible);
     visibleView = visible;
+    if (findWc && visible?.webContents !== findWc) closeFind(); // another page now: the find bar closes
   }
   let visibleView = null;
+
+  // ---------- find in page (Ctrl+F): the app's find bar, for whatever page is showing ----------
+  // (Wiring Diagrams has its own, which finds labels in the drawing)
+  let findWc = null;
+  const sendFind = (data) => { if (chrome && !chrome.webContents.isDestroyed()) chrome.webContents.send('find', data); };
+  function visibleKind() {
+    if (mode !== 'manual' || !activeRO || !workspaces.has(activeRO)) return '';
+    return currentTab(workspaces.get(activeRO))?.kind || '';
+  }
+  function openFind() {
+    const wc = visibleView && !visibleView.webContents.isDestroyed() ? visibleView.webContents : null;
+    if (!wc) return false;
+    if (findWc && findWc !== wc && !findWc.isDestroyed()) findWc.stopFindInPage('clearSelection');
+    findWc = wc;
+    if (!wc.findHooked) {
+      wc.findHooked = true;
+      wc.on('found-in-page', (_e, r) => { if (findWc === wc) sendFind({ result: true, active: r.activeMatchOrdinal || 0, matches: r.matches || 0 }); });
+    }
+    chrome.webContents.focus();
+    sendFind({ open: true });
+    return true;
+  }
+  function closeFind({ quiet = false } = {}) {
+    const wc = findWc;
+    findWc = null;
+    if (wc && !wc.isDestroyed()) wc.stopFindInPage('keepSelection');
+    if (!quiet) sendFind({ close: true });
+    return wc && !wc.isDestroyed() ? wc : null;
+  }
+  // Ctrl+F in a page: true when the find bar opened (Wiring Diagrams keeps the key for its own find)
+  function findKey(wc) {
+    if (!visibleView || visibleView.webContents !== wc) return false;
+    if (visibleKind() === 'wiring') return false;
+    return openFind();
+  }
   // Print whatever page is showing (Xtime, or the open tab of a vehicle)
   function printVisible() {
     if (visibleView && !visibleView.webContents.isDestroyed()) printPage(visibleView.webContents);
@@ -1166,7 +1202,10 @@ function createWorkbench(profile) {
           return { title: b.title, vehicle: b.vehicle };
         } catch (e) { return fail(e); }
       case 'tree':
-        try { return { html: await manualService.tree(ws.vin) }; } catch (e) { return fail(e); }
+        try {
+          const html = await manualService.tree(ws.vin);
+          return { html, features: await manualService.vehicleFeatures(ws.vin) }; // to show only what applies to this vehicle
+        } catch (e) { return fail(e); }
       case 'proc':
         try {
           const link = payload || {};
@@ -1961,6 +2000,13 @@ function createWorkbench(profile) {
 
   // Shared (tracker) changes refresh every window; window-only changes refresh just this one.
   const handlers = {
+    find: ({ text, next, back } = {}) => { // from the find bar: typing starts a new search, Enter / arrows go to the next match
+      if (!findWc || findWc.isDestroyed()) return;
+      text = String(text || '').slice(0, 200);
+      if (!text) { findWc.stopFindInPage('clearSelection'); sendFind({ result: true, active: 0, matches: 0, empty: true }); return; }
+      findWc.findInPage(text, { forward: !back, findNext: !next, matchCase: false });
+    },
+    'find-close': () => { const wc = closeFind({ quiet: true }); if (wc) wc.focus(); },
     'ui-ready': () => pushState(),
     'set-mode': (m) => { mode = m === 'manual' ? 'manual' : 'xtime'; layout(); pushState(); },
     // The messages counter: Xtime's chat is on Xtime's own page for now
@@ -2375,6 +2421,16 @@ function createWorkbench(profile) {
     appUiContents.add(chrome.webContents);
     chrome.webContents.on('before-input-event', (ev, input) => {
       if (isPrintKey(input)) { ev.preventDefault(); printVisible(); }
+      // Ctrl+F with the app's own bar focused: find in the page that's showing
+      if (input.type === 'keyDown' && input.control && !input.alt && !input.shift && input.key.toLowerCase() === 'f' && visibleView) {
+        ev.preventDefault();
+        if (visibleKind() === 'wiring') { // Wiring Diagrams' own find
+          const wc = visibleView.webContents;
+          wc.focus();
+          wc.sendInputEvent({ type: 'keyDown', keyCode: 'F', modifiers: ['control'] });
+          wc.sendInputEvent({ type: 'keyUp', keyCode: 'F', modifiers: ['control'] });
+        } else openFind();
+      }
     });
 
     // The app's dashboard starts with "Connecting to Xtime…" until the first ROs arrive (or Xtime asks to sign in)
@@ -2444,6 +2500,8 @@ function createWorkbench(profile) {
     owns: (sender) => chrome && sender === chrome.webContents,
     manualCall, manualSave,
     // Ctrl+B pressed inside one of this window's pages: show or hide the Workbench sidebar
+    findKey,
+    findClose: (wc) => { if (!findWc || findWc !== wc) return false; closeFind(); return true; },
     sidebarKey: (wc) => {
       if (!allContentViews().some((v) => v.webContents === wc) || mode !== 'manual') return false;
       handlers['toggle-sidebar']();
@@ -2605,6 +2663,14 @@ if (!app.requestSingleInstanceLock()) {
     // Ctrl+P prints the page (the app's own screen handles it itself, to print the page that's showing)
     wc.on('before-input-event', (ev, input) => {
       if (appUiContents.has(wc)) return;
+      // Ctrl+F: the app's find bar (Esc closes it)
+      if (input.type === 'keyDown' && input.control && !input.alt && !input.shift && input.key.toLowerCase() === 'f') {
+        for (const wb of windows.values()) if (wb.findKey?.(wc)) { ev.preventDefault(); return; }
+        return;
+      }
+      if (input.type === 'keyDown' && input.key === 'Escape') {
+        for (const wb of windows.values()) if (wb.findClose?.(wc)) { ev.preventDefault(); return; }
+      }
       if (input.type === 'keyDown' && input.control && !input.alt && !input.shift && input.key.toLowerCase() === 'b') {
         for (const wb of windows.values()) if (wb.sidebarKey?.(wc)) { ev.preventDefault(); return; }
         return;

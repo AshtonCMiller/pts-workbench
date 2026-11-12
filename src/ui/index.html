@@ -16,7 +16,6 @@
     <div id="timer" class="timer" title="Your shift clock"></div>
     <button id="btn-hours" class="today" title="Your flagged hours this pay period"></button>
     <span id="sync-chip" class="sync-chip" hidden></span>
-    <button id="msg-chip" class="msg-chip" hidden title="Unread Xtime messages: opens the dealership chat"></button>
     <div class="right">
       <span id="xtime-alert" class="xtime-alert" hidden>
         <span id="xtime-alert-text"></span>
@@ -27,15 +26,25 @@
       <button id="btn-unhide" class="primary small-btn" hidden></button>
       <span id="notice" class="notice" hidden></span>
       <span id="xtime-status" class="muted"></span>
-      <button id="btn-chat" class="ghost" title="Xtime dealership chat (read only)">💬 Chat</button>
-      <button id="btn-print" class="icon" title="Print this page (Ctrl+P)">🖨</button>
-      <button id="btn-refresh" class="icon" title="Refresh my ROs">↻</button>
+      <button id="btn-notes" class="ghost bell" title="Notifications">🔔<span id="notes-count" class="top-count" hidden></span></button>
+      <button id="btn-chat" class="ghost" title="Xtime dealership chat (read only)">💬 Chat<span id="chat-count" class="top-count" hidden></span></button>
       <button id="btn-dash" class="ghost" title="Switch between Xtime's page and the app's own dashboard">Dashboard</button>
       <button id="btn-drawer" class="ghost" title="Show or hide My ROs">My ROs</button>
       <button id="btn-feedback" class="ghost" title="Report a bug or suggest an idea" hidden>Feedback <span id="feedback-count" class="count" hidden></span></button>
       <button id="btn-settings" class="icon" title="Settings">⚙</button>
     </div>
   </header>
+
+  <!-- Notifications: everything the app has told you about (newest first, kept a week) -->
+  <div id="notes-backdrop" class="notes-backdrop" hidden></div>
+  <div id="notes-panel" class="notes-panel" hidden>
+    <div class="notes-head">
+      <b>Notifications</b>
+      <button id="notes-readall" class="ghost small" title="Mark them all as read">Mark all read</button>
+      <button id="notes-clear" class="ghost small" title="Remove them all">Clear all</button>
+    </div>
+    <div id="notes-list" class="notes-list"></div>
+  </div>
 
   <!-- Xtime mode: right-hand drawer next to the live Xtime page -->
   <aside id="drawer">
@@ -117,6 +126,14 @@
   </div>
   <!-- The Service Manual's own tabs (OASIS | Diagnostics | Workshop Manual | Labor Times) -->
   <div id="subtabs"></div>
+  <!-- Find in the page that's showing (Ctrl+F) -->
+  <div id="findbar" class="findbar" hidden>
+    <input id="find-q" type="search" spellcheck="false" autocomplete="off" placeholder="Find in this page">
+    <span id="find-n" class="find-n"></span>
+    <button id="find-prev" class="icon" title="Previous (Shift+Enter)">↑</button>
+    <button id="find-next" class="icon" title="Next (Enter)">↓</button>
+    <button id="find-close" class="icon" title="Close (Esc)">×</button>
+  </div>
 
   <main id="empty">
     <div class="empty-card">

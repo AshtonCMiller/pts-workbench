@@ -27,9 +27,9 @@ function toast(text) {
   toast.timer = setTimeout(() => { t.hidden = true; }, 1800);
 }
 
-let state = { q: '', sort: 'cell', only: false, at: null }; // at: { cell, page, item, title } — the page showing
+let state = { q: '', sort: 'cell', only: true, at: null }; // at: { cell, page, item, title } — the page showing
 let backList = [];
-function save() { api.save({ q: state.q, sort: state.sort, only: state.only, at: state.at }); }
+function save() { api.save({ q: state.q, sort: state.sort, onlyVin: state.only, at: state.at }); }
 
 // ---------- does it apply to this VIN? (as Ford's wiring pages work it out) ----------
 let features = null; // { pfc, mfc, vehicleLine, buildDate } or null (then everything shows as applying)
@@ -160,7 +160,9 @@ function searchSection() {
   const box = el('section', { class: 'w-search' });
   if (search.busy && !search.results) { box.append(el('p', { class: 'muted', text: 'Searching Ford’s wiring…' })); return box; }
   if (search.error) { box.append(el('p', { class: 'muted', text: search.error })); return box; }
-  const all = search.results || [];
+  const every = search.results || [];
+  // "Only this vehicle": results Ford marks as not for this VIN are left out
+  const all = state.only ? every.filter((r) => r.applies !== false) : every;
   const counts = {};
   for (const r of all) counts[r.kind] = (counts[r.kind] || 0) + 1;
   if (search.kind !== 'all' && !counts[search.kind]) search.kind = 'all';
@@ -185,6 +187,8 @@ function searchSection() {
       el('span', { class: 'tag', text: where })));
   }
   if (!list.length) ul.append(el('p', { class: 'muted w-none', text: 'Ford’s search found nothing for this.' }));
+  if (every.length > all.length) ul.append(el('p', { class: 'muted w-none' }, `${every.length - all.length} more for other options. `,
+    el('button', { class: 'ghost small', text: 'Show them', onclick: () => { state.only = false; $('w-only').checked = false; save(); drawSearch(); drawList(); } })));
   box.append(ul);
   return box;
 }
@@ -318,6 +322,8 @@ function fillPager(at, pages) {
   const sel = $('w-page');
   const list = pages && pages.length ? pages.map((p) => ({ n: Number(p.page) || 0, ok: pageApplies(p) })).filter((p) => p.n) : [{ n: at.page, ok: true }];
   if (!list.some((p) => p.n === at.page)) list.push({ n: at.page, ok: true });
+  // "Only this vehicle": pages for other options are left out (unless it's the one showing)
+  if (state.only && features) for (let i = list.length - 1; i >= 0; i--) if (!list[i].ok && list[i].n !== at.page) list.splice(i, 1);
   list.sort((a, b) => a.n - b.n);
   sel.replaceChildren(...list.map((p) => el('option', { value: String(p.n), class: p.ok ? '' : 'na', text: `Page ${p.n}${p.ok ? '' : ' (not this VIN)'}` })));
   sel.value = String(at.page);
@@ -790,7 +796,7 @@ $('w-find').addEventListener('keydown', (e) => {
   else if (e.key === 'Escape') { $('w-find').value = ''; findOnPage(''); $('w-stage').focus(); }
 });
 $('w-sort').addEventListener('change', () => { state.sort = $('w-sort').value; save(); drawList(); });
-$('w-only').addEventListener('change', () => { state.only = $('w-only').checked; save(); drawList(); });
+$('w-only').addEventListener('change', () => { state.only = $('w-only').checked; save(); drawList(); drawSearch(); if (state.at) pagesOf(state.at.cell).then((pg) => fillPager(state.at, pg)); });
 document.addEventListener('keydown', (e) => {
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); openSearch(); return; }
   if (!$('w-modal').hidden) { if (e.key === 'Escape') { e.preventDefault(); closeSearch(); } return; }
@@ -821,7 +827,7 @@ api.onOpen?.((o) => { if (o?.wiring) { backList = []; openPage(o.wiring); } });
   stageEvents();
   const info = (await api.init().catch(() => null)) || {};
   const s = info.state || {};
-  state = { q: String(s.q || ''), sort: s.sort === 'title' ? 'title' : 'cell', only: !!s.only, at: s.at && s.at.cell ? s.at : null };
+  state = { q: String(s.q || ''), sort: s.sort === 'title' ? 'title' : 'cell', only: s.onlyVin !== false, at: s.at && s.at.cell ? s.at : null };
   $('w-q').value = state.q; $('w-sort').value = state.sort; $('w-only').checked = state.only;
   const go = info.open?.wiring || state.at;
   if (go) {

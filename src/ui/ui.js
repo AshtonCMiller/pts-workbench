@@ -683,7 +683,7 @@ function compactRow(r, { ws = null } = {}) {
   const row = el('div', { class: 'ro compact' + (asleep ? ' asleep' : '') },
     el('div', { class: 't' },
       `RO ${r.ro}`, r.tag ? el('span', { class: 'tag', text: `  · Tag ${r.tag}` }) : null,
-      asleep ? el('span', { class: 'zz', text: 'Asleep' }) : fetchChip(ws),
+      fetchChip(ws) || (asleep ? el('span', { class: 'zz', text: 'Asleep' }) : null),
       info && info.lines.length ? el('span', { class: 'pays', text: fmtH(info.total) }) : null),
     el('div', { class: 'c2' },
       el('span', { class: 'cap', text: ymmOf(r) || ws?.ymm || info?.ymm || '' }),
@@ -703,7 +703,7 @@ function roCard(r, { inDrawer = false, ws = null } = {}) {
   const card = el('div', { class: 'ro' + (active ? ' sel' : '') + (asleep ? ' asleep' : '') },
     el('div', { class: 't' },
       `RO ${r.ro}`, r.tag ? el('span', { class: 'tag', text: `  · Tag ${r.tag}` }) : null,
-      asleep ? el('span', { class: 'zz', text: 'Asleep' }) : fetchChip(ws),
+      fetchChip(ws) || (asleep ? el('span', { class: 'zz', text: 'Asleep' }) : null),
       info && info.lines.length ? el('span', { class: 'pays', title: 'What the approved lines on this job pay', text: `Pays ${fmtH(info.total)}` }) : null),
     badgesFor(r),
     el('div', { class: 'v', text: ymmOf(r) || ws?.ymm || info?.ymm || '' }),
@@ -1098,8 +1098,10 @@ function render() {
   body.classList.toggle('manual', s.mode === 'manual');
   body.classList.toggle('drawer-closed', !s.drawerOpen);
   body.classList.toggle('dash', !!s.settings.xtimeDashboard);
-  $('msg-chip').hidden = !(s.msgCount > 0);
-  $('msg-chip').textContent = `💬 ${s.msgCount || 0}`;
+  // counters: unread Xtime messages on Chat, unread notifications on the bell
+  $('chat-count').hidden = !(s.msgCount > 0);
+  $('chat-count').textContent = s.msgCount > 99 ? '99+' : String(s.msgCount || 0);
+  renderNotes(s);
   if (s.chatOpen && s.msgCount !== lastMsgCount && Date.now() - chat.lastAsk > 3000) chatAskList();
   lastMsgCount = s.msgCount;
   $('btn-chat').classList.toggle('on', !!s.chatOpen);
@@ -1467,14 +1469,11 @@ applyMineCollapsed();
 // ---------- top bar buttons ----------
 $('mode-xtime').onclick = () => api.send('set-mode', 'xtime');
 $('btn-dash').onclick = () => api.send('toggle-dashboard');
-$('msg-chip').onclick = () => openChat(inVehicle(state) ? state.activeRO : null);
 $('btn-chat').onclick = () => { if (state?.chatOpen) api.send('chat-toggle', { open: false }); else openChat(null); };
 $('xdash-search').addEventListener('input', () => { if (state) renderDashboard(state); });
 $('mode-manual').onclick = () => api.send('set-mode', 'manual');
-$('btn-refresh').onclick = () => api.send('refresh-ros');
 $('btn-drawer').onclick = () => api.send('toggle-drawer');
 $('btn-reload-xtime').onclick = () => api.send('reload-xtime');
-$('btn-print').onclick = () => api.send('print-page');
 $('btn-hours').onclick = () => {
   $('flag-search').value = '';
   api.send('search-flags', '');
@@ -1768,3 +1767,83 @@ api.onFeedback?.((d) => {
     fbAllView();
   }
 });
+
+// ---------- find in page (Ctrl+F): finds words in the page that's showing (main does the finding) ----------
+(() => {
+  const bar = $('findbar'), q = $('find-q'), n = $('find-n');
+  let timer = null;
+  const search = () => { clearTimeout(timer); timer = setTimeout(() => api.send('find', { text: q.value }), 120); };
+  const step = (back) => { if (q.value) api.send('find', { text: q.value, next: true, back }); };
+  const close = () => { bar.hidden = true; n.textContent = ''; api.send('find-close'); };
+  q.addEventListener('input', search);
+  q.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); clearTimeout(timer); step(e.shiftKey); }
+    else if (e.key === 'Escape') { e.preventDefault(); close(); }
+  });
+  $('find-prev').addEventListener('click', () => step(true));
+  $('find-next').addEventListener('click', () => step(false));
+  $('find-close').addEventListener('click', close);
+  api.onFind?.((m) => {
+    if (m.open) {
+      bar.hidden = false;
+      q.focus(); q.select();
+      if (q.value) api.send('find', { text: q.value });
+    } else if (m.close) {
+      bar.hidden = true; n.textContent = '';
+    } else if (m.result) {
+      n.textContent = m.empty ? '' : m.matches ? `${m.active} of ${m.matches}` : 'No matches';
+      n.classList.toggle('none', !m.empty && !m.matches);
+    }
+  });
+})();
+
+// ---------- notifications (the bell): RO assigned, lines approved / declined, parts in, customer / warranty answered ----------
+const NOTE_ICON = { assigned: '📋', approved: '✅', declined: '❌', parts: '📦', customer: '👤', warranty: '🛡' };
+function noteWhen(at) {
+  const mins = Math.floor((Date.now() - at) / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins} min ago`;
+  const d = new Date(at), today = new Date();
+  const time = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  if (d.toDateString() === today.toDateString()) return time;
+  const y = new Date(today); y.setDate(today.getDate() - 1);
+  if (d.toDateString() === y.toDateString()) return `Yesterday ${time}`;
+  return `${d.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })} ${time}`;
+}
+function renderNotes(s) {
+  const notes = s.notes || [];
+  const unread = notes.filter((n) => !n.read).length;
+  $('notes-count').hidden = !unread;
+  $('notes-count').textContent = unread > 99 ? '99+' : String(unread);
+  $('btn-notes').title = unread ? `Notifications: ${unread} new` : 'Notifications';
+  if ($('notes-panel').hidden) return;
+  $('notes-readall').disabled = !unread;
+  $('notes-clear').disabled = !notes.length;
+  $('notes-list').replaceChildren(...(notes.length ? notes.map((n) => el('div', {
+    class: `note-item${n.read ? '' : ' unread'}`, title: n.ro ? `Open RO ${n.ro}` : '',
+    onclick: () => { api.send('note-open', { id: n.id }); closeNotes(); },
+  },
+  el('span', { class: 'note-icon', text: NOTE_ICON[n.kind] || '🔔' }),
+  el('div', { class: 'note-text' },
+    el('div', { class: 'note-title', text: n.title || '' }),
+    n.body ? el('div', { class: 'note-body', text: n.body }) : null,
+    el('div', { class: 'note-when', text: noteWhen(n.at) })),
+  el('button', { class: 'note-x', text: '×', title: 'Remove', onclick: (e) => { e.stopPropagation(); api.send('note-remove', { id: n.id }); } })))
+    : [el('div', { class: 'empty-note', text: 'No notifications. When an RO is assigned to you, a line is approved or declined, or parts come in, it shows up here.' })]));
+}
+function openNotes() {
+  $('notes-panel').hidden = false; $('notes-backdrop').hidden = false;
+  api.send('set-overlay', true); // the page underneath steps aside while the list is open
+  if (state) renderNotes(state);
+}
+function closeNotes() {
+  if ($('notes-panel').hidden) return;
+  $('notes-panel').hidden = true; $('notes-backdrop').hidden = true;
+  api.send('set-overlay', false);
+}
+$('btn-notes').onclick = () => { if ($('notes-panel').hidden) openNotes(); else closeNotes(); };
+$('notes-backdrop').onclick = closeNotes;
+$('notes-readall').onclick = () => api.send('notes-read');
+$('notes-clear').onclick = () => api.send('notes-clear');
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeNotes(); });
+setInterval(() => { if (!$('notes-panel').hidden && state) renderNotes(state); }, 60000); // keeps "5 min ago" current
