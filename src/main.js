@@ -2,12 +2,13 @@
 // Each window runs one profile: its own Xtime/PTS login, settings, open vehicles and hidden ROs.
 // The shift clock and the flag sheet are shared by every window, so all flags land in one set of hours.
 // Every page is loaded from Ford/Cox as normal, so access is recorded under that window's own login.
-const { app, BaseWindow, BrowserWindow, WebContentsView, ipcMain, session, shell, safeStorage, clipboard, net, protocol, Notification, powerSaveBlocker } = require('electron');
+const { app, BaseWindow, BrowserWindow, WebContentsView, ipcMain, session, shell, safeStorage, clipboard, net, protocol, Notification, powerSaveBlocker, Menu } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
 const XTIME_EXTRACT = fs.readFileSync(path.join(__dirname, 'inject', 'xtime-extract.js'), 'utf8').trim();
 const XTIME_RO = fs.readFileSync(path.join(__dirname, 'inject', 'xtime-ro.js'), 'utf8').trim();
+const XTIME_INSPECT = fs.readFileSync(path.join(__dirname, 'inject', 'xtime-inspect.js'), 'utf8').trim();
 const XTIME_CHAT = fs.readFileSync(path.join(__dirname, 'inject', 'xtime-chat.js'), 'utf8').trim();
 const COX_SIGNIN = fs.readFileSync(path.join(__dirname, 'inject', 'cox-signin.js'), 'utf8').trim();
 const COX_SIGNIN_HOST = /(^|\.)signin\.coxautoinc\.com$/i;
@@ -453,7 +454,7 @@ function createWorkbench(profile) {
         tabs: kept.map((t) => ({ kind: t.kind, title: t.title, ...(t.url ? { url: t.url } : {}), ...(t.manualState ? { state: t.manualState } : {}) })),
         activeIndex: Math.max(0, kept.findIndex((t) => t.id === ws.activeTab)),
         svcIndex: kept.findIndex((t) => t.id === ws.svcTab),
-        layout: 5,
+        layout: 6,
         };
       }),
     });
@@ -664,6 +665,12 @@ function createWorkbench(profile) {
         const lab = ws.tabs.findIndex((x) => x.kind === 'labor');
         ws.tabs.splice(man >= 0 ? man + 1 : lab >= 0 ? lab : ws.tabs.length, 0, t);
       }
+      if (!(w.layout >= 6) && !ws.tabs.some((x) => x.kind === 'xview')) { // saved before the app's own Xtime RO page
+        const t = addTab(ws, 'xview', { activate: false });
+        ws.tabs.splice(ws.tabs.indexOf(t), 1);
+        const xt = ws.tabs.findIndex((x) => x.kind === 'xtime');
+        ws.tabs.splice(xt >= 0 ? xt + 1 : 0, 0, t);
+      }
       workspaces.set(w.ro, ws);
     }
     if (saved.activeRO && workspaces.has(saved.activeRO)) activeRO = saved.activeRO;
@@ -681,7 +688,7 @@ function createWorkbench(profile) {
     }
     chrome.webContents.send('state', {
       feedback: { on: !!SYNC_URL, admin: isFeedbackAdmin(), newCount: feedbackNew },
-      mode, drawerOpen, chatOpen, settings, xtimeStatus, lastPoll, activeRO, xtimeSignin, msgCount,
+      mode, drawerOpen, chatOpen, settings, xtimeStatus, lastPoll, activeRO, xtimeSignin, msgCount, notes,
       myROs, roInfo,
       tracking: tracker?.summary() ?? null,
       period: tracker?.period(periodOffset) ?? null,
@@ -951,6 +958,7 @@ function createWorkbench(profile) {
     if (tab.kind === 'tsb') { tab.view = makeManualView(ws, tab, 'tsb/tsb.html'); return; }
     if (tab.kind === 'labor') { tab.view = makeManualView(ws, tab, 'labor-times/labor.html'); return; }
     if (tab.kind === 'wiring') { tab.view = makeManualView(ws, tab, 'wiring/wiring.html'); return; }
+    if (tab.kind === 'xview') { tab.view = makeManualView(ws, tab, 'xtime-view/xview.html'); return; }
     tab.view = makeWebView();
     const wc = tab.view.webContents;
     if (tab.kind === 'article') { // Ford's own page for an FSA (or other article) opened from OASIS, inside Service Manual
@@ -1146,6 +1154,53 @@ function createWorkbench(profile) {
         try { return await manualService.wiringPages(ws.vin, String(payload?.cell || '')); } catch (e) { return fail(e); }
       case 'wiring-svg':
         try { return await manualService.wiringSvg(ws.vin, String(payload?.cell || ''), Number(payload?.page) || 1); } catch (e) { return fail(e); }
+      // ---- the app's own Xtime RO page (Xtime View tab): read through the signed-in Xtime page, like the dashboard ----
+      case 'xview': {
+        const frame = findXtimeDataFrame();
+        if (!frame) return { error: true, message: 'Xtime is still loading. Try again in a moment.' };
+        try {
+          const r = await frame.executeJavaScript(`${XTIME_RO}(${JSON.stringify(settings.storeId)}, ${JSON.stringify(ws.ro)}, {"type":"view"})`, true);
+          if (!r?.ok) return { error: true, expired: !!r?.expired, message: r?.error || "Couldn't read this RO from Xtime" };
+          if (!r.view.advisor || !r.view.technician) manualService.log(`xtime view RO ${ws.ro}: advisor "${r.view.advisor}", technician "${r.view.technician}" (${JSON.stringify(r.view.people || {})})`);
+          return { view: r.view, at: Date.now() };
+        } catch (e) { return fail(e); }
+      }
+      case 'xview-done': { // a line's Done box: the same change as Xtime's Done button
+        const frame = findXtimeDataFrame();
+        const id = payload?.id;
+        if (!frame || id == null) return { error: true, message: 'Xtime is still loading' };
+        try {
+          const r = await frame.executeJavaScript(`${XTIME_RO}(${JSON.stringify(settings.storeId)}, ${JSON.stringify(ws.ro)}, ${JSON.stringify({ type: 'done', id, value: !!payload.value })})`, true);
+          return r?.ok ? { ok: true } : { error: true, message: r?.error || "Couldn't update the line in Xtime" };
+        } catch (e) { return fail(e); }
+      }
+      case 'xinspect': { // the RO's inspection form: read it, change an item, or switch forms (as Xtime's page does)
+        const frame = findXtimeDataFrame();
+        if (!frame) return { error: true, message: 'Xtime is still loading. Try again in a moment.' };
+        const q = payload || {};
+        const action = q.type === 'save' ? { type: 'save', iiid: q.iiid, color: String(q.color || ''), value: String(q.value ?? '').slice(0, 255) }
+          : q.type === 'switch' ? { type: 'switch', formId: q.formId }
+          : q.type === 'catalog' ? { type: 'catalog' }
+          : q.type === 'addLine' ? { type: 'addLine', line: q.line || {} }
+          : q.type === 'deleteLine' ? { type: 'deleteLine', id: q.id }
+          : { type: 'get' };
+        try {
+          const r = await frame.executeJavaScript(`${XTIME_INSPECT}(${JSON.stringify(settings.storeId)}, ${JSON.stringify(ws.ro)}, ` +
+            `${JSON.stringify(settings.xtimeDetailsPath || '/RepairOrder/Details/{RO}')}, ${JSON.stringify(action)})`, true);
+          if (!r?.ok) { manualService.log(`xtime inspection RO ${ws.ro} ${action.type}: ${r?.error || 'failed'}`); return { error: true, expired: !!r?.expired, message: r?.error || "Couldn't reach Xtime's inspection form" }; }
+          if (action.type === 'save' && r.red) manualService.log(`xtime inspection RO ${ws.ro}: red item ${action.iiid}: ${r.red}`);
+          return r;
+        } catch (e) { return fail(e); }
+      }
+      case 'open-xtime': { // Xtime's own page for this RO, in its tab
+        const t = ws.tabs.find((x) => x.kind === 'xtime') || addTab(ws, 'xtime', { activate: false, front: true });
+        setActive(ws, t); mode = 'manual';
+        saveWorkspaces(); layout(); pushState();
+        return true;
+      }
+      case 'open-chat': // the chat panel, on this RO's conversation
+        if (chrome && !chrome.webContents.isDestroyed()) chrome.webContents.send('chat', { kind: 'open', ro: ws.ro });
+        return true;
       case 'wiring-search':
         try { return await manualService.wiringSearch(ws.vin, String(payload?.text || '')); } catch (e) { return fail(e); }
       case 'wiring-locations':
@@ -1312,17 +1367,33 @@ function createWorkbench(profile) {
   // ---------- Windows notifications ----------
   // RO assigned to you, a line approved (with what Xtime says about parts), and new Xtime messages.
   // Clicking one opens that RO's Xtime page in the Workbench.
-  function notifyUser(title, body, ro) {
+  // Every notification is also kept in the app's notifications menu (the bell), on this computer only:
+  // the newest 100 from the last 7 days. New Xtime messages aren't kept there (Chat has its own counter).
+  let notes = readJson('notifications.json', []).filter((n) => n && n.id && Date.now() - n.at < 7 * 24 * 3600 * 1000);
+  let notesTimer = null;
+  const saveNotes = () => { clearTimeout(notesTimer); notesTimer = setTimeout(() => writeJson('notifications.json', notes), 500); };
+  function addNote(note) {
+    notes = [{ id: `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`, at: Date.now(), read: false, ...note }, ...notes].slice(0, 100);
+    saveNotes(); pushState();
+    return notes[0];
+  }
+  function openNoteRo(ro) {
+    try { if (win.isMinimized()) win.restore(); win.show(); win.focus(); } catch {}
+    if (ro) {
+      const r = myROs.find((x) => x.ro === ro);
+      openWorkspace({ ro, vin: r?.vin || workspaces.get(ro)?.vin || '', ymm: r ? [r.year, r.make, r.model].filter(Boolean).join(' ') : '', tab: 'xtime' });
+      layout(); pushState();
+    } else { mode = 'xtime'; layout(); pushState(); }
+  }
+  // kind: assigned | approved | declined | parts | customer | warranty | message
+  function notifyUser(title, body, ro, kind = '') {
+    const note = kind === 'message' ? null : addNote({ title, body, ro: ro || '', kind });
     if (!settings.notifications || !Notification.isSupported()) return;
     try {
       const n = new Notification({ title, body, silent: false });
       n.on('click', () => {
-        try { if (win.isMinimized()) win.restore(); win.show(); win.focus(); } catch {}
-        if (ro) {
-          const r = myROs.find((x) => x.ro === ro);
-          openWorkspace({ ro, vin: r?.vin || '', ymm: r ? [r.year, r.make, r.model].filter(Boolean).join(' ') : '', tab: 'xtime' });
-          layout(); pushState();
-        } else { mode = 'xtime'; layout(); pushState(); }
+        if (note) { note.read = true; saveNotes(); }
+        openNoteRo(ro);
       });
       n.show();
     } catch { /* notifications are optional */ }
@@ -1342,7 +1413,7 @@ function createWorkbench(profile) {
       for (const r of list) {
         if (knownMine.has(r.ro)) continue;
         const ymm = [r.year, r.make, r.model].filter(Boolean).join(' ');
-        notifyUser(`RO ${r.ro} assigned to you`, [ymm, r.tag && `Tag ${r.tag}`].filter(Boolean).join(' · ') || 'New RO on your list', r.ro);
+        notifyUser(`RO ${r.ro} assigned to you`, [ymm, r.tag && `Tag ${r.tag}`].filter(Boolean).join(' · ') || 'New RO on your list', r.ro, 'assigned');
       }
     }
     knownMine = now;
@@ -1373,11 +1444,11 @@ function createWorkbench(profile) {
     if (fresh.length) {
       notifyLog(`RO ${r.ro}: approved ${fresh.map(key).join(',')}`);
       notifyUser(`RO ${r.ro}: ${fresh.length === 1 ? 'line approved' : `${fresh.length} lines approved`}`,
-        `${fresh.map(label).join('; ').slice(0, 140)}\n${partsNote(r)}`, r.ro);
+        `${fresh.map(label).join('; ').slice(0, 140)}\n${partsNote(r)}`, r.ro, 'approved');
     }
     if (lost.length) {
       notifyLog(`RO ${r.ro}: declined ${lost.map(key).join(',')}`);
-      notifyUser(`RO ${r.ro}: ${lost.length === 1 ? 'line declined' : `${lost.length} lines declined`}`, lost.map(label).join('; ').slice(0, 160), r.ro);
+      notifyUser(`RO ${r.ro}: ${lost.length === 1 ? 'line declined' : `${lost.length} lines declined`}`, lost.map(label).join('; ').slice(0, 160), r.ro, 'declined');
     }
   }
   // Your ROs' waiting flags clearing: parts in, the customer answered, warranty answered
@@ -1389,9 +1460,9 @@ function createWorkbench(profile) {
       flagsSeen.set(r.ro, now);
       if (!was) continue;
       const ymm = [r.year, r.make, r.model].filter(Boolean).join(' ');
-      if (was.parts && !now.parts) { notifyLog(`RO ${r.ro}: parts no longer waiting`); notifyUser(`RO ${r.ro}: parts are in`, [ymm, r.dash?.partsStatus].filter(Boolean).join(' · ') || 'No longer waiting for parts', r.ro); }
-      if (was.customer && !now.customer) { notifyLog(`RO ${r.ro}: customer no longer waiting`); notifyUser(`RO ${r.ro}: customer answered`, `${ymm ? `${ymm} · ` : ''}No longer waiting on the customer`, r.ro); }
-      if (was.warranty && !now.warranty) { notifyLog(`RO ${r.ro}: warranty no longer waiting`); notifyUser(`RO ${r.ro}: warranty answered`, `${ymm ? `${ymm} · ` : ''}No longer waiting on warranty`, r.ro); }
+      if (was.parts && !now.parts) { notifyLog(`RO ${r.ro}: parts no longer waiting`); notifyUser(`RO ${r.ro}: parts are in`, [ymm, r.dash?.partsStatus].filter(Boolean).join(' · ') || 'No longer waiting for parts', r.ro, 'parts'); }
+      if (was.customer && !now.customer) { notifyLog(`RO ${r.ro}: customer no longer waiting`); notifyUser(`RO ${r.ro}: customer answered`, `${ymm ? `${ymm} · ` : ''}No longer waiting on the customer`, r.ro, 'customer'); }
+      if (was.warranty && !now.warranty) { notifyLog(`RO ${r.ro}: warranty no longer waiting`); notifyUser(`RO ${r.ro}: warranty answered`, `${ymm ? `${ymm} · ` : ''}No longer waiting on warranty`, r.ro, 'warranty'); }
     }
   }
   // Xtime's unread-messages counter (top right of Xtime's page)
@@ -1414,7 +1485,7 @@ function createWorkbench(profile) {
       try { n = await page.executeJavaScript(`(() => { const e = document.querySelector('.messages-count'); return e ? Number(e.getAttribute('data-badge')) || 0 : null; })()`, true); } catch {}
     }
     if (n == null) return;
-    if (msgCount != null && n > msgCount) notifyUser('New Xtime message', n - msgCount === 1 ? `1 new message · ${n} unread` : `${n - msgCount} new messages · ${n} unread`, null);
+    if (msgCount != null && n > msgCount) notifyUser('New Xtime message', n - msgCount === 1 ? `1 new message · ${n} unread` : `${n - msgCount} new messages · ${n} unread`, null, 'message');
     if (n !== msgCount) { msgCount = n; pushState(); }
   }
   const msgTimer = setInterval(readMsgCount, 20000);
@@ -1803,6 +1874,7 @@ function createWorkbench(profile) {
   // anything else: Xtime | ProDemand
   function addDefaultTabs(ws) {
     addTab(ws, 'xtime', { activate: false });
+    addTab(ws, 'xview', { activate: false }); // the app's own view of the Xtime RO (trial: next to Xtime's page for now)
     if (isFordVehicle(ws.vin, ws.ymm)) {
       addTab(ws, 'pts', { activate: false });
       SVC_DEFAULTS.forEach((k, i) => addTab(ws, k, { activate: i === 0 })); // opens on Service Manual › OASIS
@@ -1828,7 +1900,7 @@ function createWorkbench(profile) {
     if (was) setActive(ws, was); else ws.activeTab = topTab(ws)?.id ?? null;
   }
 
-  const TAB_NAMES = { tsb: 'TSBs', article: 'Article', doc: 'Document', service: 'Service Manual', labor: 'Labor Times', diag: 'Diagnostics', xtime: 'Xtime', oasisview: 'OASIS', manual: 'Workshop Manual', wiring: 'Wiring Diagrams', pts: 'PTS', ota: 'OTA Updates', cvd: 'Connected Data', prodemand: 'ProDemand', oasis: 'OASIS' };
+  const TAB_NAMES = { xview: 'Xtime View', tsb: 'TSBs', article: 'Article', doc: 'Document', service: 'Service Manual', labor: 'Labor Times', diag: 'Diagnostics', xtime: 'Xtime', oasisview: 'OASIS', manual: 'Workshop Manual', wiring: 'Wiring Diagrams', pts: 'PTS', ota: 'OTA Updates', cvd: 'Connected Data', prodemand: 'ProDemand', oasis: 'OASIS' };
   function addTab(ws, kind, { activate = true, front = false } = {}) {
     const n = ws.tabs.filter((t) => t.kind === kind).length;
     const base = TAB_NAMES[kind] || 'Manual';
@@ -2237,7 +2309,7 @@ function createWorkbench(profile) {
       // "+ Manual" while looking at a PTS tab copies that tab: same vehicle, same page, same scroll.
       const src = currentTab(ws);
       let snapshot = null;
-      const KINDS = ['service', 'labor', 'diag', 'tsb', 'oasisview', 'manual', 'wiring', 'pts', 'ota', 'cvd', 'prodemand', 'oasis', 'xtime'];
+      const KINDS = ['service', 'labor', 'diag', 'tsb', 'oasisview', 'manual', 'wiring', 'pts', 'ota', 'cvd', 'prodemand', 'oasis', 'xtime', 'xview'];
       kind = KINDS.includes(kind) ? kind : 'pts';
       if (kind === 'pts' && src?.kind === 'pts' && src.view && !src.view.webContents.isDestroyed()) {
         try { snapshot = await snapshotFrames(src.view.webContents); } catch { snapshot = null; }
@@ -2308,6 +2380,16 @@ function createWorkbench(profile) {
       pushState();
     },
     'print-page': () => printVisible(),
+    // the notifications menu (the bell)
+    'notes-read': () => { let changed = false; for (const n of notes) if (!n.read) { n.read = true; changed = true; } if (changed) { saveNotes(); pushState(); } },
+    'notes-clear': () => { notes = []; saveNotes(); pushState(); },
+    'note-open': ({ id } = {}) => {
+      const n = notes.find((x) => x.id === id);
+      if (!n) return;
+      n.read = true; saveNotes();
+      openNoteRo(n.ro);
+    },
+    'note-remove': ({ id } = {}) => { notes = notes.filter((x) => x.id !== id); saveNotes(); pushState(); },
     // Tabs dragged into a new order, one row at a time (the top row, or the Service Manual's row):
     // ids = that row's tab ids in the new order. They take the places that row's tabs already had.
     'reorder-tabs': ({ ro, ids }) => {
@@ -2660,6 +2742,18 @@ if (!app.requestSingleInstanceLock()) {
   });
 
   app.on('web-contents-created', (_e, wc) => {
+    // Right-click: Copy / Paste where it makes sense, and Print (the page that's showing; the app's own bar prints that page too)
+    wc.on('context-menu', (_ev, p) => {
+      const items = [];
+      if (p.isEditable) items.push({ role: 'cut', enabled: p.editFlags.canCut }, { role: 'copy', enabled: p.editFlags.canCopy }, { role: 'paste', enabled: p.editFlags.canPaste }, { type: 'separator' });
+      else if (p.selectionText && p.selectionText.trim()) items.push({ role: 'copy' }, { type: 'separator' });
+      if (p.linkURL && /^https?:/i.test(p.linkURL)) items.push({ label: 'Copy link address', click: () => clipboard.writeText(p.linkURL) }, { type: 'separator' });
+      items.push({ label: 'Print…', accelerator: 'Ctrl+P', click: () => {
+        if (appUiContents.has(wc)) { for (const wb of windows.values()) if (wb.owns?.(wc)) { wb.handlers['print-page']?.(); return; } }
+        printPage(wc);
+      } });
+      try { Menu.buildFromTemplate(items).popup(); } catch { /* no menu */ }
+    });
     // Ctrl+P prints the page (the app's own screen handles it itself, to print the page that's showing)
     wc.on('before-input-event', (ev, input) => {
       if (appUiContents.has(wc)) return;

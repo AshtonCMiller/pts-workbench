@@ -234,6 +234,7 @@ function openChat(ro) {
   renderChat();
 }
 api.onChat?.((d) => {
+  if (d.kind === 'open') { openChat(d.ro || null); return; } // from the Xtime View tab
   if (d.kind === 'list') {
     chat.listLoading = false;
     if (d.ok) { chat.list = d.conversations || []; chat.listError = ''; } else chat.listError = d.error;

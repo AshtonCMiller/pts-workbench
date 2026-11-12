@@ -49,6 +49,83 @@
     return text(p.Description) || text(p.Name) || text(p.Code) || text(p.PayTypeCode) || '';
   };
   const money = (v) => { const n = Number(v); return Number.isFinite(n) && n >= 0 ? n : null; };
+  // { type: 'view' }: the whole RO for the app's own RO page — the header, vehicle and every line with its notes
+  // and parts. The customer (name, phone, email, address) is left out.
+  if (ACTION && ACTION.type === 'view') {
+    const day = (v) => { const t = text(v); return !t || /^0001-01-01/.test(t) ? '' : t; };
+    const v = ro.Vehicle || {};
+    const partOf = (p) => ({
+      number: text(p.PartNumber) || text(p.Number) || text(p.PartNo),
+      description: text(p.Description) || text(p.PartDescription) || text(p.Name),
+      quantity: Number(p.Quantity ?? p.QuantityRequested ?? p.Qty) || null,
+      onHand: p.QuantityOnHand ?? p.OnHand ?? null,
+      price: money(p.Price ?? p.PricePerItem ?? p.UnitPrice),
+      status: text(p.Status?.Name || p.Status) || text(p.PartStatus?.Name || p.PartStatus) || (p.IsInStock === true ? 'In stock' : p.IsInStock === false ? 'Not in stock' : ''),
+      pickedUp: !!day(p.PickedUpDate || p.PartsPickedUpDate),
+    });
+    // the store's staff (number → name), as Xtime's RO page has them: for the parts employee (the RO only has the number)
+    let staff = window.__ptsEmployees || (Array.isArray(window.Employees) ? window.Employees : null);
+    if (!Array.isArray(staff)) {
+      try {
+        const res = await fetch(`/JS/Employees?storeID=${encodeURIComponent(STORE)}`, { credentials: 'include' });
+        const t = res.ok ? await res.text() : '';
+        const a = t.indexOf('['), b = t.lastIndexOf(']');
+        if (a >= 0 && b > a) staff = JSON.parse(t.slice(a, b + 1));
+        if (Array.isArray(staff)) window.__ptsEmployees = staff;
+      } catch { /* the number only, then */ }
+    }
+    const byNumber = (n) => {
+      if (!n) return '';
+      const e = (Array.isArray(staff) ? staff : []).find((x) => String(x.Number) === String(n));
+      return e ? `${[e.FirstName, e.LastName].filter(Boolean).join(' ').trim()} (${n})` : String(n);
+    };
+    // Xtime's RO address sends only the advisor's / technician's ID (the page fills in the names from its staff list)
+    const staffBy = (id, num) => (Array.isArray(staff) ? staff : []).find((x) => (id != null && String(x.ID) === String(id)) || (num && String(x.Number) === String(num))) || null;
+    const person = (obj, id) => {
+      const e = (obj && (obj.FirstName || obj.LastName)) ? obj : staffBy(id ?? obj?.ID, obj?.Number);
+      return { name: e ? [e.FirstName, e.LastName].filter(Boolean).join(' ').trim() : nameOf(obj), number: text(e?.Number ?? obj?.Number) };
+    };
+    const adv = person(ro.Advisor, ro.AdvisorID), tech = person(ro.Technician, ro.TechnicianID);
+    const lineOf = (l) => ({
+      id: l.ID, rolid: l.ROLID ?? null, parentId: l.ParentLineId ?? null, groupId: l.GroupID || null,
+      dms: text(l.DMSNumber),
+      name: text(l.ServiceGuideSpecialItemName) || text(l.ServiceName).replace(/^\[Primary\]:\s*/i, ''),
+      opCode: text(l.OpCodeDms) || text(l.OpCode),
+      primary: l.IsPrimary === true,
+      approved: l.Approved === true, declined: l.Declined === true, completed: l.Completed === true,
+      future: l.IsFutureRecommendation === true,
+      payType: payOf(l.PayTypeCode) || (l.IsWarranty ? 'W' : l.IsInternal ? 'I' : ''),
+      color: text(l.Color),
+      hours: money(l.Hours), labor: money(l.PriceLabor), parts: money(l.PriceParts), total: money(l.Price),
+      concern: text(l.Complaint), cause: text(l.Cause), correction: text(l.Correction),
+      techNote: text(l.TechnicianNote), advisorNote: text(l.AdvisorNote), managerNote: text(l.ManagerNote), partsNote: text(l.PartsNote),
+      partsNotNeeded: l.PartsNotNeeded === true, partsPickedUp: !!day(l.PartsPickedUpDate),
+      dispatch: text(l.DispatchCode), estimate: money(l.EstimatedDuration),
+      techStart: day(l.TechnicianStartTime), techEnd: day(l.TechnicianEndTime),
+      parts_: (Array.isArray(l.Parts) ? l.Parts : []).map(partOf),
+      subLines: (Array.isArray(l.SubLines) ? l.SubLines : []).map((x) => text(x.Description) || text(x.Name) || text(x.OpCode)).filter(Boolean),
+      images: Array.isArray(l.Images) ? l.Images.length : 0,
+      techs: (Array.isArray(l.LineTechnicians) ? l.LineTechnicians : []).map((t) => nameOf(t.Technician || t)).filter(Boolean),
+      addedBy: nameOf(l.CreateUser), order: Number(l.DisplayOrder) || 0,
+    });
+    const out = {
+      ro: text(ro.RONumber), tag: text(ro.TagNumber), mode: Number(ro.CurrentMode) || 0, modeSince: day(ro.ModeStartTime),
+      waiter: !!ro.IsWaiter, express: !!ro.IsExpress, internal: !!ro.IsInternal, warranty: !!ro.IsWarranty, cpo: !!ro.IsCPO, onHold: !!ro.IsOnHold,
+      waitingParts: !!ro.WaitingForParts, waitingCustomer: !!ro.WaitingForCustomer, waitingWarranty: !!ro.WaitingForWarranty,
+      allPartsInStock: !!ro.AllPartsInStock, partStatus: Number(ro.PartStatusID) || 0,
+      promisedDate: text(ro.PromisedDate), promisedTime: text(ro.PromisedTime),
+      opened: day(ro.DMSOpenDate) || day(ro.CreateDate), notes: text(ro.Notes),
+      partsEmployee: byNumber(text(ro.PartsNumber)),
+      advisor: adv.name, advisorNumber: adv.number, technician: tech.name, technicianNumber: tech.number,
+      flags: (Array.isArray(ro.CustomFlags) ? ro.CustomFlags : []).map((f) => text(f.Name) || text(f.Description) || text(f.Acronym)).filter(Boolean),
+      vehicle: { year: text(v.Year), make: text(v.Make), model: text(v.Model), vin: text(v.VIN).toUpperCase(), mileage: Number(v.Mileage) || null, color: text(v.Color), license: text(v.License) },
+      lines: raw.filter((l) => l && !l.IsDeleted).map(lineOf).sort((a, b) => a.order - b.order),
+      tax: money(ro.Tax),
+      people: { advisorId: ro.AdvisorID ?? null, technicianId: ro.TechnicianID ?? null, advisorSent: !!ro.Advisor, technicianSent: !!ro.Technician, staff: Array.isArray(staff) ? staff.length : 0 },
+    };
+    return { ok: true, view: out };
+  }
+
   const lines = raw.filter((l) => l && !l.IsDeleted).map((l) => ({
     id: l.ID,
     dms: text(l.DMSNumber),

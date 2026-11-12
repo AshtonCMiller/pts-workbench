@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:">
+  <title>Xtime View</title>
+  <link rel="stylesheet" href="../viewer.css">
+  <link rel="stylesheet" href="../oasis/oasis.css">
+  <link rel="stylesheet" href="xview.css">
+</head>
+<!-- The app's own page for this RO in Xtime: its stage, flags, vehicle, people, and every line with its notes and parts.
+     Read from Xtime with your login (no customer details). A line's Done box changes it in Xtime, like Xtime's Done button. -->
+<body class="oasis xview">
+  <header class="o-head">
+    <div>
+      <div class="o-title" id="x-title">RO</div>
+      <div class="o-sub" id="x-sub">Loading from Xtime…</div>
+    </div>
+    <div class="o-actions">
+      <span id="x-updated" class="x-updated muted"></span>
+      <button id="btn-refresh" class="ghost small" title="Read this RO from Xtime again">↻ Refresh</button>
+      <button id="btn-xtime" class="ghost small" title="Xtime's own page for this RO">Xtime's page</button>
+    </div>
+  </header>
+  <main id="o-body"></main>
+  <div id="o-toast" class="o-toast" hidden></div>
+  <script src="xview.js"></script>
+</body>
+</html>

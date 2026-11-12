@@ -279,6 +279,7 @@ table.grid tr.ro-head.confirmed td, table.grid tr.ro-line.confirmed td { color: 
 .logins-box p { margin: 0; }
 .tab .tab-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); flex: 0 0 auto; }
 .tab.kind-xtime .tab-dot { background: #0e7490; }
+.tab.kind-xview .tab-dot { background: #0891b2; }
 .tab.kind-pts .tab-dot { background: #1a5fb4; }
 .tab.kind-prodemand .tab-dot { background: #b45309; }
 .tab.kind-oasis .tab-dot { background: #7c3aed; }
