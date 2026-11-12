@@ -5,7 +5,7 @@
   --danger: #b42318;
   font-family: "Segoe UI", system-ui, sans-serif; font-size: 13px;
 }
-@media (prefers-color-scheme: dark) {
+@media screen and (prefers-color-scheme: dark) {
   :root { --bg: #15181c; --panel: #1d2126; --line: #2e343b; --text: #e7eaee; --muted: #9aa3ad;
           --accent: #4a8fe0; --hover: #262b31; --sel: #23344a; --danger: #f97066; }
 }
@@ -320,7 +320,7 @@ table.grid tr.ro-head.confirmed td, table.grid tr.ro-line.confirmed td { color: 
 .xtime-alert { display: inline-flex; align-items: center; gap: 6px; padding: 3px 4px 3px 10px; border-radius: 8px; background: #fef3c7; border: 1px solid #d97706; color: #92400e; font-weight: 700; font-size: 12px; white-space: nowrap; }
 .xtime-alert[hidden] { display: none; }
 .xtime-alert button { background: #fff; color: #92400e; border-color: #d97706; }
-@media (prefers-color-scheme: dark) { .xtime-alert { background: #451a03; color: #fcd34d; } .xtime-alert button { background: transparent; color: #fcd34d; } }
+@media screen and (prefers-color-scheme: dark) { .xtime-alert { background: #451a03; color: #fcd34d; } .xtime-alert button { background: transparent; color: #fcd34d; } }
 .employee-status { margin: -4px 0 2px; }
 
 /* keep the top bar on screen when the Xtime warning is showing */
@@ -591,3 +591,15 @@ body.chat #subtabs { right: var(--chat); }
 .fb-key p { margin: 0 0 8px; }
 .fb-key input { flex: 1; }
 button.danger { color: var(--danger); }
+
+/* A vehicle asleep (its pages closed to save memory; it wakes when opened) */
+.ro.asleep { opacity: .55; filter: grayscale(.6); transition: opacity .2s; }
+.ro.asleep:hover { opacity: .85; filter: none; }
+.ro .zz { margin-left: 6px; font-size: 10px; font-weight: 700; letter-spacing: .3px; text-transform: uppercase; padding: 0 6px;
+  border-radius: 999px; background: var(--hover); color: var(--muted); }
+
+/* Printing is always light (dark mode would use a lot of ink): the dark colors above are for the screen only */
+@media print {
+  :root { color-scheme: light; }
+  html, body { background: #fff !important; color: #000; }
+}

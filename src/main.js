@@ -2,7 +2,7 @@
 // Each window runs one profile: its own Xtime/PTS login, settings, open vehicles and hidden ROs.
 // The shift clock and the flag sheet are shared by every window, so all flags land in one set of hours.
 // Every page is loaded from Ford/Cox as normal, so access is recorded under that window's own login.
-const { app, BaseWindow, BrowserWindow, WebContentsView, ipcMain, session, shell, safeStorage, clipboard, net, protocol, Notification } = require('electron');
+const { app, BaseWindow, BrowserWindow, WebContentsView, ipcMain, session, shell, safeStorage, clipboard, net, protocol, Notification, powerSaveBlocker } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
@@ -57,9 +57,20 @@ const DEFAULT_SETTINGS = {
   sidebarWidth: 380,
   sidebarHidden: false,
   xtimeDashboard: false,   // show the app's own Xtime dashboard instead of Xtime's page
+  keepAwake: true,         // keep the computer (and screen) from going to sleep while the app is open
   notifications: true,     // Windows pop-ups: RO assigned, line approved/declined, parts in, customer/warranty answered, new Xtime messages
 };
-const BOOLEAN_SETTINGS = ['autoLogin', 'setupDone', 'syncEnabled', 'xtimeDashboard', 'notifications', 'sidebarHidden'];
+const BOOLEAN_SETTINGS = ['autoLogin', 'setupDone', 'syncEnabled', 'xtimeDashboard', 'notifications', 'sidebarHidden', 'keepAwake'];
+
+// Keep awake: while any open window has it on, Windows doesn't put the computer or screen to sleep
+// (the same thing a "keep awake" browser extension or a playing video does). Released when the app closes.
+const keepAwakeFor = new Set(); // windows (profile IDs) that want it
+let keepAwakeId = null;
+function setKeepAwake(owner, on) {
+  if (on) keepAwakeFor.add(owner); else keepAwakeFor.delete(owner);
+  if (keepAwakeFor.size && keepAwakeId === null) keepAwakeId = powerSaveBlocker.start('prevent-display-sleep');
+  else if (!keepAwakeFor.size && keepAwakeId !== null) { powerSaveBlocker.stop(keepAwakeId); keepAwakeId = null; }
+}
 // Not shown in Settings (too technical): always the built-in values, updated with the app
 const FIXED_SETTINGS = ['ptsUrl', 'ptsTransportUrl', 'oasisUrl', 'xtimeApiPath', 'xtimeRoUrl', 'xtimeDetailsPath', 'xtimeEmployeesPath'];
 // Ford transport link codes: 704 = OASIS landing page (workshop manual), 702 = Over-the-Air update
@@ -273,6 +284,7 @@ function createWorkbench(profile) {
   // Before employee numbers, the first window always used this technician ID by default
   if (profile.id === 'main' && !('techId' in savedSettings)) settings.techId = '594351';
   let employeeStatus = ''; // result of the last employee-number lookup, shown in Settings
+  setKeepAwake(profile.id, settings.keepAwake !== false);
 
   // ---------- this person's hours, flags, clock and sync ----------
   // Each window is one person with their own hours. The first window keeps the original files.
@@ -686,7 +698,7 @@ function createWorkbench(profile) {
       workspaces: [...workspaces.values()].map((ws) => {
         const pick = (t) => ({ id: t.id, kind: t.kind, title: t.title, status: t.status });
         return {
-          ro: ws.ro, vin: ws.vin, ymm: ws.ymm, activeTab: topTab(ws)?.id ?? null, viewTab: currentTab(ws)?.id ?? null,
+          ro: ws.ro, vin: ws.vin, ymm: ws.ymm, activeTab: topTab(ws)?.id ?? null, viewTab: currentTab(ws)?.id ?? null, asleep: !!ws.asleep,
           tabs: ws.tabs.filter((t) => !inService(t.kind)).map(pick),
           sub: serviceTab(ws) ? { active: subTab(ws)?.id ?? null, tabs: ws.tabs.filter((t) => inService(t.kind)).map(pick) } : null,
         };
@@ -703,6 +715,11 @@ function createWorkbench(profile) {
 
   function layout() {
     if (!win || win.isDestroyed()) return;
+    touchActive();
+    // The vehicle on screen: fetch its tabs' data ahead if that hasn't happened in the last 15 minutes
+    // (covers switching to Workbench, the app starting on a vehicle, and waking one up)
+    const shown = mode === 'manual' ? workspaces.get(activeRO) : null;
+    if (shown && (!shown.aheadAt || Date.now() - shown.aheadAt > 15 * 60 * 1000)) prefetchVehicle(shown);
     const { width, height } = win.getContentBounds();
     chrome.setBounds({ x: 0, y: 0, width, height });
     let visible = null;
@@ -883,6 +900,7 @@ function createWorkbench(profile) {
 
   function ensureView(ws, tab) {
     if (tab.view || tab.kind === 'service') return; // Service Manual is only a row of tabs
+    if (ws.asleep) { ws.asleep = false; setTimeout(pushState, 0); } // woken up by being looked at
     if (tab.kind === 'manual') { tab.view = makeManualView(ws, tab); return; }
     if (tab.kind === 'oasisview') { tab.view = makeManualView(ws, tab, 'oasis/oasis.html'); return; }
     if (tab.kind === 'diag') { tab.view = makeManualView(ws, tab, 'diagnostics/diag.html'); return; }
@@ -903,7 +921,10 @@ function createWorkbench(profile) {
       setupFordTab(ws, tab);
     } else if (tab.kind === 'xtime') {
       tab.status = '';
-      wc.loadURL(settings.xtimeRoUrl.replace('{RO}', encodeURIComponent(ws.ro)));
+      // back from sleep: the Xtime page it was on (same Xtime site only)
+      const back = tab.resumeUrl && hostOf(tab.resumeUrl) === hostOf(settings.xtimeRoUrl) ? tab.resumeUrl : '';
+      tab.resumeUrl = null;
+      wc.loadURL(back || settings.xtimeRoUrl.replace('{RO}', encodeURIComponent(ws.ro)));
     } else if (tab.kind === 'prodemand') {
       wc.on('did-finish-load', () => fillProDemand(ws, tab));
       tab.status = 'Loading ProDemand…';
@@ -1765,15 +1786,79 @@ function createWorkbench(profile) {
   }
 
   // quiet: opened by sync from another computer, so don't switch what you're looking at
+  // ---------- vehicles asleep, and loading ahead ----------
+  // A vehicle you haven't looked at for 10 minutes goes to sleep: its pages are closed to free memory
+  // (PTS pages keep a snapshot of where they were, Xtime its address, the app's pages their saved
+  // state) and come back when you open it again. Its Workshop Manual stays open, so it never loses
+  // its place. Sleeping vehicles show greyed out in the list.
+  const SLEEP_AFTER = 10 * 60 * 1000;
+  function touchActive() {
+    const ws = mode === 'manual' ? workspaces.get(activeRO) : null;
+    if (ws) ws.lastUsed = Date.now();
+  }
+  async function sleepWorkspace(ws) {
+    const tabs = ws.tabs.filter((t) => t.view && t.kind !== 'manual');
+    if (!tabs.length) { ws.asleep = true; return; }
+    for (const t of tabs) {
+      const wc = t.view.webContents;
+      if (wc.isDestroyed()) { t.view = null; continue; }
+      try {
+        if (FORD_LINKS[t.kind]) t.cloneSnapshot = await snapshotFrames(wc); // the PTS page, scroll and all
+        else if (t.kind === 'xtime' && /^https:/i.test(wc.getURL())) t.resumeUrl = wc.getURL();
+      } catch { /* it starts fresh instead */ }
+      if (workspaces.get(ws.ro) !== ws || (ws.ro === activeRO && mode === 'manual')) return; // looked at meanwhile
+      destroyTab(t);
+    }
+    ws.asleep = true;
+    ws.aheadAt = 0; // fetch ahead again when it wakes
+    pushState();
+  }
+  setInterval(() => {
+    touchActive();
+    const now = Date.now();
+    for (const ws of workspaces.values()) {
+      if (!ws.lastUsed) ws.lastUsed = now; // just loaded: give it the full 10 minutes
+      if (ws.asleep || (ws.ro === activeRO && mode === 'manual') || now - ws.lastUsed < SLEEP_AFTER) continue;
+      sleepWorkspace(ws).catch(() => {});
+    }
+  }, 60 * 1000);
+
+  // When a vehicle is opened or clicked, fetch what its Service Manual tabs show (manual contents, OASIS,
+  // connected vehicle data, TSBs, the SVC list, SLTS) in the background, so the tabs open straight away.
+  // Tabs that are already loaded are skipped, and so is anything fetched ahead that hasn't been used yet.
+  // The vehicle just clicked goes first; one vehicle is fetched at a time.
+  let prefetchQueue = [];
+  let prefetchBusy = false;
+  function prefetchVehicle(ws) {
+    if (!ws) return;
+    ws.aheadAt = Date.now();
+    if (!isFordVehicle(ws.vin, ws.ymm)) { manualService.log(`ahead RO ${ws.ro}: not a Ford/Lincoln, nothing to fetch`); return; }
+    prefetchQueue = [ws, ...prefetchQueue.filter((w) => w !== ws)];
+    if (!prefetchBusy) runPrefetch();
+  }
+  async function runPrefetch() {
+    prefetchBusy = true;
+    while (prefetchQueue.length) {
+      const ws = prefetchQueue.shift();
+      if (workspaces.get(ws.ro) !== ws) continue; // closed meanwhile
+      const loaded = new Set(ws.tabs.filter((t) => t.view).map((t) => t.kind));
+      const pacode = String(settings.dealerCode || '').replace(/^[A-Z]+/i, '');
+      manualService.log(`ahead RO ${ws.ro}: starting${loaded.size ? ` (already open: ${[...loaded].join(', ')})` : ''}`);
+      try { await manualService.prefetch(ws.vin, { pacode, skip: loaded }); } catch (e) { manualService.log(`ahead RO ${ws.ro} failed: ${e.message || e}`); }
+    }
+    prefetchBusy = false;
+  }
+
   function openWorkspace({ ro, vin, ymm, tab, quiet = false }) {
     ro = String(ro).trim();
     vin = String(vin).trim().toUpperCase();
     if (!ro || vin.length !== 17) return;
     let ws = workspaces.get(ro);
     if (!ws) {
-      ws = { ro, vin, ymm: ymm || '', tabs: [], activeTab: null, svcTab: null };
+      ws = { ro, vin, ymm: ymm || '', tabs: [], activeTab: null, svcTab: null, lastUsed: Date.now() };
       workspaces.set(ro, ws);
       addDefaultTabs(ws);
+      setTimeout(() => prefetchVehicle(ws), 300);
     } else if (ws.vin !== vin) {
       ws.vin = vin; // VIN corrected in Xtime: re-enter it in open manual tabs
       for (const t of ws.tabs) if (FORD_LINKS[t.kind] && t.view) reopenFordTab(ws, t);
@@ -1784,6 +1869,7 @@ function createWorkbench(profile) {
         if ((t.kind === 'manual' || t.kind === 'wiring' || t.kind === 'oasisview' || t.kind === 'diag' || t.kind === 'tsb') && t.view) destroyTab(t); // reopen for the right vehicle
       }
     }
+    else if (!quiet) prefetchVehicle(ws); // already open: fetch what its tabs haven't loaded yet
     if (tab) { // e.g. from the dashboard: show the RO's Xtime page
       const t = ws.tabs.find((x) => x.kind === tab) || (tab === 'xtime' ? addTab(ws, 'xtime', { activate: false }) : null);
       if (t) setActive(ws, t);
@@ -2029,6 +2115,7 @@ function createWorkbench(profile) {
     'select-ro': (ro) => {
       if (!workspaces.has(ro)) return;
       activeRO = ro; mode = 'manual';
+      prefetchVehicle(workspaces.get(ro)); // whatever its tabs haven't loaded yet
       saveWorkspaces(); layout(); pushState();
     },
     // Shift clock and flags are shared by every window
@@ -2086,7 +2173,7 @@ function createWorkbench(profile) {
       // "+ Manual" while looking at a PTS tab copies that tab: same vehicle, same page, same scroll.
       const src = currentTab(ws);
       let snapshot = null;
-      const KINDS = ['service', 'labor', 'diag', 'oasisview', 'manual', 'wiring', 'pts', 'ota', 'cvd', 'prodemand', 'oasis', 'xtime'];
+      const KINDS = ['service', 'labor', 'diag', 'tsb', 'oasisview', 'manual', 'wiring', 'pts', 'ota', 'cvd', 'prodemand', 'oasis', 'xtime'];
       kind = KINDS.includes(kind) ? kind : 'pts';
       if (kind === 'pts' && src?.kind === 'pts' && src.view && !src.view.webContents.isDestroyed()) {
         try { snapshot = await snapshotFrames(src.view.webContents); } catch { snapshot = null; }
@@ -2197,6 +2284,7 @@ function createWorkbench(profile) {
       const techChanged = (clean.techId && clean.techId !== settings.techId) || empChanged || storeChanged;
       settings = { ...settings, ...clean };
       writeJson('settings.json', settings);
+      setKeepAwake(profile.id, settings.keepAwake !== false);
       if (sync) {
         if (settings.syncEnabled && !syncWas) { syncFlushed = false; beginSync(); } // turned on: ask first if the server has a copy
         else if (!settings.syncEnabled && syncWas) { sync.stop(); Object.assign(syncStatus, { state: 'off', message: '' }); }
@@ -2304,6 +2392,7 @@ function createWorkbench(profile) {
 
     win.on('resize', layout);
     win.on('closed', () => {
+      setKeepAwake(profile.id, false);
       clearInterval(pollTimer);
       clearInterval(signinTimer);
       clearInterval(msgTimer);

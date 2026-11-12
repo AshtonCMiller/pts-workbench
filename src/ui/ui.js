@@ -669,9 +669,11 @@ function compactRow(r, { ws = null } = {}) {
   const info = state.roInfo?.[r.ro];
   const m = r.mode != null ? (MODES[r.mode] || { label: `Mode ${r.mode}`, color: '#6b7280' }) : null;
   const waiting = FLAGS.filter(([k]) => r[k]).map(([, label, color]) => [label.replace('Waiting on ', 'Wait: '), color]);
-  const row = el('div', { class: 'ro compact' },
+  const asleep = !!ws?.asleep; // closed to save memory; wakes when opened
+  const row = el('div', { class: 'ro compact' + (asleep ? ' asleep' : '') },
     el('div', { class: 't' },
       `RO ${r.ro}`, r.tag ? el('span', { class: 'tag', text: `  · Tag ${r.tag}` }) : null,
+      asleep ? el('span', { class: 'zz', text: 'Asleep' }) : null,
       info && info.lines.length ? el('span', { class: 'pays', text: fmtH(info.total) }) : null),
     el('div', { class: 'c2' },
       el('span', { class: 'cap', text: ymmOf(r) || ws?.ymm || info?.ymm || '' }),
@@ -679,6 +681,7 @@ function compactRow(r, { ws = null } = {}) {
       ...waiting.map(([label, color]) => badge(label, color)),
       info && info.lines.length ? el('span', { class: 'muted', text: `${info.flaggedCount}/${info.lines.length} flagged` }) : null),
   );
+  if (asleep) row.title = 'Asleep to save memory: opens again where you left it';
   return row;
 }
 
@@ -686,14 +689,17 @@ function compactRow(r, { ws = null } = {}) {
 function roCard(r, { inDrawer = false, ws = null } = {}) {
   const info = state.roInfo?.[r.ro];
   const active = ws && state.activeRO === ws.ro && inVehicle(state);
-  const card = el('div', { class: 'ro' + (active ? ' sel' : '') },
+  const asleep = !!ws?.asleep && !active; // closed to save memory; wakes when opened
+  const card = el('div', { class: 'ro' + (active ? ' sel' : '') + (asleep ? ' asleep' : '') },
     el('div', { class: 't' },
       `RO ${r.ro}`, r.tag ? el('span', { class: 'tag', text: `  · Tag ${r.tag}` }) : null,
+      asleep ? el('span', { class: 'zz', text: 'Asleep' }) : null,
       info && info.lines.length ? el('span', { class: 'pays', title: 'What the approved lines on this job pay', text: `Pays ${fmtH(info.total)}` }) : null),
     badgesFor(r),
     el('div', { class: 'v', text: ymmOf(r) || ws?.ymm || info?.ymm || '' }),
     r.vin ? el('div', { class: 'vin', text: r.vin }) : null,
   );
+  if (asleep) card.title = 'Asleep to save memory: opens again where you left it';
   const sm = linesSummary(info);
   if (inDrawer) {
     if (sm) card.append(sm);

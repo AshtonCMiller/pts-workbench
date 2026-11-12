@@ -6,7 +6,7 @@
   --note-bg: #eaf2fd; --note-line: #1a5fb4; --mark: #fff3a3;
   font-family: "Segoe UI", system-ui, sans-serif; font-size: 13px;
 }
-@media (prefers-color-scheme: dark) {
+@media screen and (prefers-color-scheme: dark) {
   :root { --bg: #15181c; --panel: #1d2126; --line: #2e343b; --text: #e7eaee; --muted: #9aa3ad;
           --accent: #4a8fe0; --hover: #262b31; --sel: #23344a; --head: #252a31;
           --warn-bg: #3a1714; --warn-line: #f97066; --caut-bg: #3a2810; --caut-line: #fdb022;
@@ -165,3 +165,9 @@ body.toc-hidden #main { left: 0; }
   padding: 8px 10px; border-radius: 8px; border: 1px solid var(--accent); background: var(--sel); color: var(--text); cursor: pointer; }
 .diag-offer:hover { background: var(--hover); }
 .diag-offer b { font-family: Consolas, ui-monospace, monospace; color: var(--accent); }
+
+/* Printing is always light (dark mode would use a lot of ink): the dark colors above are for the screen only */
+@media print {
+  :root { color-scheme: light; }
+  html, body { background: #fff !important; color: #000; }
+}

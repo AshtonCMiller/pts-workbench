@@ -286,7 +286,47 @@ class ManualService {
   }
 
   // OASIS for this VIN (Ford's server-built page; the app picks the sections it shows)
+  // ---- loading ahead: when a vehicle is first opened (see main.js), its tabs' data is fetched in the
+  //      background and kept until its tab asks for it once (a reload afterwards fetches fresh) ----
+  takeAhead(key) {
+    const hit = this.ahead?.get(key);
+    if (!hit) return null;
+    this.ahead.delete(key);
+    return Date.now() - hit.at < 15 * 60 * 1000 ? hit.promise.catch(() => null) : null; // failed ahead: fetch it now
+  }
+  putAhead(key, fn) {
+    if (!this.ahead) this.ahead = new Map();
+    const promise = fn();
+    this.ahead.set(key, { at: Date.now(), promise });
+    promise.catch(() => { if (this.ahead.get(key)?.promise === promise) this.ahead.delete(key); });
+    // keep it small: the 30 newest
+    while (this.ahead.size > 30) this.ahead.delete(this.ahead.keys().next().value);
+    return promise.then(() => true, () => false);
+  }
+  // skip: tab kinds already loaded (their data is on screen already)
+  async prefetch(vin, { pacode = '', skip = new Set() } = {}) {
+    const v = String(vin).toUpperCase();
+    const t0 = Date.now();
+    const fresh = (key) => { const hit = this.ahead?.get(key); return hit && Date.now() - hit.at < 15 * 60 * 1000; };
+    const ahead = async (kind, key, label, fn) => {
+      if (skip.has(kind) || fresh(key)) return;
+      if (await this.putAhead(key, fn)) done.push(label); else failed.push(label);
+    };
+    const done = [], failed = [];
+    try { await this.book(v); } catch (e) { this.log(`ahead ${v}: ${e.message || e}`); return; }
+    if (!skip.has('manual')) await this.tree(v).then(() => done.push('manual contents'), () => failed.push('manual contents')); // kept on disk
+    await ahead('oasisview', `oasis|${v}`, 'OASIS', () => this.loadOasis(v));
+    await ahead('oasisview', `cv|${v}`, 'connected data', () => this.loadConnectedVehicle(v));
+    if (pacode) await ahead('tsb', `tsb|${v}|${pacode}`, 'TSBs', () => this.loadTsbList(v, pacode));
+    if (!skip.has('oasisview')) await this.svcForm(v).then(() => done.push('SVC list'), () => failed.push('SVC list'));
+    await ahead('labor', `slts|${v}`, 'SLTS', () => this.loadSlts(v));
+    this.log(`ahead ${v}: ${done.join(', ') || 'nothing new to fetch'}${failed.length ? ` (failed: ${failed.join(', ')})` : ''} in ${((Date.now() - t0) / 1000).toFixed(1)} s`);
+  }
+
   async oasis(vin) {
+    return (await this.takeAhead(`oasis|${String(vin).toUpperCase()}`)) || this.loadOasis(vin);
+  }
+  async loadOasis(vin) {
     const book = await this.book(vin);
     const p = book.params;
     const url = `${PTS}/oasis/Index?vin=${encodeURIComponent(book.vin)}&ModelYear=${encodeURIComponent(book.vehicle.year || p.modelYear || '')}` +
@@ -319,9 +359,12 @@ class ManualService {
   // Connected vehicle data (odometer, fuel, oil life, battery, tires, DTCs…): the same request OASIS makes,
   // using the settings OASIS writes into its page
   async connectedVehicle(vin) {
+    return (await this.takeAhead(`cv|${String(vin).toUpperCase()}`)) || this.loadConnectedVehicle(vin);
+  }
+  async loadConnectedVehicle(vin) {
     const book = await this.book(vin);
     let html = this.lastOasis?.vin === book.vin && Date.now() - this.lastOasis.at < 5 * 60 * 1000 ? this.lastOasis.html : null;
-    if (!html) html = (await this.oasis(vin)).html;
+    if (!html) html = (await this.loadOasis(vin)).html;
     const v = (name) => (html.match(new RegExp(`var\\s+${name}\\s*=\\s*["']([^"']*)["']`)) || [])[1] || '';
     const fuelType = (html.match(/setItem\(\s*["']CVFuelType["']\s*,\s*["']([^"']*)["']/) || [])[1] || 'G';
     const modem = ((html.match(/MODEM:\s*<\/label>\s*<label[^>]*>([^<]*)</i) || [])[1] || '').trim() || null;
@@ -359,6 +402,9 @@ class ManualService {
   // ---- TSBs / GSBs / SSMs for this VIN (Ford's TSB_SSM "DisplayArticles" page, as PTS shows it) ----
   // pacode: the dealership's P&A code (the digits of the Warranty Dealer Code, e.g. 03890), from Settings
   async tsbList(vin, pacode) {
+    return (await this.takeAhead(`tsb|${String(vin).toUpperCase()}|${pacode}`)) || this.loadTsbList(vin, pacode);
+  }
+  async loadTsbList(vin, pacode) {
     const book = await this.book(vin);
     const p = book.params;
     const q = new URLSearchParams({ vin: book.vin, year: book.vehicle.year || p.modelYear || '', model: book.vehicle.name || '',
@@ -416,6 +462,9 @@ class ManualService {
 
   // Opens SLTS for this VIN (GenerateT.aspx). The vehicle's SLTS model code (e.g. "A8") is remembered per VIN.
   async sltsStart(vin) {
+    return (await this.takeAhead(`slts|${String(vin).toUpperCase()}`)) || this.loadSlts(vin);
+  }
+  async loadSlts(vin) {
     const book = await this.book(vin);
     const p = book.params;
     const known = this.sltsCodes?.get(book.vin);

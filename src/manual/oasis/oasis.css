@@ -58,7 +58,7 @@ body.oasis { overflow: auto; }
   background: radial-gradient(ellipse 60% 55% at 50% 58%, color-mix(in srgb, var(--accent) 9%, transparent), transparent 72%); }
 /* PTS's picture has a white background: blend it into the page in light mode, sit it on a soft white tile in dark mode */
 .o-car { display: block; width: 300px; max-width: 100%; height: auto; mix-blend-mode: multiply; }
-@media (prefers-color-scheme: dark) {
+@media screen and (prefers-color-scheme: dark) {
   .o-stage { background: none; }
   .o-car { mix-blend-mode: normal; background: #fff; border-radius: 14px; padding: 6px 14px; box-shadow: 0 2px 14px rgba(0,0,0,.35); }
 }
