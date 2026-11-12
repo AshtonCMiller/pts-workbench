@@ -148,6 +148,9 @@ function open(r) {
   if (['wsmppt', 'wsmproc', 'pced'].includes(r.source)) {
     api.openProc({ searchNumber: r.searchNumber, procUid: r.procUid, ppt: r.ppt, title: r.title });
     toast('Opening in the Workshop Manual tab…');
+  } else if (['tsb', 'gsb', 'ssm'].includes(r.source) && r.article) {
+    api.openTsb({ id: r.article, type: r.source, title: r.title, url: r.url });
+    toast('Opening in the TSBs tab…');
   } else if (r.url) {
     api.openUrl(r.url);
   } else toast("Ford didn't give a link for this one");
@@ -155,7 +158,7 @@ function open(r) {
 
 function item(r) {
   const kind = KIND[r.source] || r.source.toUpperCase();
-  const go = ['wsmppt', 'wsmproc', 'pced'].includes(r.source) ? 'Open in manual ›' : 'Open ›';
+  const go = ['wsmppt', 'wsmproc', 'pced'].includes(r.source) ? 'Open in manual ›' : ['tsb', 'gsb', 'ssm'].includes(r.source) ? 'Open in TSBs ›' : 'Open ›';
   return el('button', { class: 'd-item', type: 'button', onclick: () => open(r), title: r.title },
     el('div', { class: 't' }, el('span', { class: `kind ${r.source === 'wsmppt' ? 'ppt' : r.source}`, text: kind }),
       el('span', { text: r.article ? `${r.article} — ${r.title}` : r.title }), el('span', { class: 'go', text: go })),

@@ -1,0 +1,35 @@
+/* TSBs: the list, and one article */
+body.tsb { overflow: auto; }
+#t-cat { font: inherit; font-size: 13px; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); color: var(--text); max-width: 340px; }
+#t-cat[hidden] { display: none; }
+#t-body { padding: 12px 20px 60px; max-width: 1200px; }
+.t-item .t .kind.isb { background: #be185d; color: #fff; }
+.t-item .t .date { margin-left: auto; color: var(--muted); font-size: 12px; font-weight: 500; white-space: nowrap; }
+.t-item .t .num { font-family: Consolas, ui-monospace, monospace; }
+.t-count { color: var(--muted); font-size: 12.5px; margin: 0 0 8px; }
+
+.t-article { max-width: 980px; padding: 16px 24px 60px; line-height: 1.5; font-size: 14px; }
+.t-article h1, .t-article h2, .t-article h3, .t-article h4 { line-height: 1.25; margin: 18px 0 8px; }
+.t-article h1 { font-size: 20px; } .t-article h2 { font-size: 17px; } .t-article h3, .t-article h4 { font-size: 15px; }
+.t-article p { margin: 6px 0 10px; }
+.t-article table { border-collapse: collapse; max-width: 100%; margin: 8px 0; }
+.t-article td, .t-article th { padding: 4px 8px; vertical-align: top; text-align: left; }
+.t-article table.grid td, .t-article table.grid th { border: 1px solid var(--line); }
+.t-article table.grid th { background: var(--head); }
+.t-article img { max-width: 100%; height: auto; border-radius: 4px; }
+.t-article img.pic { background: #fff; padding: 6px; } /* Ford's diagrams are drawn on white */
+.t-article .center { text-align: center; }
+.t-article .a-link { color: var(--accent); cursor: pointer; text-decoration: underline; }
+.t-article hr { border: 0; border-top: 1px solid var(--line); margin: 14px 0; }
+.t-article .t-head { border-bottom: 1px solid var(--line); padding-bottom: 10px; margin-bottom: 12px; }
+.t-article .t-head .kind { font-size: 11px; font-weight: 800; padding: 2px 7px; border-radius: 4px; margin-right: 8px; }
+.t-article .t-head b { font-size: 16px; }
+.t-article .t-head .muted { display: block; margin-top: 4px; }
+@media print {
+  .o-head .o-actions, #t-list-view { display: none !important; }
+  .t-article { max-width: none; padding: 0; color: #000; }
+  .t-article img.pic { padding: 0; }
+}
+.t-head .kind { background: var(--hover); color: var(--muted); }
+.t-head .kind.tsb { background: #1d4ed8; color: #fff; } .t-head .kind.ssm { background: #7c3aed; color: #fff; }
+.t-head .kind.gsb { background: #0f766e; color: #fff; } .t-head .kind.isb { background: #be185d; color: #fff; }

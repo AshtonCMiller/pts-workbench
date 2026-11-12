@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: ptsasset:">
+  <title>TSBs</title>
+  <link rel="stylesheet" href="../viewer.css">
+  <link rel="stylesheet" href="../oasis/oasis.css">
+  <link rel="stylesheet" href="../diagnostics/diag.css">
+  <link rel="stylesheet" href="tsb.css">
+</head>
+<!-- The vehicle's TSBs, GSBs and SSMs (Ford's list for this VIN), and each article in the app's style -->
+<body class="oasis diag tsb">
+  <header class="o-head">
+    <div>
+      <div class="o-title" id="t-title">TSBs</div>
+      <div class="o-sub" id="t-sub">Bulletins and messages for this VIN</div>
+    </div>
+    <div class="o-actions">
+      <button id="btn-back" class="ghost small" hidden>‹ All bulletins</button>
+      <button id="btn-print" class="ghost small" hidden title="Print this article">Print</button>
+      <button id="btn-ford" class="ghost small" hidden title="Open Ford's own page for this article as a tab">Ford's page</button>
+    </div>
+  </header>
+
+  <div id="t-list-view">
+    <form id="t-form" class="d-search" autocomplete="off">
+      <input id="t-q" type="search" spellcheck="false" placeholder="Filter by words, a DTC or a number — e.g. P0736, transmission, 26-2414">
+      <select id="t-cat" title="Ford's categories"></select>
+    </form>
+    <nav id="t-types" class="d-tabs"></nav>
+    <main id="t-body"></main>
+  </div>
+
+  <main id="t-article" class="t-article" hidden></main>
+  <div id="o-toast" class="o-toast" hidden></div>
+  <script src="tsb.js"></script>
+</body>
+</html>

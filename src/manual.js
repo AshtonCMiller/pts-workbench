@@ -356,6 +356,51 @@ class ManualService {
     return { country, fuelType, capability: json.capabilityData || null, data: json.connectedVehicleData || null, status: res.status };
   }
 
+  // ---- TSBs / GSBs / SSMs for this VIN (Ford's TSB_SSM "DisplayArticles" page, as PTS shows it) ----
+  // pacode: the dealership's P&A code (the digits of the Warranty Dealer Code, e.g. 03890), from Settings
+  async tsbList(vin, pacode) {
+    const book = await this.book(vin);
+    const p = book.params;
+    const q = new URLSearchParams({ vin: book.vin, year: book.vehicle.year || p.modelYear || '', model: book.vehicle.name || '',
+      pacode, country: p.country || 'USA', masterId: p.vehicleId || '', prodType: p.prodType || 'C', classic: 'false' });
+    const url = `${PTS}/vdirsnet/TSB_SSM/DisplayArticles.aspx?${q.toString().replace(/\+/g, '%20')}`;
+    const html = await this.text(url);
+    if (!/id=["']articles["']|class=["'][^"']*\barticle\b/i.test(html)) {
+      this.log(`   TSB list: unexpected page (${html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200)})`);
+    }
+    return { html, url };
+  }
+
+  // One article (TSB, GSB, SSM) → { html, url } or { pdf: true, url }
+  async tsbArticle(url) {
+    let u;
+    try { u = new URL(url, `${PTS}/vdirsnet/TSB_SSM/`); } catch { throw new Error('Not a TSB address'); }
+    if (u.origin !== PTS || !/^\/vdirsnet\/tsb_ssm\//i.test(u.pathname)) throw new Error('Not a TSB address');
+    let href = u.href;
+    for (let hop = 0; hop < 3; hop++) {
+      let res;
+      try { res = await this.fetch(href, { headers: { Accept: 'text/html,application/pdf,*/*' } }); } catch (e) {
+        if (!e.needsLogin) throw e; // Ford sometimes refuses the first request and allows the next
+        await new Promise((r) => setTimeout(r, 400));
+        res = await this.fetch(href, { headers: { Accept: 'text/html,application/pdf,*/*' } });
+      }
+      const at = res.url || href;
+      if (/pdf/i.test(res.headers.get('content-type') || '')) return { pdf: true, url: at };
+      const html = await res.text();
+      const text = html.replace(/<(script|style)\b[\s\S]*?<\/\1>/gi, ' ').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+      // a page that only holds the article in a frame: follow it
+      const frame = (html.match(/<i?frame\b[^>]*\bsrc\s*=\s*["']([^"']+)["']/i) || [])[1];
+      if (frame && text.length < 1500) {
+        let next = null;
+        try { next = new URL(frame.replace(/&amp;/g, '&'), at); } catch { /* none */ }
+        if (next && next.protocol === 'https:' && ASSET_HOSTS.test(next.hostname)) { href = next.href; continue; }
+      }
+      this.log(`   TSB article: ${text.length} characters of text`);
+      return { html, url: at };
+    }
+    throw new Error("Couldn't find the article in Ford's page");
+  }
+
   // ---- Labor times (Ford SLTS WebView: an ASP.NET page that works by posting its form back to itself).
   //      The Labor Times tab drives the form; this side only fetches pages inside SLTS for it. ----
   sltsUrl(path) {
@@ -670,10 +715,25 @@ class ManualService {
   async asset(url) {
     let u;
     try { u = new URL(url); } catch { return new Response('', { status: 400 }); }
-    if (u.protocol !== 'https:' || !ASSET_HOSTS.test(u.hostname)) return new Response('', { status: 403 });
+    if (u.protocol !== 'https:' || !ASSET_HOSTS.test(u.hostname)) {
+      this.log(`picture blocked (not a Ford site): ${u.href.slice(0, 160)}`);
+      return new Response('', { status: 403 });
+    }
+    // As Ford's pages load them: with a Ford page as the referrer. Ford's servers sometimes refuse the
+    // first request (403) and allow the next; fordservicecontent.com's catalog also wants its sign-on
+    // cookies (onDenied gets them), so a refused picture is tried once more.
+    const get = () => this.ses.fetch(u.href, { credentials: 'include', referrer: `${PTS}/` });
     try {
-      return await this.ses.fetch(u.href, { credentials: 'include' });
-    } catch {
+      let res = await get();
+      if (res.status === 401 || res.status === 403) {
+        if (/fordservicecontent\.com$/i.test(u.hostname) && this.onDenied) await this.onDenied().catch(() => {});
+        else await new Promise((r) => setTimeout(r, 300));
+        res = await get();
+      }
+      if (!res.ok) this.log(`picture ${res.status}: ${u.href.slice(0, 200)}`);
+      return res;
+    } catch (e) {
+      this.log(`picture failed (${e.message || e}): ${u.href.slice(0, 200)}`);
       return new Response('', { status: 502 });
     }
   }

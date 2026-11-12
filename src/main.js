@@ -441,7 +441,7 @@ function createWorkbench(profile) {
         tabs: kept.map((t) => ({ kind: t.kind, title: t.title, ...(t.url ? { url: t.url } : {}), ...(t.manualState ? { state: t.manualState } : {}) })),
         activeIndex: Math.max(0, kept.findIndex((t) => t.id === ws.activeTab)),
         svcIndex: kept.findIndex((t) => t.id === ws.svcTab),
-        layout: 3,
+        layout: 4,
         };
       }),
     });
@@ -637,7 +637,13 @@ function createWorkbench(profile) {
         .filter((t) => t.kind !== 'doc' && (t.kind !== 'article' || /^https:/i.test(t.url || ''))); // a Ford article (FSA…) opened from OASIS
       const ws = { ro: w.ro, vin: w.vin, ymm: w.ymm || '', tabs, activeTab: tabs[w.activeIndex || 0]?.id ?? tabs[0].id,
         svcTab: w.svcIndex >= 0 ? tabs[w.svcIndex]?.id ?? null : null };
-      if (w.layout !== 3) upgradeTabs(ws, ws.activeTab); // saved before Xtime | PTS | Service Manual
+      if (!(w.layout >= 3)) upgradeTabs(ws, ws.activeTab); // saved before Xtime | PTS | Service Manual
+      else if (w.layout < 4 && serviceTab(ws) && !ws.tabs.some((t) => t.kind === 'tsb')) { // saved before the TSBs tab
+        const t = addTab(ws, 'tsb', { activate: false });
+        ws.tabs.splice(ws.tabs.indexOf(t), 1);
+        const diag = ws.tabs.findIndex((x) => x.kind === 'diag');
+        ws.tabs.splice(diag >= 0 ? diag + 1 : ws.tabs.length, 0, t);
+      }
       workspaces.set(w.ro, ws);
     }
     if (saved.activeRO && workspaces.has(saved.activeRO)) activeRO = saved.activeRO;
@@ -880,6 +886,7 @@ function createWorkbench(profile) {
     if (tab.kind === 'manual') { tab.view = makeManualView(ws, tab); return; }
     if (tab.kind === 'oasisview') { tab.view = makeManualView(ws, tab, 'oasis/oasis.html'); return; }
     if (tab.kind === 'diag') { tab.view = makeManualView(ws, tab, 'diagnostics/diag.html'); return; }
+    if (tab.kind === 'tsb') { tab.view = makeManualView(ws, tab, 'tsb/tsb.html'); return; }
     if (tab.kind === 'labor') { tab.view = makeManualView(ws, tab, 'labor-times/labor.html'); return; }
     tab.view = makeWebView();
     const wc = tab.view.webContents;
@@ -969,6 +976,15 @@ function createWorkbench(profile) {
   // ---------- the app's own workshop manual ----------
   const manualSes = session.fromPartition(PARTITION);
   const manualService = new ManualService(manualSes, profileFile(profile.id, 'manual-cache'), profileFile(profile.id, 'manual.log'));
+  // Pictures on Ford's document server need its sign-on cookies: one sign-on at a time, at most every 30 s
+  let deniedRun = null, deniedAt = 0;
+  manualService.onDenied = () => {
+    if (deniedRun) return deniedRun;
+    if (Date.now() - deniedAt < 30 * 1000) return Promise.resolve();
+    deniedAt = Date.now();
+    deniedRun = ensureContentCookies(true).finally(() => { deniedRun = null; });
+    return deniedRun;
+  };
   try {
     if (!manualSes.protocol.isProtocolHandled('ptsasset')) {
       manualSes.protocol.handle('ptsasset', (req) => {
@@ -1078,6 +1094,24 @@ function createWorkbench(profile) {
         setActive(ws, dt); mode = 'manual';
         dt.manualState = { ...(dt.manualState || {}), query };
         if (dt.view && !dt.view.webContents.isDestroyed() && !dt.view.webContents.isLoading()) dt.view.webContents.send('manual-open', { query });
+        saveWorkspaces(); layout(); pushState();
+        return true;
+      }
+      case 'tsb-list': { // TSBs tab: the vehicle's TSBs / GSBs / SSMs
+        const pacode = String(settings.dealerCode || '').replace(/^[A-Z]+/i, '');
+        if (!pacode) return { needsDealer: true };
+        try { return await manualService.tsbList(ws.vin, pacode); } catch (e) { return fail(e); }
+      }
+      case 'tsb-article':
+        try { return await manualService.tsbArticle(String(payload?.url || '')); } catch (e) { return fail(e); }
+      case 'open-tsb': { // Diagnostics: show this TSB / GSB / SSM in the vehicle's TSBs tab
+        const q = payload || {};
+        const tsb = { id: String(q.id || '').slice(0, 40), type: String(q.type || '').toUpperCase().slice(0, 4), title: String(q.title || '').slice(0, 200), url: String(q.url || '').slice(0, 600) };
+        if (!tsb.id) return false;
+        const tt = ws.tabs.find((t) => t.kind === 'tsb') || addTab(ws, 'tsb', { activate: false });
+        setActive(ws, tt); mode = 'manual';
+        if (tt.view && !tt.view.webContents.isDestroyed() && !tt.view.webContents.isLoading()) tt.view.webContents.send('manual-open', { tsb });
+        else tt.pendingOpen = { tsb };
         saveWorkspaces(); layout(); pushState();
         return true;
       }
@@ -1660,8 +1694,8 @@ function createWorkbench(profile) {
   // ---------- workspaces ----------
   // A vehicle's tabs: Xtime | PTS | Service Manual (+ any added). "Service Manual" holds its own tabs:
   // OASIS | Diagnostics | Workshop Manual | Labor Times (the app's own pages).
-  const SVC_KINDS = new Set(['oasisview', 'diag', 'manual', 'labor', 'article', 'doc']); // article: Ford's page for an FSA etc. · doc: one of its PDFs
-  const SVC_DEFAULTS = ['oasisview', 'diag', 'manual', 'labor'];
+  const SVC_KINDS = new Set(['oasisview', 'diag', 'tsb', 'manual', 'labor', 'article', 'doc']); // article: Ford's page for an FSA etc. · doc: one of its PDFs
+  const SVC_DEFAULTS = ['oasisview', 'diag', 'tsb', 'manual', 'labor'];
   const inService = (kind) => SVC_KINDS.has(kind);
   const serviceTab = (ws) => ws.tabs.find((t) => t.kind === 'service') || null;
   // The vehicle's chosen tab in the top row
@@ -1719,7 +1753,7 @@ function createWorkbench(profile) {
     if (was) setActive(ws, was); else ws.activeTab = topTab(ws)?.id ?? null;
   }
 
-  const TAB_NAMES = { article: 'Article', doc: 'Document', service: 'Service Manual', labor: 'Labor Times', diag: 'Diagnostics', xtime: 'Xtime', oasisview: 'OASIS', manual: 'Workshop Manual', wiring: 'Wiring', pts: 'PTS', ota: 'OTA Updates', cvd: 'Connected Data', prodemand: 'ProDemand', oasis: 'OASIS' };
+  const TAB_NAMES = { tsb: 'TSBs', article: 'Article', doc: 'Document', service: 'Service Manual', labor: 'Labor Times', diag: 'Diagnostics', xtime: 'Xtime', oasisview: 'OASIS', manual: 'Workshop Manual', wiring: 'Wiring', pts: 'PTS', ota: 'OTA Updates', cvd: 'Connected Data', prodemand: 'ProDemand', oasis: 'OASIS' };
   function addTab(ws, kind, { activate = true, front = false } = {}) {
     const n = ws.tabs.filter((t) => t.kind === kind).length;
     const base = TAB_NAMES[kind] || 'Manual';
@@ -1746,7 +1780,8 @@ function createWorkbench(profile) {
       for (const t of ws.tabs) {
         if (t.kind === 'manual') t.manualState = null; // the open procedures were for the old VIN
         if (t.kind === 'diag') t.manualState = null;
-        if ((t.kind === 'manual' || t.kind === 'wiring' || t.kind === 'oasisview' || t.kind === 'diag') && t.view) destroyTab(t); // reopen for the right vehicle
+        if (t.kind === 'tsb') t.manualState = null;
+        if ((t.kind === 'manual' || t.kind === 'wiring' || t.kind === 'oasisview' || t.kind === 'diag' || t.kind === 'tsb') && t.view) destroyTab(t); // reopen for the right vehicle
       }
     }
     if (tab) { // e.g. from the dashboard: show the RO's Xtime page
