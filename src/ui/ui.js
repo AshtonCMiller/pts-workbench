@@ -1014,9 +1014,9 @@ function updateText(u) {
   const at = u.checkedAt ? ` (checked ${new Date(u.checkedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })})` : '';
   switch (u.state) {
     case 'checking': return 'Checking for updates…';
-    case 'current': return `Up to date${u.latest ? ` — newest release on GitHub is v${u.latest}` : ''}${at}`;
-    case 'downloading': return `Downloading v${u.version}… ${u.percent || 0}%`;
-    case 'ready': return `v${u.version} is ready to install`;
+    case 'current': return u.message ? `${u.message}${at}` : `Up to date${u.latest ? ` — newest release on GitHub is v${u.latest}` : ''}${at}`;
+    case 'downloading': return `Downloading v${u.version}${u.quick ? ' (app files only)' : ''}… ${u.percent || 0}%`;
+    case 'ready': return u.quick ? `v${u.version} is downloaded — restart to switch to it (no reinstall)` : `v${u.version} is ready to install`;
     case 'error': return `Update check failed: ${u.message}${at}`;
     case 'off': return u.message;
     default: return '';

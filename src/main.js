@@ -6,15 +6,23 @@ const { app, BaseWindow, BrowserWindow, WebContentsView, ipcMain, session, shell
 const path = require('path');
 const fs = require('fs');
 
-const XTIME_EXTRACT = fs.readFileSync(path.join(__dirname, 'inject', 'xtime-extract.js'), 'utf8').trim();
-const XTIME_RO = fs.readFileSync(path.join(__dirname, 'inject', 'xtime-ro.js'), 'utf8').trim();
-const XTIME_INSPECT = fs.readFileSync(path.join(__dirname, 'inject', 'xtime-inspect.js'), 'utf8').trim();
-const XTIME_CHAT = fs.readFileSync(path.join(__dirname, 'inject', 'xtime-chat.js'), 'utf8').trim();
-const COX_SIGNIN = fs.readFileSync(path.join(__dirname, 'inject', 'cox-signin.js'), 'utf8').trim();
+// The app's pages (ui/, manual/) and the scripts it runs in Xtime (inject/) are read from PAGES. A "hot" update
+// (one that only changes those) points PAGES at the new app files and reloads the pages — no restart.
+let PAGES = __dirname;
+let XTIME_EXTRACT, XTIME_RO, XTIME_INSPECT, XTIME_CHAT, COX_SIGNIN, XTIME_DETAILS, XTIME_VEHICLE, XTIME_EMPLOYEE;
+function loadInjects() {
+  const read = (name) => fs.readFileSync(path.join(PAGES, 'inject', name), 'utf8').trim();
+  XTIME_EXTRACT = read('xtime-extract.js');
+  XTIME_RO = read('xtime-ro.js');
+  XTIME_INSPECT = read('xtime-inspect.js');
+  XTIME_CHAT = read('xtime-chat.js');
+  COX_SIGNIN = read('cox-signin.js');
+  XTIME_DETAILS = read('xtime-details.js');
+  XTIME_VEHICLE = read('xtime-vehicle.js');
+  XTIME_EMPLOYEE = read('xtime-employee.js');
+}
+loadInjects();
 const COX_SIGNIN_HOST = /(^|\.)signin\.coxautoinc\.com$/i;
-const XTIME_DETAILS = fs.readFileSync(path.join(__dirname, 'inject', 'xtime-details.js'), 'utf8').trim();
-const XTIME_VEHICLE = fs.readFileSync(path.join(__dirname, 'inject', 'xtime-vehicle.js'), 'utf8').trim();
-const XTIME_EMPLOYEE = fs.readFileSync(path.join(__dirname, 'inject', 'xtime-employee.js'), 'utf8').trim();
 const { Tracker } = require('./tracker');
 const { ManualService, PTS: PTS_ORIGIN, ASSET_HOSTS } = require('./manual');
 const { pathToFileURL } = require('url');
@@ -183,13 +191,24 @@ function initUpdater() {
   };
   updater.logger = { info: log('INFO'), warn: log('WARN'), error: log('ERROR'), debug: () => {} };
   update.logFile = logFile;
-  updater.autoDownload = true;
+  // Downloads are decided here: app files only when they fit this install (quick), the full installer otherwise
+  updater.autoDownload = false;
   applyUpdateChannel();
   updater.autoInstallOnAppQuit = true; // a downloaded update also installs whenever you close the app
   updater.on('checking-for-update', () => setUpdate({ state: 'checking', message: '' }));
   // info.version is the newest version GitHub offered, so a stuck release is easy to spot
   updater.on('update-not-available', (info) => setUpdate({ state: 'current', latest: info?.version || '', checkedAt: Date.now(), message: '' }));
-  updater.on('update-available', (info) => setUpdate({ state: 'downloading', version: info.version, percent: 0, checkedAt: Date.now() }));
+  updater.on('update-available', (info) => {
+    setUpdate({ state: 'downloading', version: info.version, percent: 0, checkedAt: Date.now(), quick: false });
+    quickUpdate(info).then((how) => {
+      updater.logger.info(`v${info.version}: ${how}`);
+      if (how === 'full') updater.downloadUpdate().catch(() => { /* reported through 'error' */ });
+      else if (how === 'later') setUpdate({ state: 'current', message: `v${info.version} is still being published; trying again soon` });
+    }, (e) => {
+      updater.logger.warn(`quick update of v${info.version} failed: ${e.message || e}`);
+      setUpdate({ state: 'error', message: `Couldn't download v${info.version}: ${String(e.message || e).slice(0, 120)}`, checkedAt: Date.now() });
+    });
+  });
   updater.on('download-progress', (p) => {
     const pct = Math.round(p.percent || 0);
     if (pct - update.percent >= 5 || pct === 100) setUpdate({ state: 'downloading', percent: pct });
@@ -212,7 +231,112 @@ async function installUpdate() {
   quitting = true;
   saveProfiles();          // reopen the same windows after the update
   await closeOutAll();     // record closing time + send anything not yet synced (clocks keep running)
+  if (update.quick) { app.relaunch(); app.exit(0); return; } // new app files: just start again (boot.js picks them)
   updater.quitAndInstall(true, true); // silent install, then start the app again
+}
+
+// ---------- quick updates: the app's own files only (no installer) ----------
+// Each release has app-bundle.asar (all of the app's code and pages) and app-bundle.json (its version, the Electron
+// "shell" it needs, its checksum, and a checksum per file). When the shell matches this install, only the app files
+// are downloaded — into %APPDATA%\PTS Workbench\app-updates — and boot.js starts them next time. If the only changes
+// are pages / Xtime scripts, they're switched to right away ("hot"), without restarting.
+const BOOT = global.ptsBoot || null;
+const ofs = require('original-fs');
+// Where releases are: app-update.yml (written next to the app by the installer build), else package.json
+const PUBLISH = (() => {
+  try {
+    const yml = fs.readFileSync(path.join(process.resourcesPath, 'app-update.yml'), 'utf8');
+    const get = (k) => (yml.match(new RegExp(`^${k}:\\s*['"]?([^'"\\r\\n]+)`, 'm')) || [])[1]?.trim();
+    if (get('owner') && get('repo')) return { owner: get('owner'), repo: get('repo') };
+  } catch { /* not installed from the Setup build */ }
+  try { return require('../package.json').build?.publish || {}; } catch { return {}; }
+})();
+const releaseFile = (version, name) => `https://github.com/${PUBLISH.owner}/${PUBLISH.repo}/releases/download/v${encodeURIComponent(version)}/${name}`;
+async function fetchJson(url) {
+  const res = await net.fetch(url, { cache: 'no-store' });
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`HTTP ${res.status} for ${url.split('/').slice(-2).join('/')}`);
+  return res.json();
+}
+// The file list (path → checksum) of the app files running now: saved when they were downloaded, or from their release
+async function runningManifest() {
+  const v = app.getVersion();
+  const saved = path.join(BOOT.dir, `app-${v}.json`);
+  try { return JSON.parse(ofs.readFileSync(saved, 'utf8')); } catch { /* not saved */ }
+  const m = await fetchJson(releaseFile(v, 'app-bundle.json')).catch(() => null);
+  if (m) { try { ofs.mkdirSync(BOOT.dir, { recursive: true }); ofs.writeFileSync(saved, JSON.stringify(m)); } catch {} }
+  return m;
+}
+// Only pages and Xtime scripts changed (not the app's main code, preloads, libraries or settings): no restart needed
+const HOT_FILE = /^src\/(ui\/|inject\/|manual\/(?!viewer-preload\.js$))/;
+function onlyPagesChanged(from, to) {
+  if (!from?.files || !to?.files) return false;
+  const paths = new Set([...Object.keys(from.files), ...Object.keys(to.files)]);
+  for (const p of paths) {
+    if (from.files[p] === to.files[p]) continue;
+    if (!HOT_FILE.test(p)) return false;
+  }
+  return true;
+}
+async function quickUpdate(info) {
+  if (!BOOT || !PUBLISH.owner || !PUBLISH.repo) return 'full';
+  const v = info.version;
+  // already downloaded (waiting for a restart), or those files didn't start last time
+  const cur = BOOT.readCur();
+  if (cur?.version === v && cur.shell === BOOT.shell) {
+    if (cur.bad) return 'full';
+    if (cur.file && ofs.existsSync(path.join(BOOT.dir, cur.file))) { setUpdate({ state: 'ready', version: v, percent: 100, quick: true }); return 'ready'; }
+  }
+  const m = await fetchJson(releaseFile(v, 'app-bundle.json'));
+  if (!m) {
+    // a release from before quick updates, or one still uploading: wait a while before falling back to the installer
+    const age = Date.now() - Date.parse(info.releaseDate || 0);
+    return Number.isFinite(age) && age < 3 * 60 * 60 * 1000 ? 'later' : 'full';
+  }
+  if (Number(m.shell) !== BOOT.shell) return 'full'; // a new Electron: needs the installer
+  // download, checking the size and checksum
+  const res = await net.fetch(releaseFile(v, m.file || 'app-bundle.asar'), { cache: 'no-store' });
+  if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
+  const total = Number(m.size) || Number(res.headers.get('content-length')) || 0;
+  const hash = require('crypto').createHash('sha512');
+  const parts = [];
+  let got = 0;
+  const reader = res.body.getReader();
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    parts.push(Buffer.from(value)); hash.update(value); got += value.length;
+    if (total) { const pct = Math.round((got / total) * 100); if (pct - update.percent >= 5) setUpdate({ percent: pct, quick: true }); }
+  }
+  if (m.size && got !== Number(m.size)) throw new Error('download incomplete');
+  if (m.sha512 && hash.digest('base64') !== m.sha512) throw new Error("download doesn't match its checksum");
+  ofs.mkdirSync(BOOT.dir, { recursive: true });
+  const name = `app-${v.replace(/[^0-9A-Za-z.-]/g, '')}.asar`;
+  const file = path.join(BOOT.dir, name);
+  ofs.writeFileSync(file + '.part', Buffer.concat(parts));
+  ofs.renameSync(file + '.part', file);
+  try { ofs.writeFileSync(path.join(BOOT.dir, `app-${v}.json`), JSON.stringify(m)); } catch {}
+  // What the next start uses (boot.js). "downgrade": leaving beta can go back a version, for exactly this install
+  BOOT.writeCur({ version: v, file: name, shell: BOOT.shell, tries: 0, installed: BOOT.builtInVersion,
+    downgrade: BOOT.compareVersions(v, BOOT.builtInVersion) <= 0, at: new Date().toISOString() });
+  // tidy up: keep the new files and the ones running now
+  const keep = new Set([name, `app-${app.getVersion()}.asar`, 'current.json', `app-${v}.json`, `app-${app.getVersion()}.json`]);
+  try { for (const f of ofs.readdirSync(BOOT.dir)) if (!keep.has(f)) ofs.rmSync(path.join(BOOT.dir, f), { force: true }); } catch {}
+
+  // Only pages / Xtime scripts changed: switch to them now
+  const from = await runningManifest().catch(() => null);
+  if (onlyPagesChanged(from, m)) {
+    PAGES = path.join(file, 'src');
+    loadInjects();
+    app.getVersion = () => v;
+    BOOT.version = v;
+    try { updater.currentVersion = new (require('semver').SemVer)(v); } catch { /* the next check may offer it again; harmless */ }
+    for (const wb of windows.values()) wb.hotReload?.();
+    setUpdate({ state: 'current', version: v, quick: false, hot: true, latest: v, checkedAt: Date.now(), message: `Updated to v${v} without restarting` });
+    return 'hot';
+  }
+  setUpdate({ state: 'ready', version: v, percent: 100, quick: true });
+  return 'ready';
 }
 
 // Before the app closes: every window records when it closed and sends unsynced changes (a few seconds at most)
@@ -374,6 +498,21 @@ function createWorkbench(profile) {
   let loggedXtimeFields = false;
   let loggedLineFields = false;
   let overlay = false;          // a dialog is open in the app UI; hide web views
+  // ---------- hot updates: the app's own pages reloaded from new app files, without restarting ----------
+  const staleViews = new Set(); // app pages still showing old files (the one you're looking at waits until you leave it)
+  function reloadAppPage(v) {
+    if (v && !v.webContents.isDestroyed() && v.ptsPage) v.webContents.loadFile(path.join(PAGES, 'manual', v.ptsPage));
+  }
+  function hotReload() {
+    overlay = false; // a dialog open in the top bar closes with the reload
+    if (chrome && !chrome.webContents.isDestroyed()) chrome.webContents.loadFile(path.join(PAGES, 'ui', 'index.html'));
+    for (const { tab } of manualViews.values()) {
+      const v = tab.view;
+      if (!v || v.webContents.isDestroyed()) continue;
+      if (v === visibleView) staleViews.add(v); else reloadAppPage(v);
+    }
+    layout();
+  }
   let myROs = [];
   let xtimeStatus = 'Log in to Xtime to load your ROs';
   let lastPoll = null;
@@ -759,6 +898,8 @@ function createWorkbench(profile) {
     for (const v of allContentViews()) v.setVisible(v === visible);
     visibleView = visible;
     if (findWc && visible?.webContents !== findWc) closeFind(); // another page now: the find bar closes
+    // app pages left on the old files by a hot update: reloaded once you've moved off them
+    for (const v of staleViews) if (v !== visible) { staleViews.delete(v); reloadAppPage(v); }
   }
   let visibleView = null;
 
@@ -1086,7 +1227,8 @@ function createWorkbench(profile) {
       if (input.type === 'keyDown' && input.key === 'F12') { ev.preventDefault(); view.webContents.openDevTools({ mode: 'detach' }); }
     });
     tab.status = '';
-    view.webContents.loadFile(path.join(__dirname, 'manual', page));
+    view.ptsPage = page; // to load it again from new app files (hot update)
+    view.webContents.loadFile(path.join(PAGES, 'manual', page));
     return view;
   }
 
@@ -2079,7 +2221,7 @@ function createWorkbench(profile) {
       findWc.findInPage(text, { forward: !back, findNext: !next, matchCase: false });
     },
     'find-close': () => { const wc = closeFind({ quiet: true }); if (wc) wc.focus(); },
-    'ui-ready': () => pushState(),
+    'ui-ready': () => { pushState(); global.ptsBoot?.ok?.(); }, // the app is up: these app files work
     'set-mode': (m) => { mode = m === 'manual' ? 'manual' : 'xtime'; layout(); pushState(); },
     // The messages counter: Xtime's chat is on Xtime's own page for now
     'open-messages': () => {
@@ -2498,7 +2640,7 @@ function createWorkbench(profile) {
       webPreferences: { preload: path.join(__dirname, 'preload.js'), sandbox: true, contextIsolation: true, nodeIntegration: false },
     });
     win.contentView.addChildView(chrome);
-    chrome.webContents.loadFile(path.join(__dirname, 'ui', 'index.html'));
+    chrome.webContents.loadFile(path.join(PAGES, 'ui', 'index.html'));
     chrome.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
     appUiContents.add(chrome.webContents);
     chrome.webContents.on('before-input-event', (ev, input) => {
@@ -2583,6 +2725,7 @@ function createWorkbench(profile) {
     manualCall, manualSave,
     // Ctrl+B pressed inside one of this window's pages: show or hide the Workbench sidebar
     findKey,
+    hotReload,
     findClose: (wc) => { if (!findWc || findWc !== wc) return false; closeFind(); return true; },
     sidebarKey: (wc) => {
       if (!allContentViews().some((v) => v.webContents === wc) || mode !== 'manual') return false;
