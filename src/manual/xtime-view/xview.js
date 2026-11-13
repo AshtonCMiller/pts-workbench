@@ -472,5 +472,5 @@ document.addEventListener('visibilitychange', () => {
   load({ quiet: false });
   loadInspection();
 
-  toast("Test ran (again x2)");
+  toast("Test ran (again x3)");
 })();
