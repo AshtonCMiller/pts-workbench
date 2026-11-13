@@ -270,13 +270,17 @@ async function runningManifest() {
 // Only pages and Xtime scripts changed (not the app's main code, preloads, libraries or settings): no restart needed
 const HOT_FILE = /^src\/(ui\/|inject\/|manual\/(?!viewer-preload\.js$))/;
 function onlyPagesChanged(from, to) {
-  if (!from?.files || !to?.files) return false;
+  if (!from?.files) return { hot: false, why: `no file list for the version running now (v${app.getVersion()})` };
+  if (!to?.files) return { hot: false, why: 'the new version has no file list' };
   const paths = new Set([...Object.keys(from.files), ...Object.keys(to.files)]);
+  const changed = [], cold = [];
   for (const p of paths) {
     if (from.files[p] === to.files[p]) continue;
-    if (!HOT_FILE.test(p)) return false;
+    changed.push(p);
+    if (!HOT_FILE.test(p)) cold.push(p);
   }
-  return true;
+  return { hot: !cold.length, why: cold.length ? `needs a restart for ${cold.slice(0, 8).join(', ')}${cold.length > 8 ? ` (+${cold.length - 8} more)` : ''}`
+    : `pages only: ${changed.slice(0, 8).join(', ') || 'nothing changed'}` };
 }
 async function quickUpdate(info) {
   if (!BOOT || !PUBLISH.owner || !PUBLISH.repo) return 'full';
@@ -325,7 +329,9 @@ async function quickUpdate(info) {
 
   // Only pages / Xtime scripts changed: switch to them now
   const from = await runningManifest().catch(() => null);
-  if (onlyPagesChanged(from, m)) {
+  const diff = onlyPagesChanged(from, m);
+  updater.logger.info(`v${app.getVersion()} → v${v}: ${diff.why}`);
+  if (diff.hot) {
     PAGES = path.join(file, 'src');
     loadInjects();
     app.getVersion = () => v;

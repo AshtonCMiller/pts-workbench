@@ -37,8 +37,9 @@ if (!fs.existsSync(src)) { console.error(`No ${src} — run electron-builder fir
 const files = {};
 for (const [p, raw] of readAsar(src)) {
   let data = raw;
-  // package.json changes its version every release; only the rest of it matters for "did anything change"
-  if (p === 'package.json') { const j = JSON.parse(data.toString('utf8')); delete j.version; data = Buffer.from(JSON.stringify(j)); }
+  // package.json: its version changes every release, and the build settings (beta vs regular, signing) only matter
+  // to the build — the rest of it is what counts for "did anything change"
+  if (p === 'package.json') { const j = JSON.parse(data.toString('utf8')); delete j.version; delete j.build; data = Buffer.from(JSON.stringify(j)); }
   files[p] = crypto.createHash('sha1').update(data).digest('base64');
 }
 if (fs.existsSync(`${src}.unpacked`)) console.warn('Note: app.asar.unpacked exists — those files are listed but not part of app-bundle.asar');
