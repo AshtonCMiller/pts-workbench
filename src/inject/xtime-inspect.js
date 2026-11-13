@@ -60,7 +60,14 @@
       return m ? new URL(m[1].replace(/&amp;/g, '&'), location.href).href : '';
     };
     return { ok: true, html, formUrl: script('InspectionFormData'), formsUrl: script('AvailableForms'), storeUrl: script('StoreData'),
-      servicesUrl: script('AvailableServices(?![A-Za-z])'), payUrl: script('AvailablePayTypeCodes') };
+      servicesUrl: script('AvailableServices(?![A-Za-z])'), payUrl: script('AvailablePayTypeCodes'), dispatchUrl: script('DispatchCodes') };
+  };
+  // The store's dispatch codes ({Code, IsDefault, EstimatedDuration}); Xtime starts a new line on the default one
+  const dispatchCodes = async (d) => {
+    let list = await loadVar(d.dispatchUrl, 'DispatchCodes');
+    if (!Array.isArray(list)) { try { list = window.DispatchCodes; } catch { list = null; } }
+    if (!Array.isArray(list)) list = varValue(d.html, 'DispatchCodes');
+    return Array.isArray(list) ? list.filter((c) => c && c.Code) : [];
   };
   const loadVar = async (url, name) => {
     if (!url) return undefined;
@@ -105,6 +112,7 @@
     const services = (await loadVar(d.servicesUrl, 'AvailableServices')) || [];
     const pay = (await loadVar(d.payUrl, 'AvailablePayTypeCodes')) || [];
     const store = (await loadVar(d.storeUrl, 'StoreData')) || {};
+    const codes = await dispatchCodes(d);
     const roR = await call('GET', `/api/Stores/${encodeURIComponent(STORE)}/RepairOrder/${encodeURIComponent(RO)}`);
     const ro = roR.ok ? unwrap(roR.data) : null;
     if (!services.length) return { ok: false, error: "Couldn't read the store's services from Xtime" };
@@ -113,6 +121,8 @@
         price: Number(s.Price) || 0, labor: Number(s.PriceLabor) || 0 })),
       payTypes: pay.map((p) => ({ id: p.ID, code: String(p.Code || ''), payTypeId: p.PayTypeID, isDefault: !!p.IsDefault })),
       defaultColor: String(store.DefaultLineColor || 'Red'), internal: !!ro?.IsInternal,
+      dispatchCodes: codes.map((c) => ({ code: String(c.Code), description: String(c.Description || '').trim(), isDefault: !!c.IsDefault,
+        duration: c.EstimatedDuration == null ? null : Number(c.EstimatedDuration) })),
     } };
   }
   if (ACTION?.type === 'addLine') { // Xtime's EditFormService.saveLine for a new line (ID 0)
@@ -122,16 +132,56 @@
     const store = (await loadVar(d.storeUrl, 'StoreData')) || {};
     const a = ACTION.line || {};
     const num = (v) => (v === '' || v == null || Number.isNaN(Number(v)) ? -1 : Number(v)); // as Xtime: empty = use the service's own
+    // Dispatch code and estimated duration: as Xtime's Add Service, the store's default code and its duration unless picked
+    const codes = await dispatchCodes(d);
+    const fallback = codes.find((c) => c.IsDefault) || null;
+    const dispatch = String(a.dispatchCode || fallback?.Code || '');
+    const codeInfo = codes.find((c) => String(c.Code) === dispatch) || fallback;
+    const dur = a.duration !== '' && a.duration != null && !Number.isNaN(Number(a.duration)) && Number(a.duration) > 0 ? Number(a.duration)
+      : codeInfo?.EstimatedDuration ?? fallback?.EstimatedDuration ?? null;
     const line = {
       ID: 0, SGCID: a.sgcid, SGID: a.sgid, Color: a.color || store.DefaultLineColor || 'Red',
       PayTypeCode: pay.find((p) => String(p.ID) === String(a.payTypeId)) || pay.find((p) => p.IsDefault) || null,
       Hours: num(a.hours), PriceLabor: num(a.labor), PriceParts: num(a.parts), Price: num(a.total),
       ServiceGuideSpecialItemName: a.details || '', Complaint: a.complaint || '', Cause: a.cause || '', Correction: a.correction || '',
       TechnicianNote: a.techNote || '', IsGbb: false, ServiceType: null,
+      DispatchCode: dispatch || null, EstimatedDuration: dur,
       EnableInternalLinePrice: store?.Labor?.InternalLinePriceDefaultValue ?? null, EnableWarrantyLinePrice: store?.Labor?.WarrantyLinePriceDefaultValue ?? null,
     };
     if (!line.SGCID) return { ok: false, error: 'Pick a service first' };
     const r = await call('PUT', `${api}/Lines/0?format=json`, { Data: line });
+    return r.ok ? { ok: true } : r;
+  }
+  if (ACTION?.type === 'editLine') { // Xtime's EditFormService.saveLine for a line already on the RO: the line as Xtime has it, with the changes
+    const d = await details();
+    if (!d.ok) return d;
+    const roR = await call('GET', `/api/Stores/${encodeURIComponent(STORE)}/RepairOrder/${encodeURIComponent(RO)}`);
+    if (!roR.ok) return roR;
+    const ro = unwrap(roR.data);
+    const lines = (ro && (ro.RepairOrderLines || ro.repairOrderLines || ro.Lines)) || [];
+    const old = lines.find((l) => l && String(l.ID) === String(ACTION.id));
+    if (!old) return { ok: false, error: "That line isn't on the RO anymore (refresh)" };
+    const pay = (await loadVar(d.payUrl, 'AvailablePayTypeCodes')) || [];
+    const codes = await dispatchCodes(d);
+    const a = ACTION.line || {};
+    const num = (v) => (v === '' || v == null || Number.isNaN(Number(v)) ? -1 : Number(v)); // as Xtime: empty = use the service's own
+    const line = JSON.parse(JSON.stringify(old));
+    if (a.sgcid) { line.SGCID = a.sgcid; line.SGID = a.sgid ?? line.SGID; }
+    if (a.color) line.Color = a.color;
+    if (a.payTypeId != null && a.payTypeId !== '') line.PayTypeCode = pay.find((p) => String(p.ID) === String(a.payTypeId)) || line.PayTypeCode;
+    else if (line.PayTypeCode) line.PayTypeCode = pay.find((p) => String(p.ID) === String(line.PayTypeCode.ID)) || line.PayTypeCode;
+    line.Hours = num(a.hours); line.PriceLabor = num(a.labor); line.PriceParts = num(a.parts); line.Price = num(a.total);
+    line.ServiceGuideSpecialItemName = a.details ?? line.ServiceGuideSpecialItemName;
+    line.Complaint = a.complaint ?? line.Complaint; line.Cause = a.cause ?? line.Cause; line.Correction = a.correction ?? line.Correction;
+    line.TechnicianNote = a.techNote ?? line.TechnicianNote;
+    if (a.dispatchCode) line.DispatchCode = String(a.dispatchCode);
+    if (a.duration !== '' && a.duration != null && Number(a.duration) > 0) line.EstimatedDuration = Number(a.duration);
+    else if (!line.EstimatedDuration) line.EstimatedDuration = (codes.find((c) => c.Code === line.DispatchCode) || codes.find((c) => c.IsDefault))?.EstimatedDuration ?? null;
+    // as Xtime: the address only wants the service type's code
+    line.ServiceType = line.ServiceTypeFull ? line.ServiceTypeFull.ServiceTypeCode ?? null
+      : line.ServiceType && typeof line.ServiceType === 'object' ? line.ServiceType.ServiceTypeCode ?? null : line.ServiceType ?? null;
+    if (!line.SGCID) return { ok: false, error: 'Pick a service first' };
+    const r = await call('PUT', `${api}/Lines/${encodeURIComponent(old.ID)}?format=json`, { Data: line });
     return r.ok ? { ok: true } : r;
   }
   if (ACTION?.type === 'deleteLine') { // Xtime's RODetailsService.deleteLine

@@ -24,6 +24,10 @@
   </header>
   <main id="o-body"></main>
   <div id="o-toast" class="o-toast" hidden></div>
-  <script src="xview.js"></script>
+  <!-- in this order: shared helpers, the inspection form, Add / Edit / Delete Service, then the RO (which starts the page) -->
+  <script src="common.js"></script>
+  <script src="inspection.js"></script>
+  <script src="service-editor.js"></script>
+  <script src="ro-view.js"></script>
 </body>
 </html>

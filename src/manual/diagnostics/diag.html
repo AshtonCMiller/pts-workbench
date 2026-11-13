@@ -6,7 +6,7 @@
   <title>Diagnostics</title>
   <link rel="stylesheet" href="../viewer.css">
   <link rel="stylesheet" href="../oasis/oasis.css">
-  <link rel="stylesheet" href="../diagnostics/diag.css">
+  <link rel="stylesheet" href="diag.css">
 </head>
 <body class="oasis diag">
   <header class="o-head">
@@ -30,6 +30,11 @@
   <nav id="d-tabs" class="d-tabs" hidden></nav>
   <main id="d-body"></main>
   <div id="o-toast" class="o-toast" hidden></div>
+  <!-- in this order: shared helpers first, diag.js last (it starts the page). common.js says what each file does. -->
+  <script src="common.js"></script>
+  <script src="search.js"></script>
+  <script src="results.js"></script>
+  <script src="vehicle-dtcs.js"></script>
   <script src="diag.js"></script>
 </body>
 </html>

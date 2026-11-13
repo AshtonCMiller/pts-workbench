@@ -371,6 +371,9 @@ function renderChat() {
   if (!state.chatOpen) return;
   // In the Workbench, the open vehicle's RO is the one shown
   const ro = chat.ro || (inVehicle(state) ? state.activeRO : null);
+  // Moved to another RO in the Workbench: the conversation open for the last one closes, so this one's is picked
+  if (!chat.ro && chat.shownFor !== ro) chat.channel = null;
+  chat.shownFor = ro;
   const all = chatConversations();
   const convs = ro ? all.filter((c) => c.ro === String(ro)) : all;
   if (!chat.channel && ro && convs.length === 1 && convs[0].channelId) { chat.channel = convs[0].channelId; chatAskHistory(chat.channel); }
@@ -1014,9 +1017,9 @@ function updateText(u) {
   const at = u.checkedAt ? ` (checked ${new Date(u.checkedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })})` : '';
   switch (u.state) {
     case 'checking': return 'Checking for updates…';
-    case 'current': return `Up to date${u.latest ? ` — newest release on GitHub is v${u.latest}` : ''}${at}`;
-    case 'downloading': return `Downloading v${u.version}… ${u.percent || 0}%`;
-    case 'ready': return `v${u.version} is ready to install`;
+    case 'current': return u.message ? `${u.message}${at}` : `Up to date${u.latest ? ` — newest release on GitHub is v${u.latest}` : ''}${at}`;
+    case 'downloading': return `Downloading v${u.version}${u.quick ? ' (app files only)' : ''}… ${u.percent || 0}%`;
+    case 'ready': return u.quick ? `v${u.version} is downloaded — restart to switch to it (no reinstall)` : `v${u.version} is ready to install`;
     case 'error': return `Update check failed: ${u.message}${at}`;
     case 'off': return u.message;
     default: return '';
@@ -1042,7 +1045,68 @@ function renderVersion() {
   btn.disabled = !ready;
   btn.textContent = ready ? `Restart to update to v${a.update.version}` : `Downloading v${a.update.version}… ${a.update.percent || 0}%`;
   btn.title = ready ? 'Installs the update and reopens your windows. It will also install the next time you close the app.' : '';
+  $('btn-whats-new').hidden = !(ready && a.update.notes?.length);
+  renderWhatsNew(a);
 }
+
+// ---------- What's new ----------
+// Shown once after an update installs, when an update is waiting for a restart, and from an "updated without a
+// restart" notification. The list comes from src/whats-new.md (main reads it).
+let wnShowing = null;          // { id?, reason: 'installed' | 'ready' | 'hot', version, groups }
+const wnDone = new Set();      // ids closed in this window
+function wnText(t) { // **bold** and `code` in an item
+  const frag = document.createDocumentFragment();
+  for (const part of String(t).split(/(\*\*[^*]+\*\*|`[^`]+`)/)) {
+    if (/^\*\*[^*]+\*\*$/.test(part)) frag.append(el('b', { text: part.slice(2, -2) }));
+    else if (/^`[^`]+`$/.test(part)) frag.append(el('code', { text: part.slice(1, -1) }));
+    else if (part) frag.append(part);
+  }
+  return frag;
+}
+function showWhatsNew(w) {
+  if (!w) return;
+  wnShowing = w;
+  const v = w.version ? `v${w.version}` : 'this version';
+  $('wn-title').textContent = w.reason === 'ready' ? `${v} is ready` : w.reason === 'hot' ? `Updated to ${v}` : `What's new in ${v}`;
+  $('wn-sub').textContent = w.reason === 'ready' ? 'Restart to switch to it. Your windows and open vehicles come back, and the clock keeps running.'
+    : w.reason === 'hot' ? 'This update was applied without restarting, so nothing you were doing was interrupted.'
+    : 'PTS Workbench was updated. Here\'s what changed:';
+  const groups = Array.isArray(w.groups) ? w.groups : [];
+  $('wn-list').replaceChildren(...(groups.length ? groups.map((g) => el('div', { class: 'wn-group' },
+    g.head ? el('div', { class: 'wn-head', text: g.head }) : null,
+    el('ul', {}, ...g.items.map((t) => el('li', {}, wnText(t))))))
+    : [el('p', { class: 'muted small', text: 'Fixes and small improvements.' })]));
+  $('wn-later').hidden = w.reason !== 'ready';
+  $('wn-ok').textContent = w.reason === 'ready' ? 'Restart now' : 'Got it';
+  if ($('modal-whats-new').hidden) openModal('modal-whats-new');
+}
+function closeWhatsNew() {
+  const w = wnShowing;
+  wnShowing = null;
+  if (!$('modal-whats-new').hidden) closeModal('modal-whats-new');
+  if (w?.id) { wnDone.add(w.id); api.send('whats-new-done', { id: w.id }); }
+}
+function renderWhatsNew(a) {
+  const w = a.whatsNew;
+  // closed in another window
+  if (wnShowing?.id && (!w || w.id !== wnShowing.id)) { wnShowing = null; if (!$('modal-whats-new').hidden) closeModal('modal-whats-new'); }
+  if (!w || wnDone.has(w.id) || wnShowing) return;
+  // not on top of something you're doing in another dialog: it waits until that's closed
+  if ([...document.querySelectorAll('.modal')].some((m) => !m.hidden) || !$('notes-panel').hidden) return;
+  showWhatsNew(w);
+}
+$('wn-later').onclick = () => closeWhatsNew();
+$('wn-ok').onclick = () => {
+  const restart = wnShowing?.reason === 'ready';
+  closeWhatsNew();
+  if (restart) api.send('install-update');
+};
+$('btn-whats-new').onclick = () => {
+  const u = state?.app?.update;
+  if (u?.notes?.length) showWhatsNew({ reason: 'ready', version: u.version, groups: u.notes });
+};
+api.onShowWhatsNew?.((w) => showWhatsNew(w));
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && wnShowing) closeWhatsNew(); });
 $('btn-update').onclick = () => {
   if (confirm(`Restart now to install v${state?.app?.update?.version}? Your windows and open vehicles come back, and the clock keeps running.`)) {
     api.send('install-update');
@@ -1268,13 +1332,46 @@ function makeTabDraggable(ws, t, tab) {
   });
 }
 
+// ---------- the Service Manual's tab row: scrolls sideways when there are more tabs than fit ----------
+let subShown = '';
+function updateSubArrows() {
+  const strip = $('subtabs-strip');
+  const over = strip.scrollWidth > strip.clientWidth + 1;
+  $('sub-left').hidden = !over; $('sub-right').hidden = !over;
+  $('sub-left').disabled = strip.scrollLeft <= 0;
+  $('sub-right').disabled = strip.scrollLeft + strip.clientWidth >= strip.scrollWidth - 1;
+}
+$('subtabs-strip').addEventListener('scroll', updateSubArrows);
+// the mouse wheel scrolls the row sideways
+$('subtabs-strip').addEventListener('wheel', (e) => {
+  const strip = e.currentTarget;
+  if (strip.scrollWidth <= strip.clientWidth || Math.abs(e.deltaX) > Math.abs(e.deltaY)) return;
+  e.preventDefault();
+  strip.style.scrollBehavior = 'auto';
+  strip.scrollLeft += e.deltaY;
+  strip.style.scrollBehavior = '';
+}, { passive: false });
+const subPage = (dir) => { const strip = $('subtabs-strip'); strip.scrollBy({ left: dir * strip.clientWidth * 0.7, behavior: 'smooth' }); };
+$('sub-left').onclick = () => subPage(-1);
+$('sub-right').onclick = () => subPage(1);
+window.addEventListener('resize', updateSubArrows);
+
 function renderTabs(ws) {
   $('tabs').replaceChildren(...ws.tabs.map((t) => tabEl(ws, t, ws.activeTab)));
   // Service Manual open: its own row of tabs (OASIS | Diagnostics | Workshop Manual | Labor Times)
   const top = ws.tabs.find((t) => t.id === ws.activeTab);
   const showSub = top?.kind === 'service' && !!ws.sub;
   document.body.classList.toggle('has-sub', showSub);
-  $('subtabs').replaceChildren(...(showSub ? ws.sub.tabs.map((t) => tabEl(ws, t, ws.sub.active)) : []));
+  const strip = $('subtabs-strip');
+  const keep = strip.scrollLeft; // redrawing the tabs shouldn't jump the row back to the start
+  strip.replaceChildren(...(showSub ? ws.sub.tabs.map((t) => tabEl(ws, t, ws.sub.active)) : []));
+  strip.style.scrollBehavior = 'auto'; strip.scrollLeft = keep; strip.style.scrollBehavior = '';
+  // a newly chosen tab that's off to the side scrolls into view
+  if (showSub && subShown !== `${ws.ro}|${ws.sub.active}`) {
+    subShown = `${ws.ro}|${ws.sub.active}`;
+    requestAnimationFrame(() => strip.querySelector('.tab.on')?.scrollIntoView({ block: 'nearest', inline: 'nearest' }));
+  }
+  updateSubArrows();
   const active = showSub ? ws.sub.tabs.find((t) => t.id === ws.sub.active) : top;
   $('tab-status').textContent = active?.status || '';
   $('btn-reenter').style.display = ['pts', 'ota', 'cvd', 'prodemand'].includes(active?.kind) ? '' : 'none';
@@ -1799,7 +1896,7 @@ api.onFeedback?.((d) => {
 })();
 
 // ---------- notifications (the bell): RO assigned, lines approved / declined, parts in, customer / warranty answered ----------
-const NOTE_ICON = { assigned: '📋', approved: '✅', declined: '❌', parts: '📦', customer: '👤', warranty: '🛡' };
+const NOTE_ICON = { assigned: '📋', approved: '✅', declined: '❌', parts: '📦', customer: '👤', warranty: '🛡', update: '✨' };
 function noteWhen(at) {
   const mins = Math.floor((Date.now() - at) / 60000);
   if (mins < 1) return 'just now';
@@ -1822,7 +1919,10 @@ function renderNotes(s) {
   $('notes-clear').disabled = !notes.length;
   $('notes-list').replaceChildren(...(notes.length ? notes.map((n) => el('div', {
     class: `note-item${n.read ? '' : ' unread'}`, title: n.ro ? `Open RO ${n.ro}` : '',
-    onclick: () => { api.send('note-open', { id: n.id }); closeNotes(); },
+    onclick: () => {
+      api.send('note-open', { id: n.id }); closeNotes();
+      if (n.kind === 'update') showWhatsNew({ reason: 'hot', version: n.version, groups: n.whatsNew || [] }); // what that update changed
+    },
   },
   el('span', { class: 'note-icon', text: NOTE_ICON[n.kind] || '🔔' }),
   el('div', { class: 'note-text' },
@@ -1834,7 +1934,7 @@ function renderNotes(s) {
 }
 function openNotes() {
   $('notes-panel').hidden = false; $('notes-backdrop').hidden = false;
-  api.send('set-overlay', true); // the page underneath steps aside while the list is open
+  api.send('set-overlay', true); // the page underneath is shown as a still picture while the list is open
   if (state) renderNotes(state);
 }
 function closeNotes() {
@@ -1848,3 +1948,12 @@ $('notes-readall').onclick = () => api.send('notes-read');
 $('notes-clear').onclick = () => api.send('notes-clear');
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeNotes(); });
 setInterval(() => { if (!$('notes-panel').hidden && state) renderNotes(state); }, 60000); // keeps "5 min ago" current
+
+// While a dialog is open, a picture of the page that was showing sits where the page was (main sends it)
+api.onOverlayShot?.((d) => {
+  const img = $('overlay-shot');
+  if (!d) { img.hidden = true; img.removeAttribute('src'); return; }
+  img.src = d.url;
+  Object.assign(img.style, { left: `${d.x}px`, top: `${d.y}px`, width: `${d.width}px`, height: `${d.height}px` });
+  img.hidden = false;
+});

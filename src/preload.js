@@ -10,4 +10,6 @@ contextBridge.exposeInMainWorld('workbench', {
   onChat: (fn) => ipcRenderer.on('chat', (_e, data) => fn(data)),
   onFeedback: (fn) => ipcRenderer.on('feedback', (_e, data) => fn(data)),
   onFind: (fn) => ipcRenderer.on('find', (_e, data) => fn(data)),
+  onOverlayShot: (fn) => ipcRenderer.on('overlay-shot', (_e, data) => fn(data)),
+  onShowWhatsNew: (fn) => ipcRenderer.on('show-whats-new', (_e, data) => fn(data)),
 });

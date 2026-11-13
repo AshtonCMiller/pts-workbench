@@ -88,6 +88,9 @@
     const adv = person(ro.Advisor, ro.AdvisorID), tech = person(ro.Technician, ro.TechnicianID);
     const lineOf = (l) => ({
       id: l.ID, rolid: l.ROLID ?? null, parentId: l.ParentLineId ?? null, groupId: l.GroupID || null,
+      // for editing the line (the app's Edit Service window starts from these)
+      sgcid: l.SGCID ?? null, sgid: l.SGID ?? null, serviceName: text(l.ServiceName), details: text(l.ServiceGuideSpecialItemName),
+      payTypeId: l.PayTypeCode && typeof l.PayTypeCode === 'object' ? l.PayTypeCode.ID ?? null : null,
       dms: text(l.DMSNumber),
       name: text(l.ServiceGuideSpecialItemName) || text(l.ServiceName).replace(/^\[Primary\]:\s*/i, ''),
       opCode: text(l.OpCodeDms) || text(l.OpCode),

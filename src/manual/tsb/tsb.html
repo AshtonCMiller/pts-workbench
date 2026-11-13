@@ -34,6 +34,10 @@
 
   <main id="t-article" class="t-article" hidden></main>
   <div id="o-toast" class="o-toast" hidden></div>
+  <!-- in this order: shared helpers first, tsb.js last (it starts the page). common.js says what each file does. -->
+  <script src="common.js"></script>
+  <script src="list.js"></script>
+  <script src="article.js"></script>
   <script src="tsb.js"></script>
 </body>
 </html>

@@ -121,29 +121,34 @@ class ManualService {
   }
 
   // ---- 2. the manual's settings for this vehicle ----
-  book(vin) {
+  // kind: 'workshop' (Workshop Manual) or 'pced' (PC/ED: Powertrain Control / Emissions Diagnosis, mostly older
+  // vehicles). Both are the same kind of Ford book (contents, procedures, pinpoint tests), just a different one.
+  book(vin, kind = 'workshop') {
     vin = String(vin).toUpperCase();
-    if (!this.books.has(vin)) {
-      const p = this.loadBook(vin);
-      this.books.set(vin, p);
-      p.catch(() => this.books.delete(vin)); // try again next time
+    kind = kind === 'pced' ? 'pced' : 'workshop';
+    const key = kind === 'workshop' ? vin : `${kind}|${vin}`;
+    if (!this.books.has(key)) {
+      const p = this.loadBook(vin, kind);
+      this.books.set(key, p);
+      p.catch(() => this.books.delete(key)); // try again next time
     }
-    return this.books.get(vin);
+    return this.books.get(key);
   }
 
-  async loadBook(vin) {
+  async loadBook(vin, kind = 'workshop') {
     const v = await this.decode(vin);
     if (!v.ids.length) throw new Error("PTS didn't return a vehicle ID for this VIN");
+    const none = kind === 'pced' ? 'No PC/ED manual for this vehicle' : 'No manual for this vehicle';
     let lastError = null;
     for (const id of [...new Set(v.ids)]) {
-      const url = `${PTS}/publication/Book/workshop/${encodeURIComponent(id)}/${encodeURIComponent(vin)}` +
+      const url = `${PTS}/publication/Book/${kind}/${encodeURIComponent(id)}/${encodeURIComponent(vin)}` +
         `?model=${encodeURIComponent(v.displayName)}&modelyear=${encodeURIComponent(v.year)}`;
       try {
         const html = await this.text(url);
         const book = parseBookPage(html);
-        if (!book.params.vehicleId || !book.bases.publicationBookTreeAndCoverBase) throw new Error('No manual for this vehicle');
+        if (!book.params.vehicleId || !book.bases.publicationBookTreeAndCoverBase) throw new Error(none);
         return {
-          vin, url,
+          vin, url, kind,
           title: book.params.bookTitle || `${v.year} ${v.marketName}`,
           vehicle: { year: v.year, name: v.marketName, buildDate: v.buildDate, productType: v.productType, vehicleLine: v.vehicleLine },
           features: v.features,
@@ -156,14 +161,27 @@ class ManualService {
         lastError = e;
       }
     }
-    throw lastError || new Error('No manual for this vehicle');
+    throw lastError || new Error(none);
+  }
+
+  // Does this vehicle have a PC/ED manual? (Ford's diagnostics search lists the vehicle's PC/ED books)
+  async hasPced(vin) {
+    try {
+      const ctx = await this.diagContext(vin);
+      return ctx.pcedBooks.length > 0;
+    } catch (e) {
+      if (e.needsLogin) throw e;
+      this.log(`   PC/ED check: ${e.message || e}`);
+      return false;
+    }
   }
 
   // ---- 3. table of contents (kept on disk; a new manual release gets a new file) ----
-  async tree(vin) {
-    const book = await this.book(vin);
+  async tree(vin, kind = 'workshop') {
+    const book = await this.book(vin, kind);
     const p = book.params;
-    const key = `${p.vehicleId}_${p.bookcode}_${p.environment || ''}_q_${vin}`.replace(/[^A-Za-z0-9_.-]/g, ''); // q: with Ford's option marks
+    const prefix = book.kind === 'pced' ? 'tree_pced_' : 'tree_';
+    const key = `${book.kind === 'pced' ? 'pced_' : ''}${p.vehicleId}_${p.bookcode}_${p.environment || ''}_q_${vin}`.replace(/[^A-Za-z0-9_.-]/g, ''); // q: with Ford's option marks
     const file = this.cacheDir ? path.join(this.cacheDir, `tree_${key}.html`) : null;
     if (!this.trees.has(key)) {
       const load = (async () => {
@@ -178,7 +196,8 @@ class ManualService {
           try {
             fs.mkdirSync(this.cacheDir, { recursive: true });
             for (const f of fs.readdirSync(this.cacheDir)) { // drop old copies for this VIN
-              if (f.startsWith('tree_') && f.endsWith(`_${vin}.html`) && f !== path.basename(file)) fs.rmSync(path.join(this.cacheDir, f), { force: true });
+              const same = f.startsWith(prefix) && (prefix !== 'tree_' || !f.startsWith('tree_pced_')); // this book's, not the other one's
+              if (same && f.endsWith(`_${vin}.html`) && f !== path.basename(file)) fs.rmSync(path.join(this.cacheDir, f), { force: true });
             }
             fs.writeFileSync(file, html);
           } catch { /* cache is optional */ }
@@ -264,10 +283,10 @@ class ManualService {
     return `https://www.fordservicecontent.com/Ford_Content/PublicationRuntimeRefreshPTS//publication/Proc?environment=${env}`;
   }
 
-  async proc(vin, link) {
-    const book = await this.book(vin);
+  async proc(vin, link, kind = 'workshop') {
+    const book = await this.book(vin, kind);
     const p = book.params;
-    const key = `${link.linkType || 'Procedure'}|${link.searchNumber}|${link.procUid || ''}`;
+    const key = `${book.kind}|${link.linkType || 'Procedure'}|${link.searchNumber}|${link.procUid || ''}`;
     const url = this.procContentUrl(book);
     if (!this.procs.has(key)) {
       // Same fields Ford's procedure page sends
@@ -352,6 +371,9 @@ class ManualService {
     if (!skip.has('oasisview')) await this.svcForm(v).then(() => done.push('SVC list'), () => failed.push('SVC list'));
     await ahead('labor', `slts|${v}`, 'SLTS', () => this.loadSlts(v));
     await ahead('wiring', `wtoc|${v}`, 'wiring contents', () => this.loadWiringToc(v));
+    if (!skip.has('pced') && await this.hasPced(v).catch(() => false)) {
+      await this.tree(v, 'pced').then(() => done.push('PC/ED contents'), () => failed.push('PC/ED contents')); // kept on disk
+    }
     this.log(`ahead ${v}: ${done.join(', ') || 'nothing new to fetch'}${failed.length ? ` (failed: ${failed.join(', ')})` : ''} in ${((Date.now() - t0) / 1000).toFixed(1)} s`);
   }
 
@@ -960,8 +982,8 @@ class ManualService {
   }
 
   // Newer ("SPA") pinpoint tests keep their steps in a separate file, fetched when the test is opened
-  async spaSteps(vin, { file, procUid }) {
-    const book = await this.book(vin);
+  async spaSteps(vin, { file, procUid }, kind = 'workshop') {
+    const book = await this.book(vin, kind);
     const p = book.params;
     const url = book.bases.publicationProcContentBase;
     if (!url) throw new Error("Couldn't find where this test's steps come from");
@@ -985,8 +1007,8 @@ class ManualService {
 
   // Pinpoint tests: report the test and each answered step to Vehicle History, exactly as Ford's
   // manual does (POST /Events/ajaxLoggerForSPAppt), so warranty can see the test was run and the results
-  async reportPinpoint(vin, ev) {
-    const book = await this.book(vin);
+  async reportPinpoint(vin, ev, kind = 'workshop') {
+    const book = await this.book(vin, kind);
     const clean = (v, n = 500) => String(v == null ? '' : v).replace(/\s+/g, ' ').trim().slice(0, n);
     const step = ev.step ? [{
       id: clean(ev.step.id, 20), title: clean(ev.step.title), question: clean(ev.step.question),

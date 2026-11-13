@@ -21,6 +21,13 @@ concurrency:
 jobs:
   release:
     runs-on: windows-latest
+    # Code signing (Microsoft Artifact Signing — see README "Code signing"). Until the secrets / variables below are
+    # set up, builds are made unsigned exactly as before. The three AZURE_* values are read by Microsoft's signing tool.
+    env:
+      SIGNING: ${{ secrets.AZURE_CLIENT_SECRET != '' && vars.AZURE_SIGN_ACCOUNT != '' }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
     steps:
       - uses: actions/checkout@v4
 
@@ -85,6 +92,35 @@ jobs:
           done
           exit 1
 
+      # Signing set up: tell electron-builder to sign the app and installers with Artifact Signing.
+      # (Only for this build — not committed. Updates then check that each new version is signed by the same publisher.)
+      - name: Turn on code signing
+        if: steps.version.outputs.exists == 'false' && env.SIGNING == 'true'
+        shell: bash
+        env:
+          SIGN_ENDPOINT: ${{ vars.AZURE_SIGN_ENDPOINT }}
+          SIGN_ACCOUNT: ${{ vars.AZURE_SIGN_ACCOUNT }}
+          SIGN_PROFILE: ${{ vars.AZURE_SIGN_PROFILE }}
+          SIGN_PUBLISHER: ${{ vars.AZURE_SIGN_PUBLISHER }}
+        run: |
+          node -e "
+            const fs = require('fs');
+            const p = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            p.build.win.signAndEditExecutable = true;
+            p.build.win.azureSignOptions = {
+              publisherName: process.env.SIGN_PUBLISHER,
+              endpoint: process.env.SIGN_ENDPOINT,
+              codeSigningAccountName: process.env.SIGN_ACCOUNT,
+              certificateProfileName: process.env.SIGN_PROFILE,
+            };
+            fs.writeFileSync('package.json', JSON.stringify(p, null, 2));"
+          echo "::notice::Signing as \"$SIGN_PUBLISHER\" with Artifact Signing account $SIGN_ACCOUNT"
+
+      - name: Building unsigned
+        if: steps.version.outputs.exists == 'false' && env.SIGNING != 'true'
+        shell: bash
+        run: echo "::warning::Code signing isn't set up yet, so this build is unsigned (Windows may warn about it). See README → Code signing."
+
       # ---------- regular release (main) ----------
       - name: Build and publish release v${{ steps.version.outputs.number }}
         if: steps.version.outputs.exists == 'false' && steps.version.outputs.beta == 'false'
@@ -105,6 +141,16 @@ jobs:
             sleep 60
           done
           exit 1
+
+      # Quick updates: the app's own files as one download, so installed apps update without running an installer
+      - name: Upload the app files (quick update)
+        if: steps.version.outputs.exists == 'false' && steps.version.outputs.beta == 'false'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          node scripts/make-bundle.js
+          gh release upload "v${{ steps.version.outputs.number }}" dist/app-bundle.asar dist/app-bundle.json --clobber
 
       # ---------- beta release (any other branch) ----------
       - name: Set the beta version
@@ -162,6 +208,27 @@ jobs:
           [ -f beta.yml ] || cp latest.yml beta.yml
           [ -f latest.yml ] || cp beta.yml latest.yml
           gh release upload "v${{ steps.version.outputs.number }}" beta.yml latest.yml --clobber
+
+      - name: Upload the beta's app files (quick update)
+        if: steps.version.outputs.beta == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          node scripts/make-bundle.js
+          gh release upload "v${{ steps.version.outputs.number }}" dist/app-bundle.asar dist/app-bundle.json --clobber
+
+      - name: Check the signatures
+        if: steps.version.outputs.exists == 'false' && env.SIGNING == 'true'
+        shell: pwsh
+        run: |
+          $bad = 0
+          Get-ChildItem dist -Filter *.exe | ForEach-Object {
+            $sig = Get-AuthenticodeSignature $_.FullName
+            Write-Host "$($_.Name): $($sig.Status) — $($sig.SignerCertificate.Subject)"
+            if ($sig.Status -ne 'Valid') { $bad++ }
+          }
+          if ($bad) { Write-Host "::error::$bad installer(s) aren't signed"; exit 1 }
 
       - name: Publish the beta release
         if: steps.version.outputs.beta == 'true'

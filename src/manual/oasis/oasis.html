@@ -20,6 +20,13 @@
   </header>
   <main id="o-body"></main>
   <div id="o-toast" class="o-toast" hidden></div>
+  <!-- in this order: shared helpers first, oasis.js last (it starts the page). common.js says what each file does. -->
+  <script src="common.js"></script>
+  <script src="vehicle.js"></script>
+  <script src="fsa.js"></script>
+  <script src="warnings.js"></script>
+  <script src="warranty.js"></script>
+  <script src="connected.js"></script>
   <script src="oasis.js"></script>
 </body>
 </html>
