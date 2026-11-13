@@ -2,6 +2,12 @@
 // Each window runs one profile: its own Xtime/PTS login, settings, open vehicles and hidden ROs.
 // The shift clock and the flag sheet are shared by every window, so all flags land in one set of hours.
 // Every page is loaded from Ford/Cox as normal, so access is recorded under that window's own login.
+// Started directly (package.json "main" pointing here rather than at boot.js): let boot.js choose the app files
+// first. If it starts downloaded ones, they're the app and this copy stops here.
+if (!global.ptsBoot) {
+  require('./boot.js');
+  if (global.ptsBoot?.quick) return; // eslint-disable-line no-unreachable
+}
 const { app, BaseWindow, BrowserWindow, WebContentsView, ipcMain, session, shell, safeStorage, clipboard, net, protocol, Notification, powerSaveBlocker, Menu } = require('electron');
 const path = require('path');
 const fs = require('fs');

@@ -71,6 +71,7 @@ global.ptsBoot = {
 // Everything that asks the app's version (updates, Settings, feedback) gets the version of the files running
 if (version !== builtIn.version) app.getVersion = () => version;
 
+// (When main.js started first and asked us — see its top — requiring it again just returns, and it carries on.)
 try {
   require(entry);
 } catch (e) {

@@ -3,7 +3,7 @@
   "productName": "PTS Workbench",
   "version": "0.4.4",
   "description": "A more efficient way to work on cars. Works with Ford PTS + XTime.",
-  "main": "src/main.js",
+  "main": "src/boot.js",
   "author": "Ashton Miller",
   "private": true,
   "scripts": {
