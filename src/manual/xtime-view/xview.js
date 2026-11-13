@@ -471,6 +471,4 @@ document.addEventListener('visibilitychange', () => {
   load.last = Date.now();
   load({ quiet: false });
   loadInspection();
-
-  toast("Test ran (again x3)");
 })();
