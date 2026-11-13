@@ -23,6 +23,7 @@
         <button type="button" id="btn-alert-restart" class="ghost small">Restart app</button>
       </span>
       <button id="btn-update" class="update-btn" hidden></button>
+      <button id="btn-whats-new" class="ghost small whats-new-btn" hidden title="What this update brings">What's new?</button>
       <button id="btn-unhide" class="primary small-btn" hidden></button>
       <span id="notice" class="notice" hidden></span>
       <span id="xtime-status" class="muted"></span>
@@ -36,6 +37,7 @@
   </header>
 
   <!-- Notifications: everything the app has told you about (newest first, kept a week) -->
+  <img id="overlay-shot" alt="" hidden>
   <div id="notes-backdrop" class="notes-backdrop" hidden></div>
   <div id="notes-panel" class="notes-panel" hidden>
     <div class="notes-head">
@@ -126,7 +128,12 @@
     <button id="btn-reload-tab" class="icon" title="Reload this tab">↻</button>
   </div>
   <!-- The Service Manual's own tabs (OASIS | Diagnostics | Workshop Manual | Labor Times) -->
-  <div id="subtabs"></div>
+  <div id="subtabs">
+    <!-- more tabs than fit: scroll sideways (mouse wheel, the arrows, or the thin bar under the tabs) -->
+    <button type="button" id="sub-left" class="sub-scroll" title="Scroll the tabs left" hidden>‹</button>
+    <div id="subtabs-strip"></div>
+    <button type="button" id="sub-right" class="sub-scroll" title="Scroll the tabs right" hidden>›</button>
+  </div>
   <!-- Find in the page that's showing (Ctrl+F) -->
   <div id="findbar" class="findbar" hidden>
     <input id="find-q" type="search" spellcheck="false" autocomplete="off" placeholder="Find in this page">
@@ -234,6 +241,19 @@
         <button type="submit" class="primary">Save</button>
       </div>
     </form>
+  </div>
+
+  <!-- What's new: after an update installs, when one is waiting for a restart, or from its notification -->
+  <div id="modal-whats-new" class="modal" hidden>
+    <div class="dialog whats-new">
+      <h2 id="wn-title">What's new</h2>
+      <p class="muted small" id="wn-sub"></p>
+      <div id="wn-list" class="wn-list"></div>
+      <div class="actions">
+        <button type="button" class="ghost" id="wn-later">Later</button>
+        <button type="button" class="primary" id="wn-ok">Got it</button>
+      </div>
+    </div>
   </div>
 
   <div id="modal-setup" class="modal" hidden>

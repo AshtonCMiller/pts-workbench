@@ -35,6 +35,14 @@
 
   <div id="zoom" hidden><img alt=""></div>
 
-  <script src="viewer.js"></script>
+  <!-- the viewer's code, in viewer/: shared pieces first, viewer.js last (it starts the page). viewer/common.js says what each file does. -->
+  <script src="viewer/common.js"></script>
+  <script src="viewer/contents.js"></script>
+  <script src="viewer/vehicle-filter.js"></script>
+  <script src="viewer/search.js"></script>
+  <script src="viewer/documents.js"></script>
+  <script src="viewer/procedure.js"></script>
+  <script src="viewer/pinpoints.js"></script>
+  <script src="viewer/viewer.js"></script>
 </body>
 </html>

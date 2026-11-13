@@ -178,3 +178,13 @@ body.toc-hidden #main { left: 0; }
 .vin-filter .muted { margin-left: auto; font-size: 11px; }
 .node.na { opacity: .5; }
 .node.na:hover { opacity: .8; }
+
+/* PC/ED: a DTC typed in the search lists its pinpoint tests and charts from this book */
+.pced-dtc { margin: 4px 0 8px; padding-bottom: 6px; border-bottom: 1px solid var(--line); }
+.pced-dtc-head { padding: 6px 12px 4px; font-size: 12.5px; }
+.pced-dtc-head b { font-family: Consolas, ui-monospace, monospace; color: var(--accent); }
+.pced-dtc .note { padding: 6px 12px; }
+
+/* a procedure with its parts listed under it: the arrow shows or hides them */
+.node.parent > .tw { cursor: pointer; }
+.node.parent > .tw:hover { color: var(--accent); }

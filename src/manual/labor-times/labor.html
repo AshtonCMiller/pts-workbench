@@ -7,7 +7,7 @@
   <link rel="stylesheet" href="../viewer.css">
   <link rel="stylesheet" href="../oasis/oasis.css">
   <link rel="stylesheet" href="../diagnostics/diag.css">
-  <link rel="stylesheet" href="../labor-times/labor.css">
+  <link rel="stylesheet" href="labor.css">
 </head>
 <!-- Labor times from Ford's SLTS for this vehicle, with a tray that adds up the operations picked -->
 <body class="oasis labor">
@@ -45,6 +45,16 @@
 
   <div id="l-print" class="l-print"></div>
   <div id="o-toast" class="o-toast" hidden></div>
+  <!-- in this order: shared helpers first, labor.js last (it starts the page). common.js says what each file does. -->
+  <script src="common.js"></script>
+  <script src="slts.js"></script>
+  <script src="search-form.js"></script>
+  <script src="word-search.js"></script>
+  <script src="report.js"></script>
+  <script src="results.js"></script>
+  <script src="tray.js"></script>
+  <script src="parts.js"></script>
+  <script src="print.js"></script>
   <script src="labor.js"></script>
 </body>
 </html>

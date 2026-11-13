@@ -177,6 +177,62 @@ function setBetaUpdates(on) {
 }
 const setUpdate = (patch) => { Object.assign(update, patch); pushAll(); };
 
+// ---------- What's new ----------
+// src/whats-new.md lists the changes in plain words ("## heading", then "- item" lines; newest first). It travels with
+// each update, so the app can show what changed:
+//   • when an update is ready and waiting for a restart (read from the downloaded app files)
+//   • once, after an update has installed (the items this computer hasn't been shown yet)
+//   • as a notification, when an update switched over without a restart
+// Which items were shown is kept in whats-new.json (this computer only).
+function parseWhatsNew(md) {
+  const groups = [];
+  let g = null, item = null;
+  for (const raw of String(md || '').split(/\r?\n/)) {
+    const line = raw.replace(/\s+$/, '');
+    let m;
+    if ((m = line.match(/^##\s+(.+)/))) { g = { head: m[1].trim(), items: [] }; groups.push(g); item = null; }
+    else if (/^#\s/.test(line) || /^<!--/.test(line.trim())) { item = null; }
+    else if ((m = line.match(/^\s*[-*]\s+(.+)/))) {
+      if (!g) { g = { head: '', items: [] }; groups.push(g); }
+      item = { text: m[1].trim() }; g.items.push(item);
+    } else if (item && /^\s+\S/.test(line)) item.text += ` ${line.trim()}`; // an item's text carried onto the next line
+    else if (!line.trim()) item = null;
+  }
+  return groups.filter((x) => x.items.length).map((x) => ({ head: x.head, items: x.items.map((i) => i.text.slice(0, 600)) }));
+}
+const readWhatsNew = (srcDir) => { try { return parseWhatsNew(fs.readFileSync(path.join(srcDir, 'whats-new.md'), 'utf8')); } catch { return []; } };
+const whatsNewKey = (text) => require('crypto').createHash('sha1').update(String(text).trim().toLowerCase()).digest('hex').slice(0, 12);
+const whatsNewFile = () => userFile('whats-new.json');
+function whatsNewSeen() { const d = readJsonAt(whatsNewFile(), null); return d && Array.isArray(d.seen) ? new Set(d.seen) : null; }
+function markWhatsNewSeen(groups) {
+  const seen = whatsNewSeen() || new Set();
+  for (const g of groups || []) for (const t of g.items) seen.add(whatsNewKey(t));
+  writeJsonAt(whatsNewFile(), { seen: [...seen].slice(-2000) });
+}
+// The items not shown on this computer yet (none saved yet: only the newest group, so a first install isn't flooded)
+function unseenWhatsNew(groups) {
+  const seen = whatsNewSeen();
+  if (!seen) return groups.slice(0, 1);
+  return groups.map((g) => ({ head: g.head, items: g.items.filter((t) => !seen.has(whatsNewKey(t))) })).filter((g) => g.items.length);
+}
+// shown in every window until one of them closes it: { id, reason: 'installed' | 'ready', version, groups }
+let whatsNew = null;
+let whatsNewReadyFor = '';
+function initWhatsNew() {
+  const groups = unseenWhatsNew(readWhatsNew(PAGES));
+  if (groups.length) whatsNew = { id: `installed-${app.getVersion()}`, reason: 'installed', version: app.getVersion(), groups };
+  else if (!whatsNewSeen()) markWhatsNewSeen(readWhatsNew(PAGES)); // nothing to show: start the list
+}
+// An update downloaded and waiting for a restart: what it brings (quick updates carry their notes; a full installer doesn't)
+function whatsNewReady(version, srcDir) {
+  const groups = srcDir ? unseenWhatsNew(readWhatsNew(srcDir)) : [];
+  update.notes = groups.length ? groups : null;
+  if (groups.length && whatsNewReadyFor !== version) {
+    whatsNewReadyFor = version;
+    whatsNew = { id: `ready-${version}`, reason: 'ready', version, groups };
+  }
+}
+
 function initUpdater() {
   if (!app.isPackaged) { Object.assign(update, { state: 'off', message: 'Running from source, so updates are off' }); return; }
   if (process.env.PORTABLE_EXECUTABLE_DIR) {
@@ -274,7 +330,7 @@ async function runningManifest() {
   return m;
 }
 // Only pages and Xtime scripts changed (not the app's main code, preloads, libraries or settings): no restart needed
-const HOT_FILE = /^src\/(ui\/|inject\/|manual\/(?!viewer-preload\.js$))/;
+const HOT_FILE = /^src\/(ui\/|inject\/|manual\/(?!viewer-preload\.js$)|whats-new\.md$)/;
 function onlyPagesChanged(from, to) {
   if (!from?.files) return { hot: false, why: `no file list for the version running now (v${app.getVersion()})` };
   if (!to?.files) return { hot: false, why: 'the new version has no file list' };
@@ -298,7 +354,11 @@ async function quickUpdate(info) {
   const cur = BOOT.readCur();
   if (cur?.version === v && cur.shell === BOOT.shell) {
     if (cur.bad) return why(`its app files didn't start before (${cur.error || 'no details'})`);
-    if (cur.file && ofs.existsSync(path.join(BOOT.dir, cur.file))) { setUpdate({ state: 'ready', version: v, percent: 100, quick: true }); return 'ready'; }
+    if (cur.file && ofs.existsSync(path.join(BOOT.dir, cur.file))) {
+      whatsNewReady(v, path.join(BOOT.dir, cur.file, 'src'));
+      setUpdate({ state: 'ready', version: v, percent: 100, quick: true });
+      return 'ready';
+    }
   }
   const m = await fetchJson(releaseFile(v, 'app-bundle.json'));
   if (!m) {
@@ -350,9 +410,14 @@ async function quickUpdate(info) {
     BOOT.version = v;
     try { updater.currentVersion = new (require('semver').SemVer)(v); } catch { /* the next check may offer it again; harmless */ }
     for (const wb of windows.values()) wb.hotReload?.();
-    setUpdate({ state: 'current', version: v, quick: false, hot: true, latest: v, checkedAt: Date.now(), message: `Updated to v${v} without restarting` });
+    // no restart: say so in each window's notifications (with what changed), instead of a popup
+    const groups = unseenWhatsNew(readWhatsNew(PAGES));
+    markWhatsNewSeen(groups);
+    for (const wb of windows.values()) wb.noteUpdated?.(v, groups);
+    setUpdate({ state: 'current', version: v, quick: false, hot: true, latest: v, checkedAt: Date.now(), message: `Updated to v${v} without restarting`, notes: null });
     return 'hot';
   }
+  whatsNewReady(v, path.join(file, 'src'));
   setUpdate({ state: 'ready', version: v, percent: 100, quick: true });
   return 'ready';
 }
@@ -362,6 +427,8 @@ let closingOut = false;
 async function closeOutAll() {
   closingOut = true;
   await Promise.all([...windows.values()].map((wb) => wb.closeOut().catch(() => {})));
+  // write sign-ins to disk now (Chromium otherwise saves them every half minute or so)
+  await Promise.all([...windows.values()].map((wb) => session.fromPartition(wb.partition).cookies.flushStore().catch(() => {})));
 }
 
 // =====================================================================================
@@ -410,6 +477,41 @@ function prepareSession(id) {
   const ses = session.fromPartition(partitionFor(id));
   // Present as plain Chrome so the sites treat the app like your normal browser.
   ses.setUserAgent(ses.getUserAgent().replace(/\s(?:Electron|pts-workbench|PTS Workbench)\/\S+/gi, ''));
+  keepXtimeSignedIn(ses);
+}
+
+// ---------- staying signed in to Xtime between launches ----------
+// Xtime (Cox) keeps its sign-in in "session" cookies, which are thrown away when the app closes, so it asked
+// to sign in on every launch. While the app runs, each of those cookies is saved again with an end date, so
+// the next launch picks up where the last one left off. Xtime itself still decides how long a sign-in lasts:
+// when it ends one (signing out, or its own time limit), the cookie goes away like it would in a browser.
+// Only Cox/Xtime cookies, only in this window's own profile (each person's window has its own sign-in).
+const KEEP_HOSTS = /(^|\.)(coxautoinc\.com|xtime\.com)$/i;
+const KEEP_DAYS = 14; // pushed forward every time Xtime updates the cookie
+const keptSessions = new WeakSet();
+function keepXtimeSignedIn(ses) {
+  if (keptSessions.has(ses)) return;
+  keptSessions.add(ses);
+  const keep = async (c) => {
+    if (!c || c.session === false || c.expirationDate) return;         // already has an end date
+    const host = String(c.domain || '').replace(/^\./, '');
+    if (!host || !KEEP_HOSTS.test(host)) return;
+    const details = {
+      url: `${c.secure ? 'https' : 'http'}://${host}${c.path || '/'}`,
+      name: c.name, value: c.value, path: c.path || '/',
+      secure: !!c.secure, httpOnly: !!c.httpOnly,
+      expirationDate: Math.floor(Date.now() / 1000) + KEEP_DAYS * 24 * 60 * 60,
+    };
+    if (!c.hostOnly) details.domain = c.domain;                        // host-only cookies stay host-only
+    if (c.sameSite && c.sameSite !== 'unspecified') details.sameSite = c.sameSite;
+    try { await ses.cookies.set(details); } catch { /* left as a session cookie */ }
+  };
+  ses.cookies.on('changed', (_e, cookie, cause, removed) => {
+    if (removed || cause === 'expired' || cause === 'evicted') return;
+    keep(cookie);
+  });
+  // ones set before this ran (e.g. a second window of the same profile)
+  ses.cookies.get({}).then((all) => all.forEach(keep)).catch(() => {});
 }
 
 // =====================================================================================
@@ -515,7 +617,8 @@ function createWorkbench(profile) {
   const loggedChatFields = new Set();
   let loggedXtimeFields = false;
   let loggedLineFields = false;
-  let overlay = false;          // a dialog is open in the app UI; hide web views
+  let overlay = false;          // a dialog is open in the app UI; hide web views (a still picture of the page stays behind it)
+  let overlaySeq = 0;
   // ---------- hot updates: the app's own pages reloaded from new app files, without restarting ----------
   const staleViews = new Set(); // app pages still showing old files (the one you're looking at waits until you leave it)
   function reloadAppPage(v) {
@@ -860,7 +963,7 @@ function createWorkbench(profile) {
       logins: readLogins().map((l) => ({ host: l.host, username: l.username })), // never the passwords
       canSavePasswords: canEncrypt(),
       sync: { ...syncStatus, configured: !!SYNC_URL, enabled: !!settings.syncEnabled, isMain: true, choice: syncChoice },
-      app: { version: app.getVersion(), update: { ...update }, beta: IS_BETA, betaUpdates: !!updatePrefs.beta },
+      app: { version: app.getVersion(), update: { ...update }, beta: IS_BETA, betaUpdates: !!updatePrefs.beta, whatsNew },
       profile: { id: profile.id, name: profile.name, xtimeName, displayName: displayName() },
       profiles: profiles.map((p) => ({
         id: p.id, name: p.name, open: windows.has(p.id), current: p.id === profile.id,
@@ -1018,11 +1121,21 @@ function createWorkbench(profile) {
     wc.on('will-frame-navigate', (e) => {
       if (!isFordPdf(e.url)) return;
       e.preventDefault();
-      openFordPdf(ws, e.url, e.frame?.parent?.url || e.frame?.url || wc.getURL());
+      // The frame asking can already be gone (Ford's page swaps its PDF frame out after the first document):
+      // reading it then throws "Render frame was disposed", so the page's own address is used instead
+      let referrer = '';
+      try { referrer = e.frame?.parent?.url || e.frame?.url || ''; } catch { /* frame gone */ }
+      try { if (!referrer && !wc.isDestroyed()) referrer = wc.getURL(); } catch { /* page gone */ }
+      openFordPdf(ws, e.url, referrer).catch((err) => manualService.log(`PDF ${e.url.slice(0, 160)}: ${err.message || err}`));
     });
     // a link that opens the PDF in a new window
     wc.setWindowOpenHandler((details) => {
-      if (isFordPdf(details.url)) { openFordPdf(ws, details.url, wc.getURL()); return { action: 'deny' }; }
+      if (isFordPdf(details.url)) {
+        let referrer = '';
+        try { referrer = details.referrer?.url || (!wc.isDestroyed() ? wc.getURL() : ''); } catch { /* page gone */ }
+        openFordPdf(ws, details.url, referrer).catch((err) => manualService.log(`PDF ${details.url.slice(0, 160)}: ${err.message || err}`));
+        return { action: 'deny' };
+      }
       return windowOpenRule(details);
     });
   }
@@ -1111,7 +1224,7 @@ function createWorkbench(profile) {
   function ensureView(ws, tab) {
     if (tab.view || tab.kind === 'service') return; // Service Manual is only a row of tabs
     if (ws.asleep) { ws.asleep = false; setTimeout(pushState, 0); } // woken up by being looked at
-    if (tab.kind === 'manual') { tab.view = makeManualView(ws, tab); return; }
+    if (tab.kind === 'manual' || tab.kind === 'pced') { tab.view = makeManualView(ws, tab); return; } // PC/ED: the same viewer, Ford's PC/ED book
     if (tab.kind === 'oasisview') { tab.view = makeManualView(ws, tab, 'oasis/oasis.html'); return; }
     if (tab.kind === 'diag') { tab.view = makeManualView(ws, tab, 'diagnostics/diag.html'); return; }
     if (tab.kind === 'tsb') { tab.view = makeManualView(ws, tab, 'tsb/tsb.html'); return; }
@@ -1280,11 +1393,12 @@ function createWorkbench(profile) {
     if (!entry) return undefined;
     const { ws, tab } = entry;
     const fail = (e) => ({ error: true, needsLogin: !!e.needsLogin, message: e.message || String(e), detail: e.detail || '' });
+    const bookKind = tab.kind === 'pced' ? 'pced' : 'workshop'; // which of the vehicle's books this viewer shows
     switch (name) {
       case 'init': {
         const open = tab.pendingOpen || null; // a procedure sent here from the Diagnostics tab before this tab existed
         tab.pendingOpen = null;
-        return { vin: ws.vin, ro: ws.ro, ymm: ws.ymm, state: tab.manualState || null, open };
+        return { vin: ws.vin, ro: ws.ro, ymm: ws.ymm, state: tab.manualState || null, open, book: bookKind };
       }
       case 'diag': // Diagnostics tab: Ford's search for DTCs / words on this vehicle
         try {
@@ -1399,12 +1513,13 @@ function createWorkbench(profile) {
         saveWorkspaces(); layout(); pushState();
         return true;
       }
-      case 'open-proc': { // Diagnostics tab: show a procedure / pinpoint test in this vehicle's Workshop Manual tab
+      case 'open-proc': { // Diagnostics tab: show a procedure / pinpoint test in this vehicle's Workshop Manual (or PC/ED) tab
         const q = payload || {};
         const link = { searchNumber: String(q.searchNumber || ''), procUid: String(q.procUid || ''), linkType: 'Procedure',
           title: String(q.title || '').slice(0, 200), ppt: String(q.ppt || ''), section: 'Diagnostics' };
         if (!link.searchNumber && !link.procUid) return false;
-        const mt = ws.tabs.find((t) => t.kind === 'manual') || addTab(ws, 'manual', { activate: false });
+        const kind = q.book === 'pced' ? 'pced' : 'manual';
+        const mt = ws.tabs.find((t) => t.kind === kind) || (kind === 'pced' ? addPcedTab(ws) : addTab(ws, 'manual', { activate: false }));
         setActive(ws, mt); mode = 'manual';
         if (mt.view && !mt.view.webContents.isDestroyed() && !mt.view.webContents.isLoading()) mt.view.webContents.send('manual-open', link);
         else mt.pendingOpen = link;
@@ -1413,12 +1528,12 @@ function createWorkbench(profile) {
       }
       case 'book':
         try {
-          const b = await manualService.book(ws.vin);
-          return { title: b.title, vehicle: b.vehicle };
+          const b = await manualService.book(ws.vin, bookKind);
+          return { title: b.title, vehicle: b.vehicle, kind: b.kind };
         } catch (e) { return fail(e); }
       case 'tree':
         try {
-          const html = await manualService.tree(ws.vin);
+          const html = await manualService.tree(ws.vin, bookKind);
           return { html, features: await manualService.vehicleFeatures(ws.vin) }; // to show only what applies to this vehicle
         } catch (e) { return fail(e); }
       case 'proc':
@@ -1427,7 +1542,7 @@ function createWorkbench(profile) {
           return await manualService.proc(ws.vin, {
             searchNumber: String(link.searchNumber || ''), procUid: String(link.procUid || ''),
             linkType: link.linkType === 'PublicationContent' ? 'PublicationContent' : 'Procedure',
-          });
+          }, bookKind);
         } catch (e) { return fail(e); }
       case 'oasis':
         try { return await manualService.oasis(ws.vin); } catch (e) { return fail(e); }
@@ -1461,9 +1576,9 @@ function createWorkbench(profile) {
       }
       case 'copy': try { clipboard.writeText(String(payload || '').slice(0, 500)); } catch {} return true;
       case 'spa':
-        try { return await manualService.spaSteps(ws.vin, { file: String(payload?.file || ''), procUid: String(payload?.procUid || '') }); } catch (e) { return fail(e); }
+        try { return await manualService.spaSteps(ws.vin, { file: String(payload?.file || ''), procUid: String(payload?.procUid || '') }, bookKind); } catch (e) { return fail(e); }
       case 'report':
-        try { return { ok: await manualService.reportPinpoint(ws.vin, payload || {}) }; } catch (e) { return fail(e); }
+        try { return { ok: await manualService.reportPinpoint(ws.vin, payload || {}, bookKind) }; } catch (e) { return fail(e); }
       case 'signin': await signInToPts(); return true;
       case 'open-log': shell.openPath(profileFile(profile.id, 'manual.log')).catch(() => {}); return true;
       case 'log': manualService.log(`viewer: ${String(payload || '').slice(0, 500)}`); return true;
@@ -1554,6 +1669,27 @@ function createWorkbench(profile) {
       n.on('click', () => {
         if (note) { note.read = true; saveNotes(); }
         openNoteRo(ro);
+      });
+      n.show();
+    } catch { /* notifications are optional */ }
+  }
+  // An update that switched over without a restart: a notification (bell, and Windows' if they're on) saying it's done
+  // and that nothing was interrupted; clicking it shows what changed
+  function noteUpdated(version, groups) {
+    const items = (groups || []).flatMap((g) => g.items);
+    const body = items.length
+      ? `Nothing you were doing was interrupted. New: ${items.slice(0, 2).map((t) => t.replace(/\*\*|`/g, '').replace(/[.:].*$/, '')).join('; ')}${items.length > 2 ? ` and ${items.length - 2} more` : ''}.`
+      : 'Nothing you were doing was interrupted.';
+    const note = addNote({ title: `Updated to v${version}, no restart needed`, body, kind: 'update', version, whatsNew: groups?.length ? groups : null });
+    notice(`Updated to v${version} without restarting${items.length ? ' · see 🔔 for what\'s new' : ''}`);
+    if (!settings.notifications || !Notification.isSupported()) return;
+    try {
+      const n = new Notification({ title: note.title, body, silent: true });
+      n.on('click', () => {
+        note.read = true; saveNotes();
+        try { if (win.isMinimized()) win.restore(); win.show(); win.focus(); } catch {}
+        if (chrome && !chrome.webContents.isDestroyed()) chrome.webContents.send('show-whats-new', { reason: 'hot', version, groups: note.whatsNew || [] });
+        pushState();
       });
       n.show();
     } catch { /* notifications are optional */ }
@@ -1997,12 +2133,13 @@ function createWorkbench(profile) {
   // ---------- workspaces ----------
   // A vehicle's tabs: Xtime | PTS | Service Manual (+ any added). "Service Manual" holds its own tabs:
   // OASIS | Diagnostics | Workshop Manual | Labor Times (the app's own pages).
-  const SVC_KINDS = new Set(['oasisview', 'diag', 'tsb', 'manual', 'wiring', 'labor', 'article', 'doc']); // article: Ford's page for an FSA etc. · doc: one of its PDFs
+  const SVC_KINDS = new Set(['oasisview', 'diag', 'tsb', 'manual', 'pced', 'wiring', 'labor', 'article', 'doc']); // article: Ford's page for an FSA etc. · doc: one of its PDFs
   const SVC_DEFAULTS = ['oasisview', 'diag', 'tsb', 'manual', 'wiring', 'labor'];
   const inService = (kind) => SVC_KINDS.has(kind);
   // The Service Manual's main tabs (OASIS, Diagnostics, TSBs, Workshop Manual, Wiring Diagrams, Labor Times) can't be
   // closed (nor Service Manual itself, which would close them); extra ones (a second Workshop Manual, an FSA, a TSB…) can
-  const isFixedTab = (ws, t) => t.kind === 'service' || (SVC_DEFAULTS.includes(t.kind) && ws.tabs.find((x) => x.kind === t.kind) === t);
+  // PC/ED (only for vehicles that have one) counts as a main tab too once it's there
+  const isFixedTab = (ws, t) => t.kind === 'service' || ([...SVC_DEFAULTS, 'pced'].includes(t.kind) && ws.tabs.find((x) => x.kind === t.kind) === t);
   const serviceTab = (ws) => ws.tabs.find((t) => t.kind === 'service') || null;
   // The vehicle's chosen tab in the top row
   function topTab(ws) {
@@ -2060,7 +2197,7 @@ function createWorkbench(profile) {
     if (was) setActive(ws, was); else ws.activeTab = topTab(ws)?.id ?? null;
   }
 
-  const TAB_NAMES = { xview: 'Xtime View', tsb: 'TSBs', article: 'Article', doc: 'Document', service: 'Service Manual', labor: 'Labor Times', diag: 'Diagnostics', xtime: 'Xtime', oasisview: 'OASIS', manual: 'Workshop Manual', wiring: 'Wiring Diagrams', pts: 'PTS', ota: 'OTA Updates', cvd: 'Connected Data', prodemand: 'ProDemand', oasis: 'OASIS' };
+  const TAB_NAMES = { xview: 'Xtime View', tsb: 'TSBs', article: 'Article', doc: 'Document', service: 'Service Manual', labor: 'Labor Times', diag: 'Diagnostics', xtime: 'Xtime', oasisview: 'OASIS', manual: 'Workshop Manual', pced: 'PC/ED', wiring: 'Wiring Diagrams', pts: 'PTS', ota: 'OTA Updates', cvd: 'Connected Data', prodemand: 'ProDemand', oasis: 'OASIS' };
   function addTab(ws, kind, { activate = true, front = false } = {}) {
     const n = ws.tabs.filter((t) => t.kind === kind).length;
     const base = TAB_NAMES[kind] || 'Manual';
@@ -2069,6 +2206,27 @@ function createWorkbench(profile) {
     if (inService(kind)) ensureService(ws);
     if (activate) setActive(ws, tab);
     return tab;
+  }
+
+  // PC/ED tab: only for vehicles that have a PC/ED manual (mostly older ones), right after Workshop Manual
+  function addPcedTab(ws) {
+    const t = addTab(ws, 'pced', { activate: false });
+    ws.tabs.splice(ws.tabs.indexOf(t), 1);
+    const man = ws.tabs.findIndex((x) => x.kind === 'manual');
+    const after = man >= 0 ? man : ws.tabs.map((x) => inService(x.kind)).lastIndexOf(true);
+    ws.tabs.splice(after + 1, 0, t);
+    return t;
+  }
+  async function checkPced(ws) {
+    if (ws.tabs.some((t) => t.kind === 'pced') || !serviceTab(ws) || ws.pcedChecked === ws.vin) return;
+    try {
+      const has = await manualService.hasPced(ws.vin);
+      ws.pcedChecked = ws.vin;
+      if (!has || workspaces.get(ws.ro) !== ws || ws.tabs.some((t) => t.kind === 'pced')) return;
+      addPcedTab(ws);
+      manualService.log(`RO ${ws.ro}: has a PC/ED manual, tab added`);
+      saveWorkspaces(); layout(); pushState();
+    } catch { /* checked again next time it's opened */ }
   }
 
   // quiet: opened by sync from another computer, so don't switch what you're looking at
@@ -2133,6 +2291,7 @@ function createWorkbench(profile) {
       manualService.log(`ahead RO ${ws.ro}: starting${loaded.size ? ` (already open: ${[...loaded].join(', ')})` : ''}`);
       ws.fetching = 'loading'; pushState();
       try { await manualService.prefetch(ws.vin, { pacode, skip: loaded }); } catch (e) { manualService.log(`ahead RO ${ws.ro} failed: ${e.message || e}`); }
+      await checkPced(ws);
       ws.fetching = prefetchQueue.includes(ws) ? 'queued' : ''; pushState();
     }
     prefetchBusy = false;
@@ -2152,10 +2311,10 @@ function createWorkbench(profile) {
       ws.vin = vin; // VIN corrected in Xtime: re-enter it in open manual tabs
       for (const t of ws.tabs) if (FORD_LINKS[t.kind] && t.view) reopenFordTab(ws, t);
       for (const t of ws.tabs) {
-        if (t.kind === 'manual') t.manualState = null; // the open procedures were for the old VIN
+        if (t.kind === 'manual' || t.kind === 'pced') t.manualState = null; // the open procedures were for the old VIN
         if (t.kind === 'diag') t.manualState = null;
         if (t.kind === 'tsb') t.manualState = null;
-        if ((t.kind === 'manual' || t.kind === 'wiring' || t.kind === 'oasisview' || t.kind === 'diag' || t.kind === 'tsb') && t.view) destroyTab(t); // reopen for the right vehicle
+        if ((t.kind === 'manual' || t.kind === 'pced' || t.kind === 'wiring' || t.kind === 'oasisview' || t.kind === 'diag' || t.kind === 'tsb') && t.view) destroyTab(t); // reopen for the right vehicle
       }
     }
     else if (!quiet) prefetchVehicle(ws); // already open: fetch what its tabs haven't loaded yet
@@ -2336,7 +2495,25 @@ function createWorkbench(profile) {
       layout(); pushState();
     },
     'toggle-drawer': () => { drawerOpen = !drawerOpen; layout(); pushState(); },
-    'set-overlay': (on) => { overlay = !!on; layout(); },
+    // A dialog opens / closes in the app's screen. The live page can't sit under it (it would cover the dialog), so a
+    // picture of it is put in its place first — the dialog then dims it instead of the page going black.
+    'set-overlay': async (on) => {
+      const seq = ++overlaySeq;
+      if (on && !overlay && visibleView && !visibleView.webContents.isDestroyed()) {
+        try {
+          const b = visibleView.getBounds();
+          const img = await visibleView.webContents.capturePage();
+          if (seq !== overlaySeq) return; // closed again meanwhile
+          if (!img.isEmpty() && chrome && !chrome.webContents.isDestroyed()) {
+            chrome.webContents.send('overlay-shot', { url: `data:image/jpeg;base64,${img.toJPEG(85).toString('base64')}`, x: b.x, y: b.y, width: b.width, height: b.height });
+          }
+        } catch { /* no picture: the area is just empty */ }
+      }
+      if (seq !== overlaySeq) return;
+      overlay = !!on;
+      if (!overlay && chrome && !chrome.webContents.isDestroyed()) chrome.webContents.send('overlay-shot', null);
+      layout();
+    },
     // ↻: refresh the list; if Xtime has been failing, start the Xtime page fresh instead
     'refresh-ros': () => {
       if (xtimeFailures > 0 || (!findXtimeDataFrame() && !onLoginPage())) { reloadXtime('Reloading Xtime…'); startLite(); }
@@ -2547,7 +2724,15 @@ function createWorkbench(profile) {
       const n = notes.find((x) => x.id === id);
       if (!n) return;
       n.read = true; saveNotes();
+      if (n.kind === 'update') { pushState(); return; } // the window shows its What's new itself
       openNoteRo(n.ro);
+    },
+    // What's new closed: 'installed' ones count as shown; a ready update's ('Later') shows again after the restart
+    'whats-new-done': ({ id } = {}) => {
+      if (!whatsNew || whatsNew.id !== id) return;
+      if (whatsNew.reason === 'installed') markWhatsNewSeen(whatsNew.groups);
+      whatsNew = null;
+      pushAll();
     },
     'note-remove': ({ id } = {}) => { notes = notes.filter((x) => x.id !== id); saveNotes(); pushState(); },
     // Tabs dragged into a new order, one row at a time (the top row, or the Service Manual's row):
@@ -2743,7 +2928,7 @@ function createWorkbench(profile) {
     manualCall, manualSave,
     // Ctrl+B pressed inside one of this window's pages: show or hide the Workbench sidebar
     findKey,
-    hotReload,
+    hotReload, noteUpdated,
     findClose: (wc) => { if (!findWc || findWc !== wc) return false; closeFind(); return true; },
     sidebarKey: (wc) => {
       if (!allContentViews().some((v) => v.webContents === wc) || mode !== 'manual') return false;
@@ -2885,6 +3070,7 @@ if (!app.requestSingleInstanceLock()) {
     profiles = Array.isArray(saved?.profiles) && saved.profiles.length ? saved.profiles : [{ id: 'main', name: 'Main' }];
     if (!profiles.some((p) => p.id === 'main')) profiles.unshift({ id: 'main', name: 'Main' });
 
+    initWhatsNew();
     initUpdater();
 
     // Reopen the windows that were open last time (at least the main one)

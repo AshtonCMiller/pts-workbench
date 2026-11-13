@@ -73,6 +73,15 @@
   </div>
   <div id="w-pop" class="w-pop" hidden></div>
   <div id="o-toast" class="o-toast" hidden></div>
+  <!-- in this order: shared helpers first, wiring.js last (it starts the page). common.js says what each file does. -->
+  <script src="common.js"></script>
+  <script src="contents.js"></script>
+  <script src="search.js"></script>
+  <script src="page.js"></script>
+  <script src="drawing.js"></script>
+  <script src="zoom.js"></script>
+  <script src="find.js"></script>
+  <script src="links.js"></script>
   <script src="wiring.js"></script>
 </body>
 </html>
