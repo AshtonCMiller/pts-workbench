@@ -282,22 +282,28 @@ function onlyPagesChanged(from, to) {
   return { hot: !cold.length, why: cold.length ? `needs a restart for ${cold.slice(0, 8).join(', ')}${cold.length > 8 ? ` (+${cold.length - 8} more)` : ''}`
     : `pages only: ${changed.slice(0, 8).join(', ') || 'nothing changed'}` };
 }
+const missingBundle = new Map(); // version → checks that found no app files yet
 async function quickUpdate(info) {
-  if (!BOOT || !PUBLISH.owner || !PUBLISH.repo) return 'full';
+  const why = (t) => { updater.logger.info(`v${info.version}: installer needed — ${t}`); return 'full'; };
+  if (!BOOT) return why('this copy was started without boot.js (installed before quick updates)');
+  if (!PUBLISH.owner || !PUBLISH.repo) return why("couldn't tell which GitHub repository the releases are in");
   const v = info.version;
   // already downloaded (waiting for a restart), or those files didn't start last time
   const cur = BOOT.readCur();
   if (cur?.version === v && cur.shell === BOOT.shell) {
-    if (cur.bad) return 'full';
+    if (cur.bad) return why(`its app files didn't start before (${cur.error || 'no details'})`);
     if (cur.file && ofs.existsSync(path.join(BOOT.dir, cur.file))) { setUpdate({ state: 'ready', version: v, percent: 100, quick: true }); return 'ready'; }
   }
   const m = await fetchJson(releaseFile(v, 'app-bundle.json'));
   if (!m) {
-    // a release from before quick updates, or one still uploading: wait a while before falling back to the installer
-    const age = Date.now() - Date.parse(info.releaseDate || 0);
-    return Number.isFinite(age) && age < 3 * 60 * 60 * 1000 ? 'later' : 'full';
+    // still uploading, or a release made before quick updates: keep checking for a while (6 checks ≈ 3 hours)
+    // before falling back to the installer
+    const n = (missingBundle.get(v) || 0) + 1;
+    missingBundle.set(v, n);
+    updater.logger.info(`v${v}: no app files (app-bundle.json) on its release yet — check ${n} of 6`);
+    return n < 6 ? 'later' : why('its release has no app files');
   }
-  if (Number(m.shell) !== BOOT.shell) return 'full'; // a new Electron: needs the installer
+  if (Number(m.shell) !== BOOT.shell) return why(`it needs shell ${m.shell} (this install is shell ${BOOT.shell}: a new Electron)`);
   // download, checking the size and checksum
   const res = await net.fetch(releaseFile(v, m.file || 'app-bundle.asar'), { cache: 'no-store' });
   if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
