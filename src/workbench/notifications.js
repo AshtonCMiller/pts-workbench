@@ -144,6 +144,7 @@ module.exports = function install(my) {
       try {
         const r = await (my.chatConfig ? frame : my.findInspectFrame()).executeJavaScript(`${S.XTIME_CHAT}({"type":"count"}, ${my.chatCfgArg()})`, true);
         if (r?.config) my.keepChatConfig(r.config);
+        my.chatSignin(r); // Xtime's sign-in too old: sign in again
         if (r?.ok && Number.isFinite(r.count)) n = r.count;
       } catch {}
     }
@@ -154,7 +155,7 @@ module.exports = function install(my) {
     }
     if (n == null) return;
     if (my.msgCount != null && n > my.msgCount) notifyUser('New Xtime message', n - my.msgCount === 1 ? `1 new message · ${n} unread` : `${n - my.msgCount} new messages · ${n} unread`, null, 'message');
-    if (n !== my.msgCount) { my.msgCount = n; my.pushState(); }
+    if (n !== my.msgCount) { my.msgCount = n; my.pushState(); my.chatBackground(); } // something changed: read the conversations
   }
   const msgTimer = setInterval(readMsgCount, 20000);
   my.msgTimer = msgTimer;

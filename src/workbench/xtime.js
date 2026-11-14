@@ -6,9 +6,36 @@ const fs = require('fs');
 const S = require('../app/state'); // shared app state (see app/state.js)
 const { pushAll } = S;
 const { userFile } = require('../app/files');
+const { forgetXtimeSignin } = require('../app/web');
 
 module.exports = function install(my) {
-  Object.assign(my, { liteReady, startLite, keepChatConfig, unparkXtime, parkCheck, pollXtime, reloadXtime, viewingROFromXtime, lookupRO, startPolling }); // used by the window's other parts
+  Object.assign(my, { liteReady, startLite, keepChatConfig, unparkXtime, parkCheck, pollXtime, reloadXtime, viewingROFromXtime, lookupRO, startPolling, chatSignin }); // used by the window's other parts
+
+  // ---------- Xtime's sign-in too old (its chat stops first) ----------
+  // Xtime stays signed in between launches (app/web.js). When that sign-in has got too old, Xtime still shows ROs but
+  // its chat stops, the same as on Xtime's website. Then the kept sign-in is thrown away and Xtime's page reloaded, so
+  // it asks to sign in again (the app's sign-in form, or straight through with a saved password). Once per sign-in:
+  // First the kept sign-in only (what closing the app used to throw away). If chat still says so once Xtime has
+  // reloaded without asking to sign in, every Cox / Xtime cookie goes (a fully fresh sign-in). After that it isn't
+  // repeated until chat has worked, so a chat problem that isn't the sign-in can't keep signing you out.
+  let chatSigninStep = 0;   // 0: nothing done yet, 1: kept sign-in thrown away, 2: everything thrown away, 3: Xtime asked to sign in
+  let chatSigninAt = 0;
+  const xlog = (line) => { try { fs.appendFileSync(userFile('xtime.log'), `${new Date().toISOString()} ${line}\n`); } catch {} };
+  function chatSignin(r) {
+    if (r?.ok) { if (chatSigninStep) xlog('chat works again'); chatSigninStep = 0; return; }
+    if (!r?.signedOut || my.xtimeSignin || chatSigninStep >= 2) return;
+    if (chatSigninStep === 1 && Date.now() - chatSigninAt < 60 * 1000) return; // give Xtime's page a minute after reloading
+    chatSigninStep++;
+    chatSigninAt = Date.now();
+    const all = chatSigninStep === 2;
+    xlog(`chat says Xtime's sign-in is too old (${r.error || ''}): ${all ? 'still, after reloading: throwing away every Cox / Xtime cookie' : 'throwing away the kept sign-in'}`);
+    forgetXtimeSignin(my.profile.id, { all }).catch(() => []).then((gone) => {
+      xlog(`removed ${gone.length} cookies (${gone.join(', ') || 'none'}); reloading Xtime`);
+      reloadXtime('Xtime sign-in is too old: signing in again…');
+    });
+  }
+  // Xtime asking to sign in (the app's form showing) means it worked: nothing more until chat works again
+  setInterval(() => { if (my.xtimeSignin && chatSigninStep && chatSigninStep < 3) { xlog('Xtime asked to sign in'); chatSigninStep = 3; } }, 3000);
 
   // ---------- the small background page ----------
   // A blank-ish page on Xtime's Inspect site (its robots.txt). It shares the window's Xtime login, so the

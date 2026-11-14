@@ -21,7 +21,7 @@ module.exports = function install(my) {
     }
     my.chrome.webContents.send('state', {
       feedback: { on: !!SYNC_URL, admin: my.isFeedbackAdmin(), newCount: my.feedbackNew },
-      mode: my.mode, drawerOpen: my.drawerOpen, chatOpen: my.chatOpen, settings: my.settings, xtimeStatus: my.xtimeStatus, lastPoll: my.lastPoll, activeRO: my.activeRO, xtimeSignin: my.xtimeSignin, msgCount: my.msgCount, notes: my.notes,
+      mode: my.mode, drawerOpen: my.drawerOpen, chatOpen: my.chatOpen, settings: my.settings, xtimeStatus: my.xtimeStatus, lastPoll: my.lastPoll, activeRO: my.activeRO, xtimeSignin: my.xtimeSignin, msgCount: my.msgCount, chatUnread: my.chatUnread, notes: my.notes,
       myROs: my.myROs, roInfo,
       tracking: my.tracker?.summary() ?? null,
       period: my.tracker?.period(my.periodOffset) ?? null,

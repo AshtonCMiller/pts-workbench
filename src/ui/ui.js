@@ -237,8 +237,9 @@ api.onChat?.((d) => {
   if (d.kind === 'open') { openChat(d.ro || null); return; } // from the Xtime View tab
   if (d.kind === 'list') {
     chat.listLoading = false;
-    if (d.ok) { chat.list = d.conversations || []; chat.listError = ''; } else chat.listError = d.error;
-    if (chat.channel) chatAskHistory(chat.channel);
+    if (d.ok) { chat.list = d.conversations || []; chat.listError = ''; } else if (!d.background || !chat.list) chat.listError = d.error;
+    // the open conversation catches up too (only while you're looking at it: opening one marks it read)
+    if (chat.channel && (!d.background || state?.chatOpen)) chatAskHistory(chat.channel);
   } else if (d.kind === 'history') {
     chat.hist.set(d.channelId, d.ok ? { messages: d.messages || [] } : { error: d.error, messages: chat.hist.get(d.channelId)?.messages });
   } else if (d.kind === 'read') {
@@ -1164,8 +1165,11 @@ function render() {
   body.classList.toggle('drawer-closed', !s.drawerOpen);
   body.classList.toggle('dash', !!s.settings.xtimeDashboard);
   // counters: unread Xtime messages on Chat, unread notifications on the bell
-  $('chat-count').hidden = !(s.msgCount > 0);
-  $('chat-count').textContent = s.msgCount > 99 ? '99+' : String(s.msgCount || 0);
+  // Chat: unread messages in your conversations (read in the background), or Xtime's own count until those are in
+  const unreadChat = s.chatUnread ?? s.msgCount;
+  $('chat-count').hidden = !(unreadChat > 0);
+  $('chat-count').textContent = unreadChat > 99 ? '99+' : String(unreadChat || 0);
+  $('btn-chat').title = unreadChat > 0 ? `Xtime dealership chat: ${unreadChat} unread` : 'Xtime dealership chat';
   renderNotes(s);
   if (s.chatOpen && s.msgCount !== lastMsgCount && Date.now() - chat.lastAsk > 3000) chatAskList();
   lastMsgCount = s.msgCount;

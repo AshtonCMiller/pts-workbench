@@ -88,6 +88,7 @@ module.exports = function install(my) {
       clearInterval(my.pollTimer);
       clearInterval(my.signinTimer);
       clearInterval(my.msgTimer);
+      clearInterval(my.chatTimer);
       clearInterval(my.watchTimer);
       clearInterval(my.heartbeatTimer);
       if (!S.closingOut) my.closeOut().finally(() => my.sync.stop()); // closing just this window

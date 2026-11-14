@@ -34,7 +34,7 @@ module.exports = function install(my) {
     // Messages are shown and forgotten: never saved to a file, never synced, nothing is sent or marked read.
     'chat-toggle': ({ open } = {}) => { my.chatOpen = open == null ? !my.chatOpen : !!open; my.layout(); my.pushState(); },
     // your messages from the last 2 weeks, plus everything (about 4 months back) on ROs assigned to you
-    'chat-list': async () => my.chatRun({ type: 'list', days: 14, roDays: 120, ros: [...new Set([...my.myROs.map((r) => r.ro), ...my.workspaces.keys()])] }, 'list'),
+    'chat-list': async () => my.chatRun(my.chatListAction(), 'list'),
     'chat-history': async ({ channelId } = {}) => { if (channelId) my.chatRun({ type: 'history', channelId: String(channelId) }, 'history'); },
     'chat-roster': async () => my.chatRun({ type: 'roster' }, 'roster'),
     // Sends only what you typed, only when you press Send, to a conversation that already exists

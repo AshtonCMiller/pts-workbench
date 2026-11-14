@@ -61,22 +61,28 @@
       return !p.exp || p.exp * 1000 < Date.now() + 60000;
     } catch { return false; }
   };
+  // signedOut: Xtime's sign-in itself is too old (its login service won't give a chat token, or the chat turns the
+  // token down). Xtime's own page shows the same thing: chat is the first to stop. The app then signs in again.
+  let signedOut = false;
   const readToken = () => { try { const t = JSON.parse(sessionStorage.getItem('xsToken') || 'null'); return t && t.accessToken && !expired(t) ? t : null; } catch { return null; } };
   const newToken = async () => {
     try {
       const res = await fetch(`https://login${envPart}.xtime.app.coxautoinc.com/rest/login/jwt/xsession`, {
         method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: 'null',
       });
-      if (!res.ok) return null;
-      const j = await res.json();
+      if (!res.ok) { if (res.status === 401 || res.status === 403) signedOut = true; return null; }
+      if (/signin\.coxautoinc\.com|\/login(\b|\/|\?)/i.test(res.url || '') && !/\/rest\/login\//i.test(res.url || '')) { signedOut = true; return null; } // sent to sign in
+      let j = null;
+      try { j = await res.json(); } catch { signedOut = true; return null; } // a sign-in page instead of a token
       const t = (j && j.data && j.data.accessToken ? j.data : j && j.content && j.content.data) || (j && j.accessToken ? j : null);
-      if (!t || !t.accessToken) return null;
+      if (!t || !t.accessToken) { signedOut = true; return null; }
       try { sessionStorage.setItem('xsToken', JSON.stringify(t)); } catch {}
       return t;
     } catch { return null; }
   };
   let token = readToken() || await newToken();
-  if (!token) return { ok: false, needPage: true, error: "Couldn't get Xtime's chat sign-in (open Xtime's page once)" };
+  if (!token) return signedOut ? { ok: false, signedOut: true, error: "Xtime's sign-in is too old for chat: signing in again" }
+    : { ok: false, needPage: true, error: "Couldn't get Xtime's chat sign-in (open Xtime's page once)" };
 
   const post = async (path, query, body, retried) => {
     let res;
@@ -92,7 +98,7 @@
       token = await newToken();
       if (token) return post(path, query, body, true);
     }
-    if (res.status === 401) return { ok: false, needPage: true, error: "Xtime's chat sign-in ran out (open Xtime's page once)" };
+    if (res.status === 401) return { ok: false, signedOut: true, error: "Xtime's sign-in is too old for chat: signing in again" };
     if (!res.ok) return { ok: false, error: `Chat returned HTTP ${res.status}` };
     try { return { ok: true, data: await res.json() }; } catch { return { ok: false, error: "Chat didn't send readable data" }; }
   };
@@ -205,6 +211,7 @@
   const get = async (path, query) => {
     try {
       const res = await fetch(base + path + query, { headers: { Authorization: `Bearer ${token.accessToken}`, Accept: 'application/json' } });
+      if (res.status === 401) return { ok: false, signedOut: true, error: "Xtime's sign-in is too old for chat: signing in again" };
       if (!res.ok) return { ok: false, error: `Chat returned HTTP ${res.status}` };
       return { ok: true, data: await res.json() };
     } catch (e) { return { ok: false, error: `Chat request failed: ${e.message}` }; }
@@ -330,7 +337,7 @@
           }
           if (name === 'challenge' && mech) { ws.send(`<response xmlns="urn:ietf:params:xml:ns:xmpp-sasl">${await mech.next(el.textContent.trim())}</response>`); return; }
           if (name === 'success') { step = 'restart'; openStream(); return; }
-          if (name === 'failure') { clearTimeout(timer); return finish({ ok: false, error: 'Xtime’s chat server refused the sign-in' }); }
+          if (name === 'failure') { clearTimeout(timer); return finish({ ok: false, signedOut: true, error: 'Xtime’s chat server refused the sign-in' }); }
           if (name === 'iq' && el.getAttribute('id') === 'bind1') {
             if (el.getAttribute('type') !== 'result') { clearTimeout(timer); return finish({ ok: false, error: 'Xtime’s chat server refused the connection' }); }
             step = 'sent';
