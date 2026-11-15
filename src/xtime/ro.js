@@ -1,17 +1,21 @@
-// Runs inside the Xtime Inspect frame, with your existing login.
+// Asks Xtime (the Inspect site) directly, with your existing login, with your existing login.
 //   { type: 'get' }                  → one RO's lines (GET /api/Stores/{store}/RepairOrder/{RO}) (approval, done, labor type, hours, labor/parts price, who added it)
 //   { type: 'done', id, value }      → marks a line done / not done, exactly like Xtime's "Done" button
 // Uses the same addresses as Xtime's RO page. Customer information is not returned.
-(async (STORE, RO, ACTION) => {
+// Called from the main process with an Xtime client (src/xtime/client.js): x.fetch is the web request with your
+// Xtime login, x.xsrf() Xtime's anti-forgery token, x.mem what's remembered between calls (per window).
+'use strict';
+
+module.exports = async function ro(x, STORE, RO, ACTION) {
   const base = `/api/Stores/${encodeURIComponent(STORE)}/RepairOrders/${encodeURIComponent(RO)}`;
   // Xtime's page (AngularJS) sends this header on every change when the cookie exists
-  const xsrf = (document.cookie.match(/(?:^|;\s*)XSRF-TOKEN=([^;]*)/) || [])[1];
+  const xsrf = await x.xsrf();
   const headers = { Accept: 'application/json, text/plain, */*', 'Content-Type': 'application/json;charset=UTF-8' };
-  if (xsrf) headers['X-XSRF-TOKEN'] = decodeURIComponent(xsrf);
+  if (xsrf) headers['X-XSRF-TOKEN'] = xsrf;
   const call = async (method, url, body) => {
     let res;
     try {
-      res = await fetch(url, { method, credentials: 'include', headers, body: body === undefined ? undefined : JSON.stringify(body) });
+      res = await x.fetch(url, { method, credentials: 'include', headers, body: body === undefined ? undefined : JSON.stringify(body) });
     } catch (e) { return { ok: false, error: `Xtime request failed: ${e.message}` }; }
     if (res.status === 401 || res.status === 403) return { ok: false, expired: true, error: 'Xtime session expired' };
     const type = res.headers.get('content-type') || '';
@@ -64,14 +68,14 @@
       pickedUp: !!day(p.PickedUpDate || p.PartsPickedUpDate),
     });
     // the store's staff (number → name), as Xtime's RO page has them: for the parts employee (the RO only has the number)
-    let staff = window.__ptsEmployees || (Array.isArray(window.Employees) ? window.Employees : null);
+    let staff = x.mem.employees || (Array.isArray(x.mem.pageEmployees) ? x.mem.pageEmployees : null);
     if (!Array.isArray(staff)) {
       try {
-        const res = await fetch(`/JS/Employees?storeID=${encodeURIComponent(STORE)}`, { credentials: 'include' });
+        const res = await x.fetch(`/JS/Employees?storeID=${encodeURIComponent(STORE)}`, { credentials: 'include' });
         const t = res.ok ? await res.text() : '';
         const a = t.indexOf('['), b = t.lastIndexOf(']');
         if (a >= 0 && b > a) staff = JSON.parse(t.slice(a, b + 1));
-        if (Array.isArray(staff)) window.__ptsEmployees = staff;
+        if (Array.isArray(staff)) x.mem.employees = staff;
       } catch { /* the number only, then */ }
     }
     const byNumber = (n) => {
@@ -149,4 +153,4 @@
   const first = raw[0] || {};
   const fieldNames = Object.keys(first).map((k) => (first[k] && typeof first[k] === 'object' && !Array.isArray(first[k])) ? `${k}{${Object.keys(first[k]).join(',')}}` : k);
   return { ok: true, lines, fieldNames };
-})
+};

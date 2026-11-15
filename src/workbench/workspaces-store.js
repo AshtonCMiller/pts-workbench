@@ -68,12 +68,9 @@ module.exports = function install(my) {
     let vin = my.tracker.data.ros?.[ro]?.vin || mine?.vin || '';
     if (!ymm && mine) ymm = [mine.year, mine.make, mine.model].filter(Boolean).join(' ');
     if (!vin) {
-      const frame = my.findXtimeDataFrame();
-      if (!frame) return; // waits for Xtime
       syncOpening.add(ro);
       try {
-        const res = await frame.executeJavaScript(
-          `${S.XTIME_VEHICLE}(${JSON.stringify(ro)}, ${JSON.stringify(my.settings.xtimeApiPath)}, ${JSON.stringify(my.settings.xtimeDetailsPath)})`, true);
+        const res = await my.xtime.run('vehicle', ro, my.settings.xtimeApiPath, my.settings.xtimeDetailsPath);
         if (res?.ok && res.vin) { vin = res.vin; ymm = ymm || res.ymm || ''; }
       } catch { /* tried again after the next Xtime refresh */ } finally { syncOpening.delete(ro); }
     }

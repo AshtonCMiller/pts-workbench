@@ -48,10 +48,8 @@ module.exports = function install(my) {
     'ro-lines': async ({ ro } = {}) => {
       ro = String(ro || '');
       const reply = (r) => { if (my.chrome && !my.chrome.webContents.isDestroyed()) my.chrome.webContents.send('ro-lines', { ro, ...r }); };
-      const frame = my.findXtimeDataFrame();
-      if (!frame) return reply({ ok: false, error: 'Xtime is still loading' });
       try {
-        const r = await frame.executeJavaScript(`${S.XTIME_RO}(${JSON.stringify(my.settings.storeId)}, ${JSON.stringify(ro)}, {"type":"get"})`, true);
+        const r = await my.xtime.run('ro', my.settings.storeId, ro, { type: 'get' });
         if (r?.fieldNames && !my.loggedLineFields) {
           my.loggedLineFields = true;
           try { fs.writeFileSync(userFile('xtime-line-fields.txt'), `${new Date().toISOString()}\n${r.fieldNames.join('\n')}\n`); } catch {}
@@ -60,11 +58,9 @@ module.exports = function install(my) {
       } catch (e) { reply({ ok: false, error: e.message || String(e) }); }
     },
     'ro-line-done': async ({ ro, id, value } = {}) => {
-      const frame = my.findXtimeDataFrame();
-      if (!frame || id == null) return;
+      if (id == null) return;
       try {
-        const r = await frame.executeJavaScript(
-          `${S.XTIME_RO}(${JSON.stringify(my.settings.storeId)}, ${JSON.stringify(String(ro))}, ${JSON.stringify({ type: 'done', id, value: !!value })})`, true);
+        const r = await my.xtime.run('ro', my.settings.storeId, String(ro), { type: 'done', id, value: !!value });
         if (!r?.ok) my.notice(`Couldn't update the line in Xtime: ${r?.error || 'error'}`);
       } catch (e) { my.notice(`Couldn't update the line in Xtime: ${e.message || e}`); }
       handlers['ro-lines']({ ro });
@@ -166,29 +162,21 @@ module.exports = function install(my) {
       if (vin) { my.addLookup = null; my.openWorkspace({ ro, vin, ymm }); return; }
       const known = my.myROs.find((r) => r.ro === ro) || (my.workspaces.get(ro) && { vin: my.workspaces.get(ro).vin, ymm: my.workspaces.get(ro).ymm });
       if (known?.vin) { my.addLookup = null; my.openWorkspace({ ro, vin: known.vin, ymm: ymm || known.ymm || [known.year, known.make, known.model].filter(Boolean).join(' ') }); return; }
-      const frame = my.findXtimeDataFrame();
-      if (!frame) {
-        my.addLookup = { ro, status: 'error', message: "Xtime isn't logged in, so the VIN can't be looked up. Log in to Xtime or type the VIN." };
-        my.pushState(); return;
-      }
       my.addLookup = { ro, status: 'loading', message: `Looking up RO ${ro} in Xtime…` };
       my.pushState();
-      let res = null;
-      try {
-        res = await frame.executeJavaScript(
-          `${S.XTIME_VEHICLE}(${JSON.stringify(ro)}, ${JSON.stringify(my.settings.xtimeApiPath)}, ${JSON.stringify(my.settings.xtimeDetailsPath)})`, true);
-      } catch { res = null; }
+      const res = await my.xtime.run('vehicle', ro, my.settings.xtimeApiPath, my.settings.xtimeDetailsPath);
       if (my.addLookup?.ro !== ro) return; // dialog closed or another RO asked for meanwhile
       if (!res?.ok) {
-        my.addLookup = { ro, status: 'error', message: `${res?.error || "Couldn't reach Xtime"}. Type the VIN to open it anyway.` };
+        const signedOut = res?.expired || /session expired/i.test(res?.error || '');
+        my.addLookup = { ro, status: 'error', message: signedOut ? "Xtime isn't logged in, so the VIN can't be looked up. Log in to Xtime or type the VIN."
+          : `${res?.error || "Couldn't reach Xtime"}. Type the VIN to open it anyway.` };
         my.pushState(); return;
       }
       my.addLookup = null;
       my.openWorkspace({ ro, vin: res.vin, ymm: ymm || res.ymm });
       // and load its lines straight away
       try {
-        const d = await frame.executeJavaScript(
-          `${S.XTIME_DETAILS}(${JSON.stringify(ro)}, ${JSON.stringify(my.settings.xtimeDetailsPath)}, ${JSON.stringify(my.settings.xtimeApiPath)})`, true);
+        const d = await my.xtime.run('details', ro, my.settings.xtimeDetailsPath, my.settings.xtimeApiPath);
         if (d?.ok) { my.tracker.updateLines(ro, d.lines, ymm || res.ymm); pushAll(); }
       } catch { /* the next refresh will try again */ }
     },
@@ -268,7 +256,7 @@ module.exports = function install(my) {
       // "+ Manual" while looking at a PTS tab copies that tab: same vehicle, same page, same scroll.
       const src = my.currentTab(ws);
       let snapshot = null;
-      const KINDS = ['service', 'labor', 'diag', 'tsb', 'oasisview', 'manual', 'wiring', 'pts', 'ota', 'cvd', 'prodemand', 'oasis', 'xtime', 'xview'];
+      const KINDS = ['service', 'labor', 'diag', 'tsb', 'oasisview', 'cvview', 'manual', 'wiring', 'pts', 'ota', 'cvd', 'prodemand', 'oasis', 'xtime', 'xview'];
       kind = KINDS.includes(kind) ? kind : 'pts';
       if (kind === 'pts' && src?.kind === 'pts' && src.view && !src.view.webContents.isDestroyed()) {
         try { snapshot = await snapshotFrames(src.view.webContents); } catch { snapshot = null; }
@@ -395,6 +383,7 @@ module.exports = function install(my) {
       const storeChanged = clean.storeId !== undefined && clean.storeId !== my.settings.storeId;
       // New employee number or store: look the technician ID up again (and don't keep showing the old one's ROs)
       if (empChanged || storeChanged) { clean.techId = ''; clean.techIdFor = ''; my.employeeStatus = ''; my.myROs = []; }
+      if (storeChanged || xtimeChanged) my.xtime.reset(); // the other store's staff list and codes
       const techChanged = (clean.techId && clean.techId !== my.settings.techId) || empChanged || storeChanged;
       my.settings = { ...my.settings, ...clean };
       my.writeJson('settings.json', my.settings);

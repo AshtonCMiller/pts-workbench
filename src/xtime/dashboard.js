@@ -1,8 +1,12 @@
-// Runs inside the Xtime Inspect frame (inspect.app.coxautoinc.com).
+// Asks Xtime (the Inspect site) directly, with your existing login (inspect.app.coxautoinc.com).
 // Fetches the same dashboard data Xtime's own page loads, using your existing login,
 // and returns ONLY: RO, tag, year/make/model, VIN, mode and waiting flags for ONE technician.
 // Customer information never leaves the page.
-(async (TECH_ID, API_PATH, EMPLOYEES_PATH) => {
+// Called from the main process with an Xtime client (src/xtime/client.js): x.fetch is the web request with your
+// Xtime login, x.xsrf() Xtime's anti-forgery token, x.mem what's remembered between calls (per window).
+'use strict';
+
+module.exports = async function extract(x, TECH_ID, API_PATH, EMPLOYEES_PATH) {
   const get = (obj, name) => {
     if (!obj || typeof obj !== 'object') return undefined;
     const key = Object.keys(obj).find((k) => k.toLowerCase() === name.toLowerCase());
@@ -11,7 +15,7 @@
 
   let data;
   try {
-    const res = await fetch(API_PATH, { credentials: 'include', cache: 'no-store', headers: { Accept: 'application/json' } });
+    const res = await x.fetch(API_PATH, { credentials: 'include', cache: 'no-store', headers: { Accept: 'application/json' } });
     if (res.status === 401 || res.status === 403) return { ok: false, expired: true, error: 'Xtime session expired' };
     if (!res.ok) return { ok: false, error: `Xtime returned HTTP ${res.status}` };
     // An expired session usually comes back as a redirect to the sign-in page (HTML, not data)
@@ -54,16 +58,16 @@
   const flag = (v) => v === true || v === 1 || /^(true|y|yes|1)$/i.test(String(v ?? ''));
   // Advisor names, as Xtime shows them: number (or ID) → "First Last", from the store's employee list
   // (loaded once per page; only names are used)
-  let staff = window.__ptsEmployees;
-  if (!Array.isArray(staff) && Array.isArray(window.Employees)) staff = window.Employees;
+  let staff = x.mem.employees;
+  if (!Array.isArray(staff) && Array.isArray(x.mem.pageEmployees)) staff = x.mem.pageEmployees;
   if (!Array.isArray(staff) && EMPLOYEES_PATH) {
     try {
-      const res = await fetch(EMPLOYEES_PATH, { credentials: 'include' });
+      const res = await x.fetch(EMPLOYEES_PATH, { credentials: 'include' });
       const text = res.ok ? await res.text() : '';
       const a = text.indexOf('['), b = text.lastIndexOf(']');
       if (a >= 0 && b > a) staff = JSON.parse(text.slice(a, b + 1));
     } catch { /* numbers only, then */ }
-    if (Array.isArray(staff)) window.__ptsEmployees = staff;
+    if (Array.isArray(staff)) x.mem.employees = staff;
   }
   const staffName = new Map();
   for (const e of Array.isArray(staff) ? staff : []) {
@@ -150,4 +154,4 @@
     if (techName) break;
   }
   return { ok: true, total: all.size, mine, techName, fieldNames };
-})
+};

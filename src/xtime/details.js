@@ -1,8 +1,12 @@
-// Runs inside the Xtime Inspect frame. Loads one RO's details page with your existing login
+// Asks Xtime (the Inspect site) directly, with your existing login. Loads one RO's details page with your existing login
 // and returns ONLY its repair lines (line letter, concern, hours, approved/declined/completed).
 // Customer information never leaves the page.
 // Multipoint inspection (Q99PX) and tire/battery/brake measurement lines (GTIRE, GBATT, GBK) are dropped.
-(async (RO, PATH_TEMPLATE, API_PATH) => {
+// Called from the main process with an Xtime client (src/xtime/client.js): x.fetch is the web request with your
+// Xtime login, x.xsrf() Xtime's anti-forgery token, x.mem what's remembered between calls (per window).
+'use strict';
+
+module.exports = async function details(x, RO, PATH_TEMPLATE, API_PATH) {
   const IGNORE = /(?:^|[^A-Z0-9])(?:Q99PX|GTIRE|GBATT|GBK)/i;
   const get = (obj, name) => {
     if (!obj || typeof obj !== 'object') return undefined;
@@ -12,7 +16,7 @@
 
   const load = async (id) => {
     try {
-      const res = await fetch(PATH_TEMPLATE.replace('{RO}', encodeURIComponent(id)), { credentials: 'include', cache: 'no-store' });
+      const res = await x.fetch(PATH_TEMPLATE.replace('{RO}', encodeURIComponent(id)), { credentials: 'include', cache: 'no-store' });
       if (!res.ok) return { error: `HTTP ${res.status}` };
       return { text: await res.text() };
     } catch (e) {
@@ -79,7 +83,7 @@
   // 2) not found: look the RO up on the dashboard (it lists every tech's ROs) and try its internal ID
   if (!raw && API_PATH) {
     try {
-      const res = await fetch(API_PATH, { credentials: 'include', cache: 'no-store', headers: { Accept: 'application/json' } });
+      const res = await x.fetch(API_PATH, { credentials: 'include', cache: 'no-store', headers: { Accept: 'application/json' } });
       const data = res.ok ? await res.json() : null;
       let match = null;
       const walk = (n) => {
@@ -156,4 +160,4 @@
     return ga - gb || (b.primary ? 1 : 0) - (a.primary ? 1 : 0);
   });
   return { ok: true, lines, vehicle };
-})
+};

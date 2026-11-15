@@ -1,7 +1,11 @@
-// Runs inside the Xtime Inspect frame. Looks up one employee number in the store's employee list
+// Asks Xtime (the Inspect site) directly, with your existing login. Looks up one employee number in the store's employee list
 // (with your existing login) and returns ONLY that person's Xtime technician ID and name.
 // Nobody's email or phone number leaves the page.
-(async (NUMBER, STORE, PATH) => {
+// Called from the main process with an Xtime client (src/xtime/client.js): x.fetch is the web request with your
+// Xtime login, x.xsrf() Xtime's anti-forgery token, x.mem what's remembered between calls (per window).
+'use strict';
+
+module.exports = async function employee(x, NUMBER, STORE, PATH) {
   const get = (obj, name) => {
     if (!obj || typeof obj !== 'object') return undefined;
     const key = Object.keys(obj).find((k) => k.toLowerCase() === name.toLowerCase());
@@ -9,7 +13,7 @@
   };
   let text;
   try {
-    const res = await fetch(PATH.replace('{STORE}', encodeURIComponent(STORE)), {
+    const res = await x.fetch(PATH.replace('{STORE}', encodeURIComponent(STORE)), {
       credentials: 'include', headers: { Accept: 'application/json, text/javascript, */*' },
     });
     if (res.status === 401 || res.status === 403 || res.redirected) return { ok: false, expired: true, error: 'Xtime session expired' };
@@ -46,4 +50,4 @@
     name: [get(pick, 'FirstName'), get(pick, 'LastName')].filter((x) => typeof x === 'string' && x.trim()).join(' ').trim(),
     active: get(pick, 'Active') !== false,
   };
-})
+};

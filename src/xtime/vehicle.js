@@ -1,7 +1,11 @@
-// Runs inside the Xtime Inspect frame. Finds one RO's vehicle (VIN, year, make, model) with your
+// Asks Xtime (the Inspect site) directly, with your existing login. Finds one RO's vehicle (VIN, year, make, model) with your
 // existing login: first on the dashboard (it lists every tech's ROs), then on the RO's own page.
 // Only the vehicle comes back; customer information never leaves the page.
-(async (RO, API_PATH, PATH_TEMPLATE) => {
+// Called from the main process with an Xtime client (src/xtime/client.js): x.fetch is the web request with your
+// Xtime login, x.xsrf() Xtime's anti-forgery token, x.mem what's remembered between calls (per window).
+'use strict';
+
+module.exports = async function vehicle(x, RO, API_PATH, PATH_TEMPLATE) {
   const get = (obj, name) => {
     if (!obj || typeof obj !== 'object') return undefined;
     const key = Object.keys(obj).find((k) => k.toLowerCase() === name.toLowerCase());
@@ -26,7 +30,7 @@
 
   // 1) the dashboard
   try {
-    const res = await fetch(API_PATH, { credentials: 'include', cache: 'no-store', headers: { Accept: 'application/json' } });
+    const res = await x.fetch(API_PATH, { credentials: 'include', cache: 'no-store', headers: { Accept: 'application/json' } });
     const type = res.headers.get('content-type') || '';
     if (res.status === 401 || res.status === 403 || res.redirected || !/json/i.test(type)) {
       return { ok: false, error: 'Xtime session expired' };
@@ -48,7 +52,7 @@
 
   // 2) the RO's own page (works for ROs that have left the dashboard, while Xtime still has them)
   try {
-    const res = await fetch(PATH_TEMPLATE.replace('{RO}', encodeURIComponent(RO)), { credentials: 'include' });
+    const res = await x.fetch(PATH_TEMPLATE.replace('{RO}', encodeURIComponent(RO)), { credentials: 'include' });
     if (res.ok) {
       const text = (await res.text()).replace(/&quot;/g, '"');
       // the VIN from a "VIN": "…" field, else any valid 17-character VIN on the page
@@ -65,4 +69,4 @@
   } catch { /* fall through */ }
 
   return { ok: false, error: `RO ${RO} wasn't found in Xtime` };
-})
+};

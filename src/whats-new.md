@@ -8,6 +8,13 @@
   Changing only this file (and pages) still updates without a restart.
 -->
 
+## v0.5.0
+
+# Improvements
+
+- **No Script Injection:** This update is the latest in a long line that is intended to get rid of the requirement to inject scripts into XTime & PTS behind-the-scenes.\nThis translates to lower app footprint (reduced memory usage), faster performance, and overall a more reliable and **predictable** experience. This is also the main Hurdle between a Rust implementation.
+
+
 ## v0.4.6
 
 # Improvements

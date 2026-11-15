@@ -165,39 +165,35 @@ module.exports = function install(my) {
         try { return await manualService.wiringPages(ws.vin, String(payload?.cell || '')); } catch (e) { return fail(e); }
       case 'wiring-svg':
         try { return await manualService.wiringSvg(ws.vin, String(payload?.cell || ''), Number(payload?.page) || 1); } catch (e) { return fail(e); }
-      // ---- the app's own Xtime RO page (Xtime View tab): read through the signed-in Xtime page, like the dashboard ----
+      // ---- the app's own Xtime RO page (Xtime View tab): asked of Xtime directly with your login, like the dashboard ----
       case 'xview': {
-        const frame = my.findXtimeDataFrame();
-        if (!frame) return { error: true, message: 'Xtime is still loading. Try again in a moment.' };
         try {
-          const r = await frame.executeJavaScript(`${S.XTIME_RO}(${JSON.stringify(my.settings.storeId)}, ${JSON.stringify(ws.ro)}, {"type":"view"})`, true);
+          const r = await my.xtime.run('ro', my.settings.storeId, ws.ro, { type: 'view' });
           if (!r?.ok) return { error: true, expired: !!r?.expired, message: r?.error || "Couldn't read this RO from Xtime" };
           if (!r.view.advisor || !r.view.technician) manualService.log(`xtime view RO ${ws.ro}: advisor "${r.view.advisor}", technician "${r.view.technician}" (${JSON.stringify(r.view.people || {})})`);
           return { view: r.view, at: Date.now() };
         } catch (e) { return fail(e); }
       }
       case 'xview-done': { // a line's Done box: the same change as Xtime's Done button
-        const frame = my.findXtimeDataFrame();
         const id = payload?.id;
-        if (!frame || id == null) return { error: true, message: 'Xtime is still loading' };
+        if (id == null) return { error: true, message: 'No line to change' };
         try {
-          const r = await frame.executeJavaScript(`${S.XTIME_RO}(${JSON.stringify(my.settings.storeId)}, ${JSON.stringify(ws.ro)}, ${JSON.stringify({ type: 'done', id, value: !!payload.value })})`, true);
+          const r = await my.xtime.run('ro', my.settings.storeId, ws.ro, { type: 'done', id, value: !!payload.value });
           return r?.ok ? { ok: true } : { error: true, message: r?.error || "Couldn't update the line in Xtime" };
         } catch (e) { return fail(e); }
       }
       case 'xinspect': { // the RO's inspection form: read it, change an item, or switch forms (as Xtime's page does)
-        const frame = my.findXtimeDataFrame();
-        if (!frame) return { error: true, message: 'Xtime is still loading. Try again in a moment.' };
         const q = payload || {};
         const action = q.type === 'save' ? { type: 'save', iiid: q.iiid, color: String(q.color || ''), value: String(q.value ?? '').slice(0, 255) }
           : q.type === 'switch' ? { type: 'switch', formId: q.formId }
           : q.type === 'catalog' ? { type: 'catalog' }
           : q.type === 'addLine' ? { type: 'addLine', line: q.line || {} }
+          : q.type === 'editLine' ? { type: 'editLine', id: q.id, line: q.line || {} }
+          : q.type === 'opcodes' ? { type: 'opcodes', search: String(q.search || '').slice(0, 40) }
           : q.type === 'deleteLine' ? { type: 'deleteLine', id: q.id }
           : { type: 'get' };
         try {
-          const r = await frame.executeJavaScript(`${S.XTIME_INSPECT}(${JSON.stringify(my.settings.storeId)}, ${JSON.stringify(ws.ro)}, ` +
-            `${JSON.stringify(my.settings.xtimeDetailsPath || '/RepairOrder/Details/{RO}')}, ${JSON.stringify(action)})`, true);
+          const r = await my.xtime.run('inspect', my.settings.storeId, ws.ro, my.settings.xtimeDetailsPath || '/RepairOrder/Details/{RO}', action);
           if (!r?.ok) { manualService.log(`xtime inspection RO ${ws.ro} ${action.type}: ${r?.error || 'failed'}`); return { error: true, expired: !!r?.expired, message: r?.error || "Couldn't reach Xtime's inspection form" }; }
           if (action.type === 'save' && r.red) manualService.log(`xtime inspection RO ${ws.ro}: red item ${action.iiid}: ${r.red}`);
           return r;

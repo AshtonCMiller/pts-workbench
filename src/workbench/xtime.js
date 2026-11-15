@@ -1,7 +1,8 @@
 // Reading Xtime: the small background page the app reads through, putting Xtime's own page away once that works, your
 // ROs (polling), recovering when Xtime's page fails or its sign-in runs out, and looking up an RO.
 'use strict';
-const { WebContentsView } = require('electron');
+const { WebContentsView, session } = require('electron');
+const { XtimeClient } = require('../xtime/client');
 const fs = require('fs');
 const S = require('../app/state'); // shared app state (see app/state.js)
 const { pushAll } = S;
@@ -21,6 +22,8 @@ module.exports = function install(my) {
   let chatSigninStep = 0;   // 0: nothing done yet, 1: kept sign-in thrown away, 2: everything thrown away, 3: Xtime asked to sign in
   let chatSigninAt = 0;
   const xlog = (line) => { try { fs.appendFileSync(userFile('xtime.log'), `${new Date().toISOString()} ${line}\n`); } catch {} };
+  // The app's Xtime requests: made directly with this window's Xtime login (src/xtime/), not inside Xtime's page
+  my.xtime = new XtimeClient(session.fromPartition(my.PARTITION), () => my.settings, xlog);
   function chatSignin(r) {
     if (r?.ok) { if (chatSigninStep) xlog('chat works again'); chatSigninStep = 0; return; }
     if (!r?.signedOut || my.xtimeSignin || chatSigninStep >= 2) return;
@@ -129,15 +132,12 @@ module.exports = function install(my) {
 
   // Employee number → Xtime technician ID (and your name for the title bar), from the store's list.
   // Looked up once per employee number; the result is saved with the settings.
-  async function resolveTechId(frame, force = false) {
+  async function resolveTechId(force = false) {
     const num = String(my.settings.employeeNumber || '').trim();
     if (!num) return;
     if (!force && my.settings.techIdFor === num && my.settings.techId) return;
     let res = null;
-    try {
-      res = await frame.executeJavaScript(
-        `${S.XTIME_EMPLOYEE}(${JSON.stringify(num)}, ${JSON.stringify(my.settings.storeId)}, ${JSON.stringify(my.settings.xtimeEmployeesPath)})`, true);
-    } catch { res = null; }
+    res = await my.xtime.run('employee', num, my.settings.storeId, my.settings.xtimeEmployeesPath);
     if (res?.ok) {
       my.settings.techId = res.id;
       my.settings.techIdFor = num;
@@ -151,22 +151,17 @@ module.exports = function install(my) {
   }
 
   async function pollXtimeOnce() {
-    const frame = my.findXtimeDataFrame();
-    if (!frame) {
+    // The requests don't need Xtime's page; it's only there to sign in (and to look at). So it's only checked for that.
+    if (!my.findXtimeDataFrame()) {
       if (my.xtimeParked) { unparkXtime('Opening Xtime…'); if (!my.liteLoading) startLite(); return; }
       if (onLoginPage()) {
         // Xtime has sent the page to its sign-in screen; a saved login fills it in
         my.xtimeStatus = 'Log in to Xtime to load your ROs';
         my.pushState();
-      } else {
-        // An error page, or a page that never finished: start Xtime fresh (at most every 2 minutes)
-        my.xtimeFailures++;
-        if (Date.now() - my.lastRecovery > 2 * 60 * 1000) reloadXtime('Xtime page failed to load — reloading…');
-        else { my.xtimeStatus = 'Xtime page failed to load — retrying shortly'; my.pushState(); }
+        return;
       }
-      return;
     }
-    await resolveTechId(frame);
+    await resolveTechId();
     if (!my.settings.techId) {
       if (my.xtimeSignin?.step === 'starting') my.xtimeSignin = null; // nothing to load until the employee number is set
       my.xtimeStatus = my.settings.employeeNumber ? (my.employeeStatus || 'Looking up your employee number…') : 'Enter your employee number in ⚙ Settings';
@@ -174,8 +169,7 @@ module.exports = function install(my) {
       return;
     }
     try {
-      const res = await frame.executeJavaScript(
-        `${S.XTIME_EXTRACT}(${JSON.stringify(my.settings.techId)}, ${JSON.stringify(my.settings.xtimeApiPath)}, ${JSON.stringify(String(my.settings.xtimeEmployeesPath || '').replace('{STORE}', encodeURIComponent(my.settings.storeId)))})`, true);
+      const res = await my.xtime.run('dashboard', my.settings.techId, my.settings.xtimeApiPath, String(my.settings.xtimeEmployeesPath || '').replace('{STORE}', encodeURIComponent(my.settings.storeId)));
       if (!res?.ok) { xtimeFailed(res?.error || 'Could not read Xtime', !!res?.expired); return; }
       my.xtimeFailures = 0;
       my.myROs = res.mine;
@@ -205,8 +199,7 @@ module.exports = function install(my) {
       const others = [...my.workspaces.values()].filter((w) => !mineSet.has(w.ro)).map((w) => ({ ro: w.ro, other: true }));
       for (const r of [...my.myROs, ...others]) {
         try {
-          const d = await frame.executeJavaScript(
-            `${S.XTIME_DETAILS}(${JSON.stringify(r.ro)}, ${JSON.stringify(my.settings.xtimeDetailsPath)})`, true);
+          const d = await my.xtime.run('details', r.ro, my.settings.xtimeDetailsPath);
           if (d?.ok) {
             if (!r.other) my.noteApprovals(r, d.lines);
             my.tracker.updateLines(r.ro, d.lines, r.other ? '' : [r.year, r.make, r.model].filter(Boolean).join(' '));
@@ -239,15 +232,13 @@ module.exports = function install(my) {
     if (!/^\w{1,20}$/.test(ro)) return;
     my.lookup = { ro, status: 'loading', message: 'Loading lines from Xtime…' };
     my.pushState();
-    const frame = my.findXtimeDataFrame();
-    if (!frame) {
-      my.lookup = { ro, status: 'error', message: 'Xtime isn\'t logged in, so its lines can\'t be loaded. Add them below by hand.' };
-      my.pushState();
-      return;
-    }
     try {
-      const d = await frame.executeJavaScript(
-        `${S.XTIME_DETAILS}(${JSON.stringify(ro)}, ${JSON.stringify(my.settings.xtimeDetailsPath)}, ${JSON.stringify(my.settings.xtimeApiPath)})`, true);
+      const d = await my.xtime.run('details', ro, my.settings.xtimeDetailsPath, my.settings.xtimeApiPath);
+      if (d?.expired || (!d?.ok && onLoginPage())) {
+        my.lookup = { ro, status: 'error', message: 'Xtime isn\'t logged in, so its lines can\'t be loaded. Add them below by hand.' };
+        pushAll();
+        return;
+      }
       if (d?.ok) {
         my.tracker.updateLines(ro, d.lines, d.vehicle?.ymm || '');
         const shown = my.tracker.roSummary(ro)?.lines.filter((l) => !l.manual).length ?? 0;

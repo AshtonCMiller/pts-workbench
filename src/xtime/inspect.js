@@ -1,4 +1,4 @@
-// Runs inside the Xtime Inspect frame, with your existing login: an RO's inspection form, read and changed
+// Asks Xtime (the Inspect site) directly, with your existing login, with your existing login: an RO's inspection form, read and changed
 // exactly the way Xtime's RO page does it (no customer information is read or returned).
 //   { type: 'get' }                          → the form (categories → items with colour / value / sub-items),
 //                                              the forms the store has, and which one this RO uses
@@ -10,14 +10,18 @@
 //                                              GET /api/Stores/{store}/OpCodes/?SearchString=…)
 // Where the form comes from: the RO's details page names its scripts (InspectionFormData = the form, AvailableForms,
 // StoreData) and holds the RO's answers (InspectionItem_ROSpecific); …/InspectionItems has the latest answers.
-(async (STORE, RO, DETAILS_PATH, ACTION) => {
-  const xsrf = (document.cookie.match(/(?:^|;\s*)XSRF-TOKEN=([^;]*)/) || [])[1];
+// Called from the main process with an Xtime client (src/xtime/client.js): x.fetch is the web request with your
+// Xtime login, x.xsrf() Xtime's anti-forgery token, x.mem what's remembered between calls (per window).
+'use strict';
+
+module.exports = async function inspect(x, STORE, RO, DETAILS_PATH, ACTION) {
+  const xsrf = await x.xsrf();
   const headers = { Accept: 'application/json, text/plain, */*', 'Content-Type': 'application/json;charset=UTF-8' };
-  if (xsrf) headers['X-XSRF-TOKEN'] = decodeURIComponent(xsrf);
+  if (xsrf) headers['X-XSRF-TOKEN'] = xsrf;
   const api = `/api/Stores/${encodeURIComponent(STORE)}/RepairOrders/${encodeURIComponent(RO)}`;
   const call = async (method, url, body) => {
     let res;
-    try { res = await fetch(url, { method, credentials: 'include', cache: 'no-store', headers, body: body === undefined ? undefined : JSON.stringify(body) }); }
+    try { res = await x.fetch(url, { method, credentials: 'include', cache: 'no-store', headers, body: body === undefined ? undefined : JSON.stringify(body) }); }
     catch (e) { return { ok: false, error: `Xtime request failed: ${e.message}` }; }
     if (res.status === 401 || res.status === 403) return { ok: false, expired: true, error: 'Xtime session expired' };
     const type = res.headers.get('content-type') || '';
@@ -51,15 +55,15 @@
   const unwrap = (d) => { if (typeof d === 'string') { try { d = JSON.parse(d); } catch { return d; } } return d && typeof d === 'object' && 'Data' in d && !Array.isArray(d) ? d.Data : d; };
 
   // The RO's details page, and the scripts it names (cached for this page: they only change with the form)
-  window.__ptsInspect ||= {};
-  const cache = window.__ptsInspect;
+  x.mem.inspect ||= {};
+  const cache = x.mem.inspect;
   const details = async () => {
     const r = await call('GET', DETAILS_PATH.replace('{RO}', encodeURIComponent(RO)));
     if (!r.ok) return r;
     const html = String(r.data || '');
     const script = (name) => {
       const m = html.match(new RegExp(`<script[^>]+src=["']([^"']*${name}[^"']*)["']`, 'i'));
-      return m ? new URL(m[1].replace(/&amp;/g, '&'), location.href).href : '';
+      return m ? new URL(m[1].replace(/&amp;/g, '&'), x.base()).href : '';
     };
     return { ok: true, html, formUrl: script('InspectionFormData'), formsUrl: script('AvailableForms'), storeUrl: script('StoreData'),
       servicesUrl: script('AvailableServices(?![A-Za-z])'), payUrl: script('AvailablePayTypeCodes'), dispatchUrl: script('DispatchCodes') };
@@ -67,7 +71,7 @@
   // The store's dispatch codes ({Code, IsDefault, EstimatedDuration}); Xtime starts a new line on the default one
   const dispatchCodes = async (d) => {
     let list = await loadVar(d.dispatchUrl, 'DispatchCodes');
-    if (!Array.isArray(list)) { try { list = window.DispatchCodes; } catch { list = null; } }
+    if (!Array.isArray(list)) { try { list = x.mem.pageDispatchCodes; } catch { list = null; } }
     if (!Array.isArray(list)) list = varValue(d.html, 'DispatchCodes');
     return Array.isArray(list) ? list.filter((c) => c && c.Code) : [];
   };
@@ -241,4 +245,4 @@
   })).filter((c) => c.items.length);
   return { ok: true, form: { id: form.ID ?? form.IFID, name: text(form.Name), categories,
     forms: (Array.isArray(forms) ? forms : []).map((f) => ({ id: f.Key, name: text(f.Value) })) } };
-})
+};
