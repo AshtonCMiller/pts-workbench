@@ -8,7 +8,8 @@ name: Build and release
 
 on:
   push:
-    branches: ['**']
+    branches-ignore:
+      - 'rust-rewrite'
   workflow_dispatch: # "Run workflow" button on GitHub, for a manual retry
 
 permissions:
