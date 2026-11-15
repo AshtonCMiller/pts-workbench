@@ -157,6 +157,10 @@ pub struct Job {
     /// Sent to the printer, waiting for it to take it
     pub busy: bool,
     pub error: Option<String>,
+    /// A spiff sheet for an RO not marked spiffed yet: the RO and what to keep for it
+    pub spiff: Option<(String, hours::Spiff)>,
+    /// Mark it spiffed once it's sent to the printer
+    pub mark_spiffed: bool,
 }
 
 impl Job {
@@ -171,6 +175,8 @@ impl Job {
             copies: 1,
             busy: false,
             error: None,
+            spiff: None,
+            mark_spiffed: false,
         }
     }
 }

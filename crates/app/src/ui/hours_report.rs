@@ -1,6 +1,7 @@
 //! The hours report (a card over everything, from the bottom bar): one pay period at a time. What's flagged, confirmed
 //! and still to check, the time on the clock and your efficiency, the spiffs turned in; then every flagged line by
-//! RO. Tick lines confirmed once they're on your time sheet, click hours to change them, take a flag off.
+//! RO. Tick lines confirmed once they're on your time sheet, click hours to change them, take a flag off. Spiffs: of
+//! the ROs worked on in the period that could be spiffed, how many were, and the ones that weren't.
 
 use chrono::TimeZone;
 use iced::widget::{Column, Row, Space, button, checkbox, column, container, horizontal_space, row, scrollable, text, text_input};
@@ -75,7 +76,7 @@ fn cell<'a>(e: impl Into<Element<'a, Message>>, w: f32) -> Element<'a, Message> 
 pub fn card(app: &App) -> Element<'_, Message> {
     let hv = &app.hours_view;
     let now = app.now * 1000;
-    let r = app.hours.report(&chrono::Local, now, hv.offset);
+    let r = app.hours.report(&chrono::Local, now, hv.offset, xtime::ro::SPIFF_OVER);
 
     let head = row![
         text("Hours").size(22).font(style::BOLD),
@@ -131,15 +132,11 @@ pub fn card(app: &App) -> Element<'_, Message> {
             }
         ),
         stat("Clocked", hm(r.worked), eff),
-        stat(
-            "Spiffs",
-            crate::print::money(r.spiff_total),
-            format!("{} turned in", r.spiffs.len())
-        ),
+        stat("Spiffs", spiff_value(&r.spiffs), spiff_sub(&r.spiffs)),
     ]
     .spacing(10);
 
-    let body = column![stats, flags_table(app, hv, &r), spiffs(&r)].spacing(18);
+    let body = column![stats, flags_table(app, hv, &r), spiffs(&r, app.print_job.is_some())].spacing(18);
     let phase = hv.changed.map(anim::Phase::Entering).unwrap_or_default();
     container(scrollable(
         container(column![head, anim::page(body, phase).on_card()].spacing(16)).padding(24),
@@ -197,6 +194,8 @@ fn flags_table<'a>(app: &'a App, hv: &'a HoursView, r: &hours::Report) -> Elemen
             .push(text(ymm).size(13).style(style::muted));
         if app.hours.spiffed(ro).is_some() {
             title = title.push(pill("Spiffed", [0x15, 0x80, 0x3d]));
+        } else if r.spiffs.missed.iter().any(|(m, _, _)| m == ro) {
+            title = title.push(pill("Spiff not turned in", [0xd9, 0x77, 0x06]));
         }
         let ro_row = row![
             cell(title, 0.0),
@@ -289,27 +288,67 @@ fn flag_row<'a>(hv: &'a HoursView, f: &hours::Flag) -> Element<'a, Message> {
     .into()
 }
 
-/// The spiffs turned in this pay period
-fn spiffs<'a>(r: &hours::Report) -> Element<'a, Message> {
-    if r.spiffs.is_empty() {
-        return Space::with_height(0).into();
+/// "2 of 3" spiffed (of the ROs worked on that could be)
+fn spiff_value(c: &hours::SpiffCount) -> String {
+    if c.eligible == 0 {
+        "None".into()
+    } else {
+        format!("{} of {}", c.spiffed, c.eligible)
     }
-    let mut list = column![text("Spiffs").size(16).font(style::BOLD)].spacing(6);
-    for (ro, s) in &r.spiffs {
+}
+
+fn spiff_sub(c: &hours::SpiffCount) -> String {
+    let missed = c.eligible - c.spiffed;
+    match (c.eligible, missed) {
+        (0, _) => "no ROs over the spiff amount".into(),
+        (_, 0) => "all turned in".into(),
+        (_, 1) => "1 not turned in".into(),
+        (_, n) => format!("{n} not turned in"),
+    }
+}
+
+/// The ROs worked on this pay period that could have been spiffed but weren't (to turn in)
+fn spiffs<'a>(r: &hours::Report, printing: bool) -> Element<'a, Message> {
+    use std::ops::Not;
+    let c = &r.spiffs;
+    let mut list = column![].spacing(6);
+    if !c.missed.is_empty() {
+        list = list.push(text("Spiffs not turned in").size(16).font(style::BOLD));
+        for (ro, ymm, total) in &c.missed {
+            list = list.push(
+                container(
+                    row![
+                        cell(text(format!("RO {ro}")).font(style::BOLD), 120.0),
+                        cell(text(ymm.clone()).size(13).style(style::muted), 0.0),
+                        cell(text(format!("Recommendations {}", crate::print::money(*total))).size(13), 200.0),
+                        button(text("Print Spiff").size(12).font(style::BOLD))
+                            .padding([4, 10])
+                            .style(button::success)
+                            .on_press_maybe(printing.not().then(|| Message::PrintSpiffFor(ro.clone()))),
+                        button(text("Mark spiffed").size(12))
+                            .padding([4, 10])
+                            .style(style::ghost)
+                            .on_press(Message::MarkSpiffed(ro.clone(), true)),
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+                )
+                .padding([8, 10])
+                .width(Length::Fill)
+                .style(style::card),
+            );
+        }
+    }
+    if c.unknown > 0 {
+        let n = c.unknown;
         list = list.push(
-            container(
-                row![
-                    cell(text(format!("RO {ro}")).font(style::BOLD), 120.0),
-                    cell(text(s.vehicle.clone()).size(13).style(style::muted), 0.0),
-                    cell(text(local(s.at, "%b %-d")).size(13).style(style::muted), DATE),
-                    cell(text(crate::print::money(s.total)).font(style::BOLD), 110.0),
-                ]
-                .spacing(8)
-                .align_y(Alignment::Center),
-            )
-            .padding([8, 10])
-            .width(Length::Fill)
-            .style(style::card),
+            text(format!(
+                "{n} RO{} from before the app kept recommendation totals {} counted for spiffs.",
+                if n == 1 { "" } else { "s" },
+                if n == 1 { "isn't" } else { "aren't" }
+            ))
+            .size(12)
+            .style(style::muted),
         );
     }
     list.into()

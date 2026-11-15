@@ -53,6 +53,8 @@ pub struct RoRec {
     pub completed_at: Option<i64>,
     /// Review / Completed (not in the Rust app yet; kept)
     pub review: Option<Value>,
+    /// What its approved recommendations came to when last read (dollars; for which ROs could be spiffed)
+    pub spiff_total: Option<f64>,
     #[serde(flatten)]
     pub other: Map<String, Value>,
 }
@@ -295,10 +297,20 @@ pub struct Report {
     pub unconfirmed: f64,
     /// Clocked in during it (milliseconds)
     pub worked: i64,
-    /// Spiffs marked in it (RO, spiff), oldest first
-    pub spiffs: Vec<(String, Spiff)>,
-    pub spiff_total: f64,
+    /// The ROs worked on in it (flagged in it, or spiffed in it) that could be spiffed, and how many were
+    pub spiffs: SpiffCount,
     pub is_current: bool,
+}
+
+/// Of the ROs worked on in a pay period: how many could be spiffed, how many were, and the ones that weren't
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SpiffCount {
+    pub eligible: usize,
+    pub spiffed: usize,
+    /// Could have been but weren't: RO, vehicle, what the recommendations came to
+    pub missed: Vec<(String, String, f64)>,
+    /// ROs whose recommendations the app hasn't read (from before it kept them): not counted
+    pub unknown: usize,
 }
 
 impl Report {
@@ -508,21 +520,47 @@ impl Hours {
 
     // ----- the report -----
 
-    pub fn report<Tz: TimeZone>(&self, tz: &Tz, now: i64, offset: i32) -> Report {
+    /// Keeps what an RO's approved recommendations come to (when its lines are read)
+    pub fn set_spiff_total(&mut self, ro: &str, total: f64) {
+        self.ros.entry(ro.to_string()).or_default().spiff_total = Some(total);
+    }
+
+    /// The report for a pay period (`offset` 0: this one). `spiff_over`: recommendations over this earn a spiff.
+    pub fn report<Tz: TimeZone>(&self, tz: &Tz, now: i64, offset: i32, spiff_over: f64) -> Report {
         let period = pay_period(tz, now, offset);
         let inside = |t: i64| t >= period.start && t < period.end;
         let mut flags: Vec<Flag> = self.flags.iter().filter(|f| inside(f.flagged_at)).cloned().collect();
         flags.sort_by(|a, b| a.flagged_at.cmp(&b.flagged_at).then(a.ro.cmp(&b.ro)).then(a.dms.cmp(&b.dms)));
         let total = round2(flags.iter().map(|f| f.hours).sum());
         let confirmed = round2(flags.iter().filter(|f| f.confirmed).map(|f| f.hours).sum());
-        let mut spiffs: Vec<(String, Spiff)> = self
-            .spiffs
-            .iter()
-            .filter(|(_, s)| inside(s.at))
-            .map(|(r, s)| (r.clone(), s.clone()))
-            .collect();
-        spiffs.sort_by_key(|(_, s)| s.at);
-        let spiff_total = round2(spiffs.iter().map(|(_, s)| s.total).sum());
+        // the ROs worked on: flagged in the period, or spiffed in it; each once, in order
+        let mut worked_on: Vec<&str> = Vec::new();
+        let spiffed_in = self.spiffs.iter().filter(|(_, s)| inside(s.at)).map(|(r, _)| r.as_str());
+        for ro in flags.iter().map(|f| f.ro.as_str()).chain(spiffed_in) {
+            if !worked_on.contains(&ro) {
+                worked_on.push(ro);
+            }
+        }
+        let over = |t: f64| (t * 100.0).round() > (spiff_over * 100.0).round();
+        let mut spiffs = SpiffCount::default();
+        for ro in worked_on {
+            let rec = self.ros.get(ro);
+            if self.spiffs.contains_key(ro) {
+                spiffs.eligible += 1;
+                spiffs.spiffed += 1;
+            } else {
+                match rec.and_then(|r| r.spiff_total) {
+                    Some(t) if over(t) => {
+                        spiffs.eligible += 1;
+                        spiffs
+                            .missed
+                            .push((ro.to_string(), rec.map(|r| r.ymm.clone()).unwrap_or_default(), t));
+                    }
+                    Some(_) => {}
+                    None => spiffs.unknown += 1,
+                }
+            }
+        }
         Report {
             period,
             total,
@@ -531,7 +569,6 @@ impl Hours {
             worked: self.worked_between(period.start, period.end.min(now + 1), now),
             flags,
             spiffs,
-            spiff_total,
             is_current: offset == 0,
         }
     }
@@ -632,12 +669,18 @@ mod tests {
                 ..Default::default()
             }),
         );
-        let r = h.report(&Utc, ms(2026, 11, 15, 12), 0);
-        assert_eq!((r.total, r.confirmed, r.unconfirmed), (1.5, 1.5, 0.0));
-        assert_eq!(r.flags.len(), 1);
+        h.set_spiff_total("555", 300.0); // worked on, could be spiffed, wasn't
+        h.update_lines("555", line_keys(&[x(0, "A", true, 1.0)]), "2024 Ford F-150", ms(2026, 11, 15, 8));
+        h.flag_line("555", "A", ms(2026, 11, 15, 9));
+        h.update_lines("556", line_keys(&[x(0, "A", true, 1.0)]), "", ms(2026, 11, 15, 8)); // never read for spiffs
+        h.flag_line("556", "A", ms(2026, 11, 15, 9));
+        let r = h.report(&Utc, ms(2026, 11, 15, 12), 0, 150.0);
+        assert_eq!((r.total, r.confirmed, r.unconfirmed), (3.5, 1.5, 2.0));
+        assert_eq!(r.flags.len(), 3);
         assert_eq!(r.worked, 2 * 3_600_000);
-        assert_eq!(r.efficiency().map(|e| e.round()), Some(75.0));
-        assert_eq!(r.spiff_total, 212.5);
+        assert_eq!(r.efficiency().map(|e| e.round()), Some(175.0));
+        assert_eq!((r.spiffs.eligible, r.spiffs.spiffed, r.spiffs.unknown), (2, 1, 1));
+        assert_eq!(r.spiffs.missed, vec![("555".to_string(), "2024 Ford F-150".to_string(), 300.0)]);
         // your hours stay when Xtime's lines come again
         h.update_lines("820367", line_keys(&[x(0, "A", true, 1.2)]), "", ms(2026, 11, 15, 13));
         assert_eq!(h.ros["820367"].lines["A"].paid(), 1.5);

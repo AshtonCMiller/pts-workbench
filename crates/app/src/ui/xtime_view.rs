@@ -168,7 +168,7 @@ fn header<'a>(app: &'a App, ws: &'a Workspace, v: &'a RoView) -> Element<'a, Mes
             button(text("Unmark").size(13))
                 .padding([5, 10])
                 .style(style::ghost)
-                .on_press(Message::MarkSpiffed(false)),
+                .on_press(Message::MarkSpiffed(v.ro.clone(), false)),
         ]
         .spacing(6)
         .align_y(Alignment::Center)
@@ -186,7 +186,7 @@ fn header<'a>(app: &'a App, ws: &'a Workspace, v: &'a RoView) -> Element<'a, Mes
             button(text("Mark spiffed").size(13))
                 .padding([5, 10])
                 .style(style::ghost)
-                .on_press(Message::MarkSpiffed(true)),
+                .on_press(Message::MarkSpiffed(v.ro.clone(), true)),
         ]
         .spacing(8)
         .align_y(Alignment::Center)

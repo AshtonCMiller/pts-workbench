@@ -174,10 +174,15 @@ pub enum Message {
     ViewLoaded(String, Result<xtime::ro::RoView, LoadError>),
     /// Every minute: the Xtime View showing reads its RO again
     RefreshView,
-    /// Print the spiff sheet for the RO showing (Windows' Print window, then the printer)
+    /// Print the spiff sheet for the RO showing (the app's Print window)
     PrintSpiff,
-    /// A print finished: what it was, and how it went
-    Printed(String, Result<(), String>),
+    /// Print the spiff sheet for an RO by its number (from the hours report: read from Xtime first if need be)
+    PrintSpiffFor(String),
+    SpiffViewRead(String, Result<xtime::ro::RoView, LoadError>),
+    /// The Print window's "mark the RO spiffed once it's sent"
+    MarkAfterPrint(bool),
+    /// A print finished: what it was, how it went, and the spiff to mark once it's sent (RO, spiff)
+    Printed(String, Result<(), String>, Option<(String, hours::Spiff)>),
     /// The Print window: the printers found, the one picked, how many copies, print, close
     PrintersFound(crate::print::Printers),
     PickPrinter(String),
@@ -206,7 +211,7 @@ pub enum Message {
     /// Take a flag off (asks first: press twice)
     RemoveFlag(u64),
     /// Mark the RO showing as spiffed (turned in), or not
-    MarkSpiffed(bool),
+    MarkSpiffed(String, bool),
     /// Open or close a line of the RO showing (by line ID)
     ToggleLine(String),
     ToggleInspection,
@@ -529,8 +534,9 @@ impl App {
                         Ok(view) => {
                             let lines = timecard::lines_of(&view).into_iter().map(|(_, l)| l).collect();
                             self.hours.update_lines(&ro, lines, &timecard::ymm(&view), timecard::now_ms());
-                            let _ = timecard::save(&self.hours);
                             self.spiff_totals.insert(ro.clone(), view.spiff_total());
+                            self.hours.set_spiff_total(&ro, view.spiff_total());
+                            let _ = timecard::save(&self.hours);
                             self.spiff_checked.insert(ro.clone(), clock::now());
                             ws.xv.view = Some(view);
                             ws.xv.error = None;
@@ -554,28 +560,47 @@ impl App {
                 }
             }
             Message::PrintSpiff => {
-                if self.print_job.is_some() {
-                    return Task::none();
-                }
                 let Some(v) = self.workspace().and_then(|w| w.xv.view.clone()) else {
                     return Task::none();
                 };
-                if !v.spiff_earned() {
+                return self.print_spiff(v);
+            }
+            Message::PrintSpiffFor(ro) => {
+                // an RO open in the Workbench has been read already; any other is read from Xtime first
+                if let Some(v) = self.open.iter().find(|w| w.ro.ro == ro).and_then(|w| w.xv.view.clone()) {
+                    return self.print_spiff(v);
+                }
+                if self.sample_data {
                     return Task::none();
                 }
-                // you, for a sheet whose RO doesn't name its technician
-                let me = match (self.settings.name.trim(), self.settings.employee_number.trim()) {
-                    ("", n) => n.to_string(),
-                    (name, "") => name.to_string(),
-                    (name, n) => format!("{name} (#{n})"),
-                };
-                let extra = crate::print::spiff::Extra {
-                    technician: me,
-                    printed: format!("Printed {}", chrono::Local::now().format("%b %-d, %Y, %-I:%M %p")),
-                };
-                let what = format!("Spiff for RO {}", v.ro);
-                let build: crate::print::Build = std::sync::Arc::new(move |m| crate::print::spiff::sheet(m, &v, &extra));
-                return self.open_print(what, build);
+                self.notice = Some(format!("Reading RO {ro} from Xtime to print its spiff…"));
+                let (x, store) = (self.xtime.clone(), self.settings.store_id.clone());
+                return Task::perform(
+                    async move {
+                        let r = x.ro_view(&store, &ro).await.map_err(LoadError::from);
+                        (ro, r)
+                    },
+                    |(ro, r)| Message::SpiffViewRead(ro, r),
+                );
+            }
+            Message::SpiffViewRead(ro, result) => match result {
+                Ok(v) => {
+                    self.notice = None;
+                    self.hours.set_spiff_total(&ro, v.spiff_total());
+                    self.spiff_totals.insert(ro, v.spiff_total());
+                    return self.print_spiff(v);
+                }
+                Err(e) => {
+                    self.notice = Some(format!(
+                        "Couldn't read RO {ro} to print its spiff ({})",
+                        e.text().trim_start_matches("Xtime: ")
+                    ))
+                }
+            },
+            Message::MarkAfterPrint(on) => {
+                if let Some(job) = &mut self.print_job {
+                    job.mark_spiffed = on;
+                }
             }
             Message::PrintersFound(found) => {
                 if let Some(job) = &mut self.print_job {
@@ -627,13 +652,14 @@ impl App {
                 job.busy = true;
                 job.error = None;
                 let (build, copies, what) = (job.build.clone(), job.copies, job.what.clone());
+                let mark = job.spiff.clone().filter(|_| job.mark_spiffed);
                 return Task::perform(
                     async move {
                         tokio::task::spawn_blocking(move || crate::print::print_to(&printer, copies, &*build))
                             .await
                             .unwrap_or_else(|e| Err(e.to_string()))
                     },
-                    move |r| Message::Printed(what.clone(), r),
+                    move |r| Message::Printed(what.clone(), r, mark.clone()),
                 );
             }
             Message::ClosePrint => {
@@ -641,9 +667,16 @@ impl App {
                     return self.close_overlay();
                 }
             }
-            Message::Printed(what, result) => match result {
+            Message::Printed(what, result, mark) => match result {
                 Ok(()) => {
                     self.notice = Some(format!("{what} sent to the printer"));
+                    // marked spiffed once it's sent (the Print window's option)
+                    if let Some((ro, spiff)) = mark {
+                        let at = timecard::now_ms();
+                        self.hours.set_spiffed(&ro, Some(hours::Spiff { at, ..spiff }));
+                        self.save_hours();
+                        self.notice = Some(format!("{what} sent to the printer, and RO {ro} marked spiffed"));
+                    }
                     if matches!(self.overlay, Some((Overlay::Print, _))) {
                         return self.close_overlay();
                     }
@@ -665,6 +698,7 @@ impl App {
                     self.spiff_checked.insert(ro.clone(), now);
                     if let Some(v) = view {
                         self.spiff_totals.insert(ro.clone(), v.spiff_total());
+                        self.hours.set_spiff_total(&ro, v.spiff_total());
                         // the hours keep each RO's lines (to flag them, and their hours)
                         let lines = timecard::lines_of(&v).into_iter().map(|(_, l)| l).collect();
                         self.hours.update_lines(&ro, lines, &timecard::ymm(&v), timecard::now_ms());
@@ -735,17 +769,8 @@ impl App {
                     self.hours_view.editing = None;
                 }
             }
-            Message::MarkSpiffed(on) => {
-                let Some(ws) = self.workspace() else {
-                    return Task::none();
-                };
-                let ro = ws.ro.ro.clone();
-                let spiff = on.then(|| hours::Spiff {
-                    at: timecard::now_ms(),
-                    total: ws.xv.view.as_ref().map(|v| v.spiff_total()).unwrap_or(0.0),
-                    tag: ws.ro.tag.clone(),
-                    vehicle: ws.vehicle(),
-                });
+            Message::MarkSpiffed(ro, on) => {
+                let spiff = on.then(|| self.spiff_record(&ro));
                 self.hours.set_spiffed(&ro, spiff);
                 self.notice = Some(match timecard::save(&self.hours) {
                     Ok(()) if on => format!("RO {ro} marked spiffed"),
@@ -1062,6 +1087,60 @@ impl App {
         }
         self.save_hours();
         Task::none()
+    }
+
+    /// What's kept when an RO is marked spiffed: when, what the recommendations came to, its tag and vehicle (from
+    /// the RO open in the Workbench, or what the hours know of it)
+    fn spiff_record(&self, ro: &str) -> hours::Spiff {
+        let open = self.open.iter().find(|w| w.ro.ro == ro);
+        let rec = self.hours.ros.get(ro);
+        hours::Spiff {
+            at: timecard::now_ms(),
+            total: open
+                .and_then(|w| w.xv.view.as_ref().map(|v| v.spiff_total()))
+                .or_else(|| self.spiff_totals.get(ro).copied())
+                .or_else(|| rec.and_then(|r| r.spiff_total))
+                .unwrap_or(0.0),
+            tag: open
+                .map(|w| w.ro.tag.clone())
+                .or_else(|| self.my_ros.iter().find(|r| r.ro == ro).map(|r| r.tag.clone()))
+                .unwrap_or_default(),
+            vehicle: open.map(|w| w.vehicle()).or_else(|| rec.map(|r| r.ymm.clone())).unwrap_or_default(),
+        }
+    }
+
+    /// The app's Print window for an RO's spiff sheet (with "mark it spiffed once it's sent" when it isn't yet)
+    fn print_spiff(&mut self, v: xtime::ro::RoView) -> Task<Message> {
+        if self.print_job.is_some() || !v.spiff_earned() {
+            return Task::none();
+        }
+        // you, for a sheet whose RO doesn't name its technician
+        let me = match (self.settings.name.trim(), self.settings.employee_number.trim()) {
+            ("", n) => n.to_string(),
+            (name, "") => name.to_string(),
+            (name, n) => format!("{name} (#{n})"),
+        };
+        let extra = crate::print::spiff::Extra {
+            technician: me,
+            printed: format!("Printed {}", chrono::Local::now().format("%b %-d, %Y, %-I:%M %p")),
+        };
+        let ro = v.ro.clone();
+        let spiff = hours::Spiff {
+            at: 0, // when it's sent
+            total: v.spiff_total(),
+            tag: v.tag.clone(),
+            vehicle: timecard::ymm(&v),
+        };
+        let what = format!("Spiff for RO {ro}");
+        let build: crate::print::Build = std::sync::Arc::new(move |m| crate::print::spiff::sheet(m, &v, &extra));
+        let task = self.open_print(what, build);
+        if let Some(job) = &mut self.print_job {
+            if self.hours.spiffed(&ro).is_none() {
+                job.spiff = Some((ro, spiff));
+                job.mark_spiffed = true;
+            }
+        }
+        task
     }
 
     /// Brings up the app's Print window for a document (and looks for the printers meanwhile)

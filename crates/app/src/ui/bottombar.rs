@@ -36,7 +36,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
     };
 
     // your hours: what's flagged this pay period, and the report
-    let flagged = app.hours.report(&chrono::Local, app.now * 1000, 0).total;
+    let flagged = app.hours.report(&chrono::Local, app.now * 1000, 0, xtime::ro::SPIFF_OVER).total;
     let hours = button(text(format!("Hours · {flagged:.1} flagged")).size(13))
         .padding([3, 10])
         .style(style::ghost)

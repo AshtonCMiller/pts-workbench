@@ -4,7 +4,7 @@
 
 use iced::mouse;
 use iced::widget::canvas::{self, Canvas, Frame, Geometry, Program};
-use iced::widget::{Column, Space, button, column, container, horizontal_space, pick_list, row, scrollable, text};
+use iced::widget::{Column, Space, button, checkbox, column, container, horizontal_space, pick_list, row, scrollable, text};
 use iced::{Alignment, Color, Element, Font, Length, Pixels, Point, Rectangle, Renderer, Shadow, Size, Theme, Vector, font};
 
 use super::style;
@@ -170,6 +170,15 @@ pub fn card(app: &App) -> Element<'_, Message> {
             .size(13)
             .style(style::muted),
     );
+    // a spiff sheet: mark the RO spiffed once it's gone to the printer
+    if let Some((ro, _)) = &job.spiff {
+        side = side.push(
+            checkbox(format!("Mark RO {ro} as spiffed once it's sent to the printer"), job.mark_spiffed)
+                .text_size(13)
+                .size(16)
+                .on_toggle(Message::MarkAfterPrint),
+        );
+    }
     if let Some(e) = &job.error {
         side = side.push(text(e.as_str()).size(13).style(text::danger));
     }
