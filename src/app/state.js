@@ -2,8 +2,8 @@
 // as S (const S = require('./state')): S.PAGES, S.profiles, S.quitting…
 //   PAGES       where the app's pages (ui/, manual/) and Xtime scripts (inject/) are read from; a hot update points
 //               it at the new app files
-//   XTIME_CHAT, COX_SIGNIN  the scripts the app still runs inside Xtime (chat) and Cox's sign-in page (src/inject/),
-//               read from PAGES. The rest of Xtime is asked directly (src/xtime/).
+//   XTIME_CHAT, COX_SIGNIN  the scripts the app still runs inside a page (src/inject/), read from PAGES: Cox's sign-in
+//               page, and chat only when it can't go direct. Everything else in Xtime is asked directly (src/xtime/).
 //   profiles    the people (profiles) set up on this computer; windows: the open window of each
 //   quitting / closingOut, updater, whatsNew…  set by the files that own them (updates.js, main.js)
 'use strict';

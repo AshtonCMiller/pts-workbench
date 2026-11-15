@@ -136,18 +136,13 @@ module.exports = function install(my) {
   // Xtime's unread-messages counter (top right of Xtime's page)
   my.msgCount = null;
   async function readMsgCount() {
-    const frame = my.findXtimeDataFrame();
-    if (!frame) return;
     let n = null;
-    // Unread Dealership messages, from Xtime's chat (works without Xtime's page)
-    if (my.chatConfig || my.findInspectFrame()) {
-      try {
-        const r = await (my.chatConfig ? frame : my.findInspectFrame()).executeJavaScript(`${S.XTIME_CHAT}({"type":"count"}, ${my.chatCfgArg()})`, true);
-        if (r?.config) my.keepChatConfig(r.config);
-        my.chatSignin(r); // Xtime's sign-in too old: sign in again
-        if (r?.ok && Number.isFinite(r.count)) n = r.count;
-      } catch {}
-    }
+    // Unread Dealership messages, from Xtime's chat (asked directly; no Xtime page needed)
+    try {
+      const r = await my.chatCall({ type: 'count' });
+      my.chatSignin(r); // Xtime's sign-in too old: sign in again
+      if (r?.ok && Number.isFinite(r.count)) n = r.count;
+    } catch {}
     // Otherwise the counter on Xtime's page, when it's loaded
     const page = my.findInspectFrame();
     if (n == null && page) {

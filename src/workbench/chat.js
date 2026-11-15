@@ -1,11 +1,28 @@
-// The Dealership chat panel: Xtime's chat read through the Xtime page, and messages marked read (ids only, no text).
+// The Dealership chat panel: Xtime's chat asked directly (src/xtime/chat.js), and messages marked read (ids only, no text).
 'use strict';
 const fs = require('fs');
 const S = require('../app/state'); // shared app state (see app/state.js)
 const { userFile } = require('../app/files');
 
 module.exports = function install(my) {
-  Object.assign(my, { chatRun, chatListAction, chatBackground }); // used by the window's other parts
+  Object.assign(my, { chatRun, chatListAction, chatBackground, chatCall }); // used by the window's other parts
+
+  // One chat request: asked of Xtime directly with your login. Xtime's page is only used when the direct way can't be:
+  // the chat settings aren't known yet (needPage: the first time, if Xtime's chat token doesn't say them), or the chat
+  // server can't be reached from the app itself (noConnection: e.g. a network that only lets the browser through).
+  // Each time the page is used, xtime.log says why, so it can be dropped once it's never needed.
+  async function chatCall(action) {
+    let r = await my.xtime.run('chat', action, my.chatConfig || { storeId: my.settings.storeId });
+    if (r?.needPage || r?.noConnection) {
+      const frame = my.chatConfig ? my.findXtimeDataFrame() : (my.findInspectFrame() || my.findXtimeDataFrame());
+      if (frame) {
+        my.xtime.log(`chat ${action?.type || 'list'}: used Xtime's page (${r.error})`);
+        try { r = await frame.executeJavaScript(`${S.XTIME_CHAT}(${JSON.stringify(action)}, ${my.chatCfgArg()})`, true); } catch (e) { r = { ok: false, error: e.message || String(e) }; }
+      }
+    }
+    if (r?.config) my.keepChatConfig(r.config);
+    return r;
+  }
 
   // Messages you've read in the app (Xtime message ids only, no text): shown as read right away,
   // even before Xtime's own lists catch up. Kept 60 days.
@@ -27,10 +44,7 @@ module.exports = function install(my) {
     if (!channelId) return;
     if (Date.now() - (readBusy.get(channelId) || 0) < 15 * 1000) return; // already done just now
     readBusy.set(channelId, Date.now());
-    const frame = my.findXtimeDataFrame();
-    if (!frame || !my.chatConfig) { readLog(`${channelId} skipped: ${!frame ? 'Xtime not loaded' : 'chat settings not known yet'}`); return; }
-    let r = null;
-    try { r = await frame.executeJavaScript(`${S.XTIME_CHAT}(${JSON.stringify({ type: 'read', channelId })}, ${my.chatCfgArg()})`, true); } catch (e) { r = { ok: false, error: e.message }; }
+    const r = await chatCall({ type: 'read', channelId });
     const shownUnread = (messages || []).filter((m) => m.unread && !m.mine).length;
     readLog(`${channelId} unread here ${shownUnread} · Xtime said unread ${r?.tried ?? (r?.ids || []).length} ${r?.shape || ''} · ${r?.ok ? 'receipts sent' + (r.ids?.length ? ` for ${r.ids.join(',')}` : ' (none needed)') : `FAILED: ${r?.error || 'no answer'}`}`);
     if (!r?.ok) { readBusy.delete(channelId); return; }                 // try again next time it's opened
@@ -64,7 +78,6 @@ module.exports = function install(my) {
   let backgroundBusy = false;
   async function chatBackground() {
     if (backgroundBusy || my.xtimeSignin || !my.chrome || my.chrome.webContents.isDestroyed()) return;
-    if (!my.chatConfig && !my.findInspectFrame()) return; // Xtime not there yet
     backgroundBusy = true;
     try { await chatRun(chatListAction(), 'list', { background: true }); } finally { backgroundBusy = false; }
   }
@@ -74,12 +87,8 @@ module.exports = function install(my) {
   // background: read without the panel asking (the panel only refreshes its list; nothing gets marked read)
   async function chatRun(action, kind, { background = false } = {}) {
     const reply = (r) => { if (my.chrome && !my.chrome.webContents.isDestroyed()) my.chrome.webContents.send('chat', { kind, channelId: action.channelId, background, ...r }); };
-    // Chat settings come from Xtime's full page the first time; after that the background page is enough
-    const frame = my.chatConfig ? my.findXtimeDataFrame() : (my.findInspectFrame() || my.findXtimeDataFrame());
-    if (!frame) return reply({ ok: false, error: 'Xtime is still loading' });
     try {
-      const r = await frame.executeJavaScript(`${S.XTIME_CHAT}(${JSON.stringify(action)}, ${my.chatCfgArg()})`, true);
-      if (r?.config) my.keepChatConfig(r.config);
+      const r = await chatCall(action);
       my.chatSignin(r); // Xtime's sign-in too old: sign in again
       if (r?.needPage) my.unparkXtime(); // e.g. the first time: load Xtime's page once to learn its chat settings
       if (r?.fieldNames?.length && !my.loggedChatFields.has(kind)) { // field names only, for mapping; no message text

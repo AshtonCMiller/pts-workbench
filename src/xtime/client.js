@@ -9,6 +9,7 @@
 //   details.js    one RO's lines (for hours and flags)
 //   ro.js         one RO for the Xtime View tab, and marking a line done
 //   inspect.js    the inspection form, and adding / editing / deleting lines
+//   chat.js       the Dealership chat: conversations, unread count, sending, read receipts (with xml.js, websocket.js)
 // Each takes this client (x) first: x.fetch(url, options) works like the page's fetch (addresses on the Inspect site
 // can be written as "/api/…"), x.xsrf() is Xtime's anti-forgery token, x.mem is remembered between calls.
 // Customer information is never kept: each request returns only what the app shows.
@@ -21,6 +22,7 @@ const MODULES = {
   details: require('./details'),
   ro: require('./ro'),
   inspect: require('./inspect'),
+  chat: require('./chat'),
 };
 
 class XtimeClient {
@@ -53,7 +55,8 @@ class XtimeClient {
     const method = String(opts.method || 'GET').toUpperCase();
     const headers = { ...(opts.headers || {}) };
     headers.Referer ||= this.base();
-    if (method !== 'GET' && method !== 'HEAD' && abs.host === this.host()) headers.Origin ||= `https://${this.host()}`;
+    // changes carry the Inspect site as their origin, as they do from Xtime's page (also to Xtime's login and chat services)
+    if (method !== 'GET' && method !== 'HEAD') headers.Origin ||= `https://${this.host()}`;
     const t0 = Date.now();
     let res;
     try {
