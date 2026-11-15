@@ -90,6 +90,56 @@ async function openAddService({ item = null, line = null } = {}) {
     }
     if (line.estimate != null && line.estimate > 0) duration.value = n(line.estimate);
   }
+  // CDK op code: Xtime's Op Code box. Typing searches the store's op codes; picking one fills in what Xtime fills in
+  // (details, concern, correction, dispatch code, duration, hours and labor). A service with its own op code starts with it.
+  const opInput = inp({ placeholder: 'Type to search the CDK op codes (code or description)', spellcheck: 'false', autocomplete: 'off' });
+  const opList = el('select', { size: '6', class: 'x-svc-list', hidden: '' });
+  let opFound = [], opTimer = null, opAsk = 0;
+  const opSearch = () => {
+    clearTimeout(opTimer);
+    const q = opInput.value.trim();
+    if (q.length < 2) { opList.hidden = true; opFound = []; return; }
+    opTimer = setTimeout(async () => {
+      const mine = ++opAsk;
+      let r;
+      try { r = await api.xinspect({ type: 'opcodes', search: q }); } catch (e) { r = { error: true, message: String(e?.message || e) }; }
+      if (mine !== opAsk) return; // typed more since
+      if (r?.error) { err.textContent = r.message || "Couldn't search the op codes"; return; }
+      opFound = r.opcodes || [];
+      opList.replaceChildren(...(opFound.length ? opFound.map((o) => el('option', { value: o.id,
+        text: `${o.id}${o.description ? `  ·  ${o.description}` : ''}${o.hours ? `  ·  ${o.hours} hr` : ''}` })) : [el('option', { disabled: '', text: 'No op codes match' })]));
+      opList.hidden = false;
+    }, 300);
+  };
+  opInput.addEventListener('input', opSearch);
+  opInput.addEventListener('keydown', (e) => { if (e.key === 'ArrowDown' && !opList.hidden) { e.preventDefault(); opList.focus(); opList.selectedIndex = 0; } });
+  const pickOp = () => {
+    const o = opFound.find((x) => x.id === opList.value);
+    if (!o) return;
+    opInput.value = o.id;
+    st.autoOp = null; // picked yourself: kept
+    opList.hidden = true;
+    // as Xtime's onOpCodeSelect; text you typed yourself is kept
+    const keep = (box) => box.value.trim() && box.value !== st.auto;
+    if (o.description && !keep(details)) details.value = o.description;
+    if (!keep(correction)) correction.value = o.description || details.value;
+    if (!keep(complaint)) complaint.value = o.complaint || o.description || complaint.value;
+    st.auto = details.value;
+    const dc = o.dispatch || defCode?.code || '';
+    if (dc) {
+      if (![...dispatch.options].some((x) => x.value === dc)) dispatch.append(el('option', { value: dc, text: dc }));
+      dispatch.value = dc;
+    }
+    const dcInfo = codes.find((x) => x.code === dc);
+    if (o.duration) duration.value = String(o.duration); else if (dcInfo?.duration != null) duration.value = String(dcInfo.duration);
+    if (o.hours != null) hours.value = String(o.hours);
+    if (o.sell > 0) labor.value = o.sell.toFixed(2);
+  };
+  opList.addEventListener('change', pickOp);
+  opList.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); pickOp(); opInput.focus(); } });
+  opList.addEventListener('dblclick', pickOp);
+  if (line?.opCodeDms) opInput.value = line.opCodeDms;
+  opInput.addEventListener('input', () => { st.autoOp = null; }); // typed yourself: not replaced when the service changes
   dispatch.addEventListener('change', () => {
     const c = codes.find((x) => x.code === dispatch.value);
     if (c?.duration != null) duration.value = String(c.duration); // a code with its own time fills it in; otherwise the time stays
@@ -106,6 +156,10 @@ async function openAddService({ item = null, line = null } = {}) {
       if (!box.value.trim() || box.value === st.auto) box.value = plain;
     }
     st.auto = plain;
+    // the op code: the service's own (e.g. AL for an alignment), or M (miscellaneous) when it has none; one picked or
+    // typed yourself stays. Switching services replaces only the one that came from the last service.
+    const svcCode = st.service.opCode || 'M';
+    if (!opInput.value.trim() || opInput.value === st.autoOp) { opInput.value = svcCode; st.autoOp = svcCode; opList.hidden = true; }
     if (line) return; // editing: the line's hours and prices stay as they are
     if (!labor.value && st.service.labor) labor.value = st.service.labor.toFixed(2);
     if (!total.value && st.service.price) total.value = st.service.price.toFixed(2);
@@ -117,6 +171,7 @@ async function openAddService({ item = null, line = null } = {}) {
   const save = el('button', { class: 'primary', text: line ? 'Save' : 'Add', onclick: async () => {
     err.textContent = '';
     if (!st.service) { err.textContent = 'Pick a service from the list.'; return; }
+    if (!opInput.value.trim()) { err.textContent = 'Pick a CDK op code (type to search).'; opInput.focus(); return; }
     if (!details.value.trim()) { err.textContent = 'Details are required.'; return; }
     if (duration.value.trim() && !(Number(duration.value) > 0)) { err.textContent = 'Estimated duration should be a number of hours, like 0.5.'; return; }
     save.disabled = true; save.textContent = line ? 'Saving…' : 'Adding…';
@@ -124,7 +179,7 @@ async function openAddService({ item = null, line = null } = {}) {
     try {
       r = await api.xinspect({ type: line ? 'editLine' : 'addLine', id: line?.id, line: { sgcid: st.service.sgcid, sgid: st.service.sgid, color: st.color, payTypeId: pay.value,
         hours: hours.value.trim(), labor: labor.value.trim(), parts: parts.value.trim(), total: total.value.trim(),
-        dispatchCode: dispatch.value, duration: duration.value.trim(),
+        dispatchCode: dispatch.value, duration: duration.value.trim(), opCodeDms: opInput.value.trim(),
         details: details.value.trim(), complaint: complaint.value.trim(), cause: cause.value.trim(), correction: correction.value.trim(), techNote: note.value.trim() } });
     } catch (e) { r = { error: true, message: String(e?.message || e) }; }
     save.disabled = false; save.textContent = line ? 'Save' : 'Add';
@@ -137,6 +192,7 @@ async function openAddService({ item = null, line = null } = {}) {
     el('div', { class: 'x-modal-head' }, el('b', { text: line ? `Edit Service${line.dms ? ` · line ${line.dms}` : ''}` : item ? `Add Service · ${item.name}` : 'Add Service' }), el('button', { class: 'icon', text: '×', title: 'Close (Esc)', onclick: close })),
     el('div', { class: 'x-modal-body' },
       field('Service Name', el('div', { class: 'x-svc' }, find, list), true),
+      field('CDK Op Code', el('div', { class: 'x-svc' }, opInput, opList), true),
       el('div', { class: 'x-f x-colors' }, el('span', {}, 'Color'), el('div', {}, colorBtn('Yellow', 'May Require Future Attention'), colorBtn('Red', 'Requires Immediate Attention'), colorNote)),
       el('div', { class: 'x-grid4' }, field('Labor Type', pay, true), field('Hours', hours), field('Labor', labor), field('Parts', parts), field('Total', total)),
       el('div', { class: 'x-grid4' }, field('Dispatch Code', dispatch, true), field('Est. Duration', duration, true)),

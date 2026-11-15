@@ -25,6 +25,13 @@ const { initUpdater, initWhatsNew } = require('./app/updates');
 const { appUiContents, isPrintKey, printPage } = require('./app/web');
 const createWorkbench = require('./workbench');
 
+// Linux: Chromium only uses the system keyring (for saved logins) on desktops it recognises, mainly GNOME and KDE.
+// On others (Hyprland, Sway, i3…) it quietly uses its unsafe fallback even when GNOME Keyring is running, so ask for the
+// Secret Service (GNOME Keyring, KeePassXC…) there. "--password-store=…" when starting the app still wins.
+if (process.platform === 'linux' && !app.commandLine.hasSwitch('password-store') && !/kde/i.test(process.env.XDG_CURRENT_DESKTOP || '')) {
+  app.commandLine.appendSwitch('password-store', 'gnome-libsecret');
+}
+
 // Pictures in the app's own manual viewer come through ptsasset://, fetched with the window's PTS login
 protocol.registerSchemesAsPrivileged([{ scheme: 'ptsasset', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }]);
 

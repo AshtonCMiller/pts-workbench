@@ -53,21 +53,26 @@ const setUpdate = (patch) => { Object.assign(update, patch); pushAll(); };
 //   • once, after an update has installed (the items this computer hasn't been shown yet)
 //   • as a notification, when an update switched over without a restart
 // Which items were shown is kept in whats-new.json (this computer only).
+// Within an update ("## v0.4.5"), a "# Bug Fixes" / "# Improvements" line (or "###") starts a category: the items
+// under it are listed under that name. A "#" line before the first "##" is the file's own title.
+// Each group: { head, items: [text…], cats: [category of each item, '' when none] }
 function parseWhatsNew(md) {
   const groups = [];
-  let g = null, item = null;
+  let g = null, item = null, cat = '', inComment = false;
   for (const raw of String(md || '').split(/\r?\n/)) {
     const line = raw.replace(/\s+$/, '');
     let m;
-    if ((m = line.match(/^##\s+(.+)/))) { g = { head: m[1].trim(), items: [] }; groups.push(g); item = null; }
-    else if (/^#\s/.test(line) || /^<!--/.test(line.trim())) { item = null; }
+    if (inComment) { if (line.includes('-->')) inComment = false; continue; }
+    if (/^\s*<!--/.test(line)) { item = null; if (!line.includes('-->')) inComment = true; continue; }
+    if ((m = line.match(/^##\s+(.+)/))) { g = { head: m[1].trim(), items: [], cats: [] }; groups.push(g); item = null; cat = ''; }
+    else if ((m = line.match(/^#{1}\s+(.+)|^#{3,}\s+(.+)/))) { item = null; if (g) cat = (m[1] || m[2]).trim(); } // a category (before any "##": the title)
     else if ((m = line.match(/^\s*[-*]\s+(.+)/))) {
-      if (!g) { g = { head: '', items: [] }; groups.push(g); }
-      item = { text: m[1].trim() }; g.items.push(item);
+      if (!g) { g = { head: '', items: [], cats: [] }; groups.push(g); }
+      item = { text: m[1].trim() }; g.items.push(item); g.cats.push(cat);
     } else if (item && /^\s+\S/.test(line)) item.text += ` ${line.trim()}`; // an item's text carried onto the next line
     else if (!line.trim()) item = null;
   }
-  return groups.filter((x) => x.items.length).map((x) => ({ head: x.head, items: x.items.map((i) => i.text.slice(0, 600)) }));
+  return groups.filter((x) => x.items.length).map((x) => ({ head: x.head, items: x.items.map((i) => i.text.slice(0, 600)), cats: x.cats }));
 }
 const readWhatsNew = (srcDir) => { try { return parseWhatsNew(fs.readFileSync(path.join(srcDir, 'whats-new.md'), 'utf8')); } catch { return []; } };
 const whatsNewKey = (text) => require('crypto').createHash('sha1').update(String(text).trim().toLowerCase()).digest('hex').slice(0, 12);
@@ -82,7 +87,10 @@ function markWhatsNewSeen(groups) {
 function unseenWhatsNew(groups) {
   const seen = whatsNewSeen();
   if (!seen) return groups.slice(0, 1);
-  return groups.map((g) => ({ head: g.head, items: g.items.filter((t) => !seen.has(whatsNewKey(t))) })).filter((g) => g.items.length);
+  return groups.map((g) => {
+    const keep = g.items.map((t) => !seen.has(whatsNewKey(t)));
+    return { head: g.head, items: g.items.filter((_, i) => keep[i]), cats: (g.cats || []).filter((_, i) => keep[i]) };
+  }).filter((g) => g.items.length);
 }
 // shown in every window until one of them closes it: { id, reason: 'installed' | 'ready', version, groups }
 S.whatsNew = null;

@@ -8,13 +8,30 @@
   Changing only this file (and pages) still updates without a restart.
 -->
 
+## v0.4.6
+
+# Improvements
+- **Connected Vehicle Data:** The Service Manual now has a proper 'Connected Vehicle' tab similar to PTS to properly report connected vehicle data in a much more organized fashion.
+
 ## v0.4.5
 
+# Bug Fixes
+
+- Fixed an issue plaguing new installations, resulting in the 'Service Manual' being unable to retrieve data from Ford servers, while PTS itself would still function.
+- Fixed a bug with adding XTime recommendations using new XTime View which did not properly set a CDK Op Code.
+- Fixed an issue where the "What's new" page did not correctly separate improvements from bug fixes (what you're reading right now)
+
+# Improvements
 - **Chat Improvements:** XTime chat now shows missed messages with a red badge. Chat also now loads in the background, and chat tokens are monitored for session invalidation.
 
 ## v0.4.4
 
+# Bug Fixes
+
 - Corrected a bug with XTime that results in the chat not loading if the XTime session has been invalidated. Previously, Chat would silently fail in the background with no feasible fix.
+
+# Improvements
+
 - **Consolidated Codebase:** Restructured most of the internal codebase to make development more efficient, and help the app recover from errors.
 - **Memory Management:** ROs that have not been opened in a while, or haven't been open on the current launch, will automatically go to sleep to conserve system resources. These ROs are marked by an `ASLEEP` tag next to the RO in **Workbench**
 - **Content Preloading:** With the added benefits of putting ROs to sleep, ROs that are first opened preload all relevant data from the workshop manual including SLTS, OASIS, TSBs, Workshop Manual Content, and PC/ED (if supported). Content is automatically unloaded after 15 minutes, or if there is a change pushed by Ford (updated workshop manual)

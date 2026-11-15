@@ -94,6 +94,7 @@
       dms: text(l.DMSNumber),
       name: text(l.ServiceGuideSpecialItemName) || text(l.ServiceName).replace(/^\[Primary\]:\s*/i, ''),
       opCode: text(l.OpCodeDms) || text(l.OpCode),
+      opCodeDms: text(l.OpCodeDms), // the CDK op code (for editing the line)
       primary: l.IsPrimary === true,
       approved: l.Approved === true, declined: l.Declined === true, completed: l.Completed === true,
       future: l.IsFutureRecommendation === true,

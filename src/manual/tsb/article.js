@@ -128,5 +128,11 @@ function openFromDiag(t) {
   if (known) { openArticle(known); return; }
   // Not on this VIN's list (or the list isn't loaded): open it from Diagnostics' own link
   const type = String(t.type || 'TSB').toUpperCase();
+  if (!t.url) { // sent with only its number (Connected Vehicle): show the list filtered to that number instead
+    state.q = String(t.id); $('t-q').value = state.q; save();
+    showList(); renderList();
+    toast(`${type} ${t.id} isn't on this VIN's list`);
+    return;
+  }
   openArticle({ type, id: t.id, title: `${type} ${t.id}`, summary: t.title || '', date: '', url: t.url ? new URL(t.url, TSB_BASE).href : '' });
 }

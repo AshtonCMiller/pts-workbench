@@ -1,5 +1,5 @@
-// Saved logins for this window only, encrypted with the Windows account (safeStorage): filled in on Xtime / PTS /
-// ProDemand sign-in pages, and usernames remembered for two-step sign-ins.
+// Saved logins for this window only, encrypted with the Windows account (safeStorage; on Linux, the system keyring):
+// filled in on Xtime / PTS / ProDemand sign-in pages, and usernames remembered for two-step sign-ins.
 'use strict';
 const { safeStorage } = require('electron');
 
@@ -11,7 +11,13 @@ module.exports = function install(my) {
   const autoTries = new Map(); // "host:step" -> last time "Sign in" was pressed for you
   const readLogins = () => my.readJson('logins.json', []);
   my.readLogins = readLogins;
-  const canEncrypt = () => { try { return safeStorage.isEncryptionAvailable(); } catch { return false; } };
+  // On Linux, Electron encrypts with the system keyring (GNOME Keyring / KWallet). Without one running it falls back to a
+  // fixed key built into Chromium ("basic_text"), which anyone with the file could undo: then nothing is saved at all.
+  const keyringOk = () => {
+    if (process.platform !== 'linux') return true;
+    try { return !['basic_text', 'unknown'].includes(safeStorage.getSelectedStorageBackend()); } catch { return false; }
+  };
+  const canEncrypt = () => { try { return safeStorage.isEncryptionAvailable() && keyringOk(); } catch { return false; } };
   my.canEncrypt = canEncrypt;
 
   function getLogin(host, identifierOnly) {

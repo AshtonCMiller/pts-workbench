@@ -1,0 +1,21 @@
+# Line endings: LF in the repository and on every computer, so editing on Linux and Windows doesn't mark files changed.
+* text=auto eol=lf
+
+# Windows-only scripts keep CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Never touched
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.icns binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.asar binary
+*.exe binary
+*.zip binary

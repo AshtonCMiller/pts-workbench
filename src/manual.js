@@ -23,6 +23,8 @@ class ManualService {
     this.books = new Map(); // vin -> Promise<book>
     this.trees = new Map(); // cache key -> Promise<html>
     this.procs = new Map(); // url -> html (this session only)
+    this.cvCtx = new Map(); // vin -> what the Connected Vehicle tab's requests need (from the status request)
+    setTimeout(() => this.clearOldNonces().catch(() => {}), 0);
   }
 
   // A short record of each request (address, status, where it ended up), for working out problems
@@ -35,7 +37,48 @@ class ManualService {
     } catch { /* logging is optional */ }
   }
 
-  async fetch(url, opts = {}) {
+  // Ford's server turns a request down ("Request Too Long") once the cookies sent with it pass its limit. What piles up
+  // is Ford's sign-in leftovers: each time a page is sent to Ford's sign-in (e.g. while you're signed out), Ford sets an
+  // "OpenIdConnect.nonce…" cookie that's only needed until that sign-in finishes; unfinished ones stay. Those go first.
+  // Ford's sign-in itself (Ford.TSO.PTSSuite, split into chunks C1, C2… that only work together) is never trimmed:
+  // if the leftovers aren't enough, every cookie for the address goes and PTS asks to sign in again.
+  // Logged by name and size only, never contents.
+  static isNonce(c) { return /^OpenIdConnect\.nonce\./i.test(c.name); }
+  cookieUrl(c, url) { return `https://${String(c.domain || new URL(url).hostname).replace(/^\./, '')}${c.path || '/'}`; }
+  async removeCookies(url, pick) {
+    let list = [];
+    try { list = await this.ses.cookies.get({ url }); } catch { return []; }
+    const gone = [];
+    for (const c of list.filter(pick)) { try { await this.ses.cookies.remove(this.cookieUrl(c, url), c.name); gone.push(c); } catch {} }
+    if (gone.length) { try { await this.ses.cookies.flushStore(); } catch {} }
+    return gone;
+  }
+  // Leftover sign-in starts from earlier runs (none can still be in progress when the app starts)
+  async clearOldNonces() {
+    const gone = await this.removeCookies(`${PTS}/`, ManualService.isNonce);
+    if (gone.length) this.log(`removed ${gone.length} leftover PTS sign-in cookies (OpenIdConnect.nonce) from earlier runs`);
+  }
+  async trimCookies(url) {
+    if (Date.now() - (this.trimmedAt || 0) < 60 * 1000) return false; // once a minute at most
+    this.trimmedAt = Date.now();
+    let list = [];
+    try { list = await this.ses.cookies.get({ url }); } catch { return false; }
+    const size = (c) => c.name.length + String(c.value || '').length + 2;
+    const total = list.reduce((t, c) => t + size(c), 0);
+    const nonces = list.filter(ManualService.isNonce);
+    this.log(`   cookies sent to ${new URL(url).hostname}: ${list.length}, ${total} characters, ${nonces.length} unfinished sign-in leftovers (OpenIdConnect.nonce)`);
+    const left = total - nonces.reduce((t, c) => t + size(c), 0);
+    if (nonces.length && left < 12000) {
+      const gone = await this.removeCookies(url, ManualService.isNonce);
+      this.log(`   removed ${gone.length} sign-in leftovers; now ${left} characters`);
+      return gone.length > 0;
+    }
+    const gone = await this.removeCookies(url, () => true); // the sign-in itself is too big: start it fresh
+    this.log(`   still too long without the leftovers (${left} characters): removed every cookie for this address (${gone.length}); PTS will ask to sign in again`);
+    return false;
+  }
+
+  async fetch(url, opts = {}, retried = false) {
     let res;
     const short = url.length > 220 ? `${url.slice(0, 220)}…` : url;
     try {
@@ -50,7 +93,29 @@ class ManualService {
     let host = '';
     try { host = new URL(res.url || url).hostname; } catch {}
     if (res.status === 401 || res.status === 403 || (host && !ASSET_HOSTS.test(host))) throw new NeedsLogin();
-    if (!res.ok) throw new Error(`Ford returned an error (${res.status})`);
+    if (!res.ok) {
+      // what Ford's error page says (its title / first words: e.g. IIS's "Bad Request - Request Too Long"), for the log
+      let said = '';
+      try {
+        const body = await res.clone().text();
+        const title = (body.match(/<title[^>]*>([^<]*)/i) || [])[1] || '';
+        const h = (body.match(/<h[12][^>]*>([^<]*)/i) || [])[1] || '';
+        said = [title, h, body.replace(/<[^>]+>/g, ' ')].map((x) => x.replace(/\s+/g, ' ').trim()).filter(Boolean).join(' · ').slice(0, 240);
+      } catch {}
+      if (said) this.log(`   Ford's page said: ${said}`);
+      if (res.status === 400 && /request too long|header.{0,20}too long/i.test(said) && !retried) {
+        if (await this.trimCookies(res.url || url)) return this.fetch(url, opts, true); // the cookies fit again: once more
+        throw new NeedsLogin();
+      }
+      // Ford's sign-in cookie is split in chunks that only work together; with any missing, every page fails:
+      // throw the rest away so PTS asks to sign in again
+      if (/chunked cookie is incomplete/i.test(said)) {
+        const gone = await this.removeCookies(res.url || url, (c) => /^Ford\.TSO\./i.test(c.name));
+        this.log(`   Ford's sign-in cookie was incomplete: removed ${gone.length} pieces of it (${gone.map((c) => c.name).join(', ')}); PTS will ask to sign in again`);
+        throw new NeedsLogin();
+      }
+      throw new Error(`Ford returned an error (${res.status})`);
+    }
     return res;
   }
 
@@ -135,7 +200,28 @@ class ManualService {
     return this.books.get(key);
   }
 
-  async loadBook(vin, kind = 'workshop') {
+  // Ford's book pages need what PTS's own home page sets up for a signed-in person (its TPS-MEMBERSHIP / TPS-PERM
+  // cookies: which publications your dealership has). Without them every book says "not available for this vehicle"
+  // ("Object reference not set…"), e.g. in a brand-new profile that's never shown PTS's home page. Loading that page
+  // once (as PTS's own tab does) sets them up again. At most once every 10 minutes.
+  // Also the cookies PTS's vehicle page sets for the vehicle you're on (PTSSession, FeaturesAttributes, PTStoSSSC):
+  // its book pages read them, and without them crash the same way. A brand-new profile has none until PTS's own
+  // page has shown a vehicle, so that page is opened unseen for this VIN (openVehicleInPts, from the window).
+  async setUpPts(vin) {
+    if (Date.now() - (this.setUpAt || 0) < 10 * 60 * 1000) return false;
+    this.setUpAt = Date.now();
+    const NAMES = /^(TPS%2D(MEMBERSHIP|PERM)|PTSSession|FeaturesAttributes|PTStoSSSC|PTSReferrerSite)$/i;
+    const has = async () => { try { return [...new Set((await this.ses.cookies.get({ url: `${PTS}/` })).filter((c) => NAMES.test(c.name)).map((c) => c.name))]; } catch { return []; } };
+    const before = await has();
+    try { await this.text(`${PTS}/`); } catch (e) { if (e.needsLogin) throw e; }
+    let how = '';
+    if (this.openVehicleInPts) { try { how = await this.openVehicleInPts(vin); } catch (e) { how = `failed: ${e.message || e}`; } }
+    const after = await has();
+    this.log(`   set up PTS (home page${this.openVehicleInPts ? `, then its vehicle page: ${how}` : ''}): its cookies before ${before.join(',') || 'none'}, after ${after.join(',') || 'none'}`);
+    return true;
+  }
+
+  async loadBook(vin, kind = 'workshop', again = false) {
     const v = await this.decode(vin);
     if (!v.ids.length) throw new Error("PTS didn't return a vehicle ID for this VIN");
     const none = kind === 'pced' ? 'No PC/ED manual for this vehicle' : 'No manual for this vehicle';
@@ -146,7 +232,14 @@ class ManualService {
       try {
         const html = await this.text(url);
         const book = parseBookPage(html);
-        if (!book.params.vehicleId || !book.bases.publicationBookTreeAndCoverBase) throw new Error(none);
+        if (!book.params.vehicleId || !book.bases.publicationBookTreeAndCoverBase) {
+          // what Ford's page says instead (e.g. its "Unavailable" page), for the log
+          const said = [(html.match(/<title[^>]*>([^<]*)/i) || [])[1] || '', html.replace(/<(script|style)[\s\S]*?<\/\1>/gi, ' ').replace(/<[^>]+>/g, ' ')]
+            .map((x) => x.replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim()).filter(Boolean).join(' · ').slice(0, 300);
+          if (said) this.log(`   Ford's page said: ${said}`);
+          if (!again && /object reference not set/i.test(said) && await this.setUpPts(vin)) return this.loadBook(vin, kind, true);
+          throw new Error(none);
+        }
         return {
           vin, url, kind,
           title: book.params.bookTitle || `${v.year} ${v.marketName}`,
@@ -450,7 +543,183 @@ class ManualService {
       if (/<form[^>]+(login|signin|sso|adfs)/i.test(text)) throw new NeedsLogin();
       throw new Error(`Ford didn't send connected vehicle data (${res.status})`);
     }
+    // what the Connected Vehicle tab's other requests need (the same values Ford's own page keeps)
+    const user = json.capabilityData?.userDetails || {};
+    this.cvCtx.set(book.vin, { vin: vehicleVin, country, paCode: body.paCode, lang: body.language,
+      userCountry: user.userCountry || country, userState: user.userstate || 'MI' });
     return { country, fuelType, capability: json.capabilityData || null, data: json.connectedVehicleData || null, status: res.status };
+  }
+
+  // ---- Connected Vehicle tab: Ford's connected vehicle pages (history, over-the-air updates, subscriptions) ----
+  // Each needs the values the status request above works out, so that one runs first if it hasn't yet.
+  async cvContext(vin) {
+    const book = await this.book(vin);
+    if (!this.cvCtx.has(book.vin)) await this.connectedVehicle(vin);
+    const ctx = this.cvCtx.get(book.vin);
+    if (!ctx) throw new Error("Connected vehicle data isn't available for this vehicle");
+    return ctx;
+  }
+  // GET one of Ford's /ConnectedVehicle/ requests → its JSON (the log notes its fields, not its values)
+  async cvJson(path) {
+    const res = await this.fetch(`${PTS}${path}`, { headers: { Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest' } });
+    const text = await res.text();
+    let json;
+    try { json = JSON.parse(text); } catch {
+      if (/<form[^>]+(login|signin|sso|adfs)/i.test(text)) throw new NeedsLogin();
+      this.log(`   not JSON (${text.length} characters): ${text.replace(/\s+/g, ' ').slice(0, 160)}`);
+      throw new Error("Ford sent back something other than connected vehicle data");
+    }
+    const fields = Array.isArray(json) ? `a list of ${json.length}` : json && typeof json === 'object' ? `fields ${Object.keys(json).slice(0, 14).join(', ')}` : typeof json;
+    this.log(`   ${text.length} characters: ${fields}`);
+    return json;
+  }
+  // Module names for module addresses (726 → BCM…), Ford's list, kept for the session
+  async cvModules(ctx) {
+    if (this.cvModuleNames) return this.cvModuleNames;
+    try {
+      const json = await this.cvJson(`/ConnectedVehicle/getMMLModuleAcronym?moduleAddr=ALL&lang=${encodeURIComponent(ctx.lang || 'EN-US')}&countryCode=${encodeURIComponent(ctx.country)}`);
+      const names = {};
+      for (const m of json?.moduleDetails || []) {
+        const addr = String(m.moduleAddr || '').slice(3, 6).toUpperCase();
+        if (addr && m.moduleAcronym) names[addr] = { name: m.moduleAcronym, desc: m.moduleDesc || m.moduleDescription || '' };
+      }
+      if (Object.keys(names).length) this.cvModuleNames = names;
+      else this.log(`   no module names in Ford's list (${JSON.stringify(json).slice(0, 200)})`);
+      return names;
+    } catch (e) { this.log(`   module names: ${e.message || e}`); return {}; }
+  }
+  // What each DTC means (its title, its failure type, its status byte), the request Ford's Connected Vehicle page makes for
+  // the DTCs in its history. dtcs: [{ code, ecu, ft, sb }]. Titles are kept for the session, so only new DTCs are asked about.
+  async cvDescribe(vin, dtcs) {
+    const ctx = await this.cvContext(vin);
+    if (!this.cvDescs) this.cvDescs = { titles: {}, ft: {}, sb: {} };
+    const known = this.cvDescs;
+    const ask = dtcs.filter((d) => !(d.code in known.titles));
+    if (ask.length) {
+      const uniq = (list) => [...new Set(list.filter(Boolean).map((x) => String(x).toUpperCase()))].join('|');
+      const body = { lang: ctx.lang || 'EN-US', Spec: 'GGDS', DispID: uniq(ask.map((d) => d.code)), moduleAddr: uniq(ask.map((d) => d.ecu)),
+        failTypes: uniq(ask.map((d) => d.ft)), statusBytes: uniq(dtcs.map((d) => d.sb)), key: '', fullStatusByteDesc: 'yes', progKeys: '' };
+      const url = `${PTS}/ConnectedVehicle/getDTCDataDetailDescription?countryCode=${encodeURIComponent(ctx.country)}`;
+      const res = await this.fetch(url, { method: 'POST', body: JSON.stringify(body),
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest' } });
+      const text = await res.text();
+      let json = null;
+      try { json = JSON.parse(text); } catch {}
+      if (!json) {
+        if (/<form[^>]+(login|signin|sso|adfs)/i.test(text)) throw new NeedsLogin();
+        this.log(`   DTC descriptions: not JSON (${text.replace(/\s+/g, ' ').slice(0, 160)})`);
+        throw new Error("Ford didn't send DTC descriptions");
+      }
+      const titles = json?.dtsGGDSRes?.lstDTCData || [];
+      for (const t of Array.isArray(titles) ? titles : []) if (t?.dtcCode && t.dtcTitle) known.titles[String(t.dtcCode).toUpperCase()] = String(t.dtcTitle).trim();
+      for (const d of ask) if (!(d.code in known.titles)) known.titles[d.code] = ''; // Ford has none: don't ask again
+      for (const f of json?.failureTypeRes?.lstDTCFTInfo || []) if (f?.strFailureTypeCode) known.ft[String(f.strFailureTypeCode).toUpperCase()] = String(f.strFailureTypeDesc || '').trim();
+      for (const b of json?.statusByteRes?.lstDTCSBInfo || []) if (b?.strStatusByteCode) known.sb[String(b.strStatusByteCode).toUpperCase()] = String(b.strStatusByteDesc || '').trim();
+      this.log(`   DTC descriptions: ${Object.keys(json || {}).join(', ')} · ${titles.length} titles for ${ask.length} DTCs`);
+    }
+    return known;
+  }
+
+  // TSBs, GSBs and SSMs for this vehicle by DTC, as Ford's Connected Vehicle page lists them next to each DTC.
+  // Ford's keys: "B1081", "B1081:07", "B10DA (PCM)", "B156D:89 (TCU)"; each article "number|type|title|failure type|module".
+  async cvArticles(vin) {
+    const ctx = await this.cvContext(vin);
+    const book = await this.book(vin);
+    const cached = this.cvArticleLists?.get(book.vin);
+    if (cached && Date.now() - cached.at < 30 * 60 * 1000) return cached.list;
+    const country = /^(PRI|VIR)$/.test(ctx.country) ? 'USA' : ctx.country;
+    const json = await this.cvJson(`/ConnectedVehicle/getArticlesBySymptomData?vin=${encodeURIComponent(ctx.vin)}&pacode=${encodeURIComponent(ctx.paCode)}` +
+      `&lang=${encodeURIComponent(ctx.lang || 'EN-US')}&country=${encodeURIComponent(country)}&market=${encodeURIComponent(country)}`);
+    const list = {};
+    for (const [key, items] of Object.entries(json?.TSBSSMGSBList || {})) {
+      list[key] = (Array.isArray(items) ? items : []).map((t) => {
+        const [id, type, title, ft, mod] = String(t).split('|');
+        const none = (v) => (!v || /^null$/i.test(v) ? '' : v.trim());
+        return { id: none(id), type: none(type).toUpperCase() || 'TSB', title: none(title), ft: none(ft), module: none(mod) };
+      }).filter((a) => a.id);
+    }
+    this.log(`   articles for ${Object.keys(list).length} DTCs`);
+    if (!this.cvArticleLists) this.cvArticleLists = new Map();
+    this.cvArticleLists.set(book.vin, { at: Date.now(), list });
+    return list;
+  }
+  // Health history (DTCs, alerts, battery…) between two dates (YYYY-MM-DD); Ford's page asks for 60 days at a time
+  async cvHistory(vin, from, to) {
+    const ctx = await this.cvContext(vin);
+    const ok = (d) => /^\d{4}-\d\d-\d\d$/.test(d);
+    if (!ok(from) || !ok(to)) throw new Error('Those dates aren’t valid');
+    const q = `vin=${encodeURIComponent(ctx.vin)}&pacode=${encodeURIComponent(ctx.paCode)}&countryCode=${encodeURIComponent(ctx.country)}` +
+      `&fromDate=${from}&toDate=${to}&isDetailed=true&dealerCheckRequired=false&includeAllEcu=true`;
+    const [json, modules] = await Promise.all([this.cvJson(`/ConnectedVehicle/getDiagnostichistory?${q}`), this.cvModules(ctx)]);
+    return { list: json?.vhDataList || [], modules, from, to };
+  }
+  // Over-the-air updates: the updates sent to the vehicle (with their release notes), what's lined up next,
+  // and the vehicle's own OTA settings (from the status request)
+  async cvOta(vin) {
+    const ctx = await this.cvContext(vin);
+    const v = encodeURIComponent(ctx.vin);
+    const c = encodeURIComponent(ctx.country);
+    const [verbose, sequence, modules] = await Promise.all([
+      this.cvJson(`/ConnectedVehicle/getVerboseData?vin=${v}&countryCode=${c}`).catch((e) => ({ failed: e.message || String(e), needsLogin: !!e.needsLogin })),
+      this.cvJson(`/ConnectedVehicle/getOdomSequenceData?vin=${v}`).catch((e) => ({ failed: e.message || String(e) })),
+      this.cvModules(ctx),
+    ]);
+    if (verbose?.needsLogin) throw new NeedsLogin();
+    const list = Array.isArray(verbose?.verboseData) ? verbose.verboseData : [];
+    // release notes: Ford keeps them per update, in each language
+    const notes = {};
+    await Promise.all(list.map(async (d) => {
+      const url = d?.updateDetails?.CDNReleaseNotesUrl;
+      if (!url || /vehicleupdates/i.test(url) || !d.oemCorrelationId) return;
+      try {
+        const json = await this.cvJson(`/ConnectedVehicle/getReleaseNoteUrlData?countryCode=${c}&url=${encodeURIComponent(url)}`);
+        const want = { USA: 'en-us', CAN: 'en-ca', GBR: 'en-gb', IRL: 'en-ie' }[ctx.country] || 'en-us';
+        const langs = Array.isArray(json) ? json : [];
+        const n = langs.find((x) => String(x?.LanguageCodeMobileApp || '').toLowerCase() === want) ||
+          langs.find((x) => /^en/i.test(x?.LanguageCodeMobileApp || '')) || langs[0];
+        if (!n) return;
+        const tidy = (t) => String(t || '').replace(/\*/g, '').replace(/\r/g, '').trim();
+        notes[d.oemCorrelationId] = {
+          header: tidy(n.manifestHeader), text: tidy(n.Text || (n.groupContent?.length ? '' : n.consentText)), disclaimer: tidy(n.manifestDisclaimer),
+          groups: (n.groupContent || []).map((g) => ({ id: String(g.groupId ?? ''), header: tidy(g.groupHeader), text: tidy(g.groupText) })),
+        };
+      } catch (e) { this.log(`   release notes: ${e.message || e}`); }
+    }));
+    // what's lined up next, as Ford's page filters it
+    const seq = (Array.isArray(sequence?.result) ? sequence.result : []).filter((x) =>
+      /^(non-)?qualified$/i.test(x?.status || '') && /^(in)?active$/i.test(x?.activationStatus || '') && /^(service \+ ota|ota only|service > ota)$/i.test(x?.servicePlanParameters || ''));
+    return {
+      updates: list, updatesFailed: verbose?.failed || (verbose && verbose.errorCode && verbose.errorCode !== 0 && !list.length ? verbose.errorMsg || `Ford error ${verbose.errorCode}` : ''),
+      sequence: seq, sequenceFailed: sequence?.failed || '', notes, modules,
+    };
+  }
+  // Software subscriptions (connectivity, BlueCruise…): what's active, and what can be started
+  async cvSubscriptions(vin) {
+    const ctx = await this.cvContext(vin);
+    const json = await this.cvJson(`/ConnectedVehicle/getVehicleSubscriptionSummaryDataV1?vin=${encodeURIComponent(ctx.vin)}` +
+      `&countryCode=${encodeURIComponent(ctx.userCountry)}&state=${encodeURIComponent(ctx.userState)}`);
+    if (json?.vs?.errorCode === 620 || json?.productCatalog?.errorCode === 620) return { products: [], message: 'Ford’s subscription service didn’t answer in time. Try again in a moment.' };
+    if (json?.errorCode === 800) return { products: [], none: true };
+    const catalog = json?.productCatalog?.offerCatalogProducts || [];
+    const nameOf = (sku) => {
+      for (const p of catalog) if (String(p?.catalogProduct?.product?.sku || '').split('-').slice(0, 3).join('-') === sku) return p.catalogProduct.product.name;
+      return sku;
+    };
+    const products = [];
+    for (const p of json?.vs?.subscriptionProducts || []) {
+      for (const s of p.activeSubscriptions || []) {
+        products.push({ name: s.productName || nameOf(p.productSku), status: s.status === 'PENDING' ? 'Pending' : 'Active', active: true,
+          type: s.productType || '', start: s.startDate || '', expires: s.expirationDate || '', expiringSoon: !!s.dueForExpiration, renewAnytime: !!s.renewAnytimeProduct });
+      }
+      if (p.availableProduct && !(p.activeSubscriptions || []).length) {
+        const plan = p.availableProduct.ratePlanList?.[0] || {};
+        const trial = plan.productType === 'FREE' || plan.productType === 'AUTO';
+        products.push({ name: nameOf(p.productSku), status: trial ? 'Trial available' : 'Expired', active: false, trial,
+          type: plan.productType || '', expires: trial && plan.endDate ? plan.endDate : '' });
+      }
+    }
+    const sec = json?.vs?.security || {};
+    return { products, security: { userAuthorized: sec.userAuthorized, modemAuthorized: sec.modemAuthorized, modemAvailable: sec.modemAvailable }, asked: json?.vs?.lastRequested || '' };
   }
 
   // ---- TSBs / GSBs / SSMs for this VIN (Ford's TSB_SSM "DisplayArticles" page, as PTS shows it) ----

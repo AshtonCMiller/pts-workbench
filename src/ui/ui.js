@@ -282,7 +282,6 @@ function chatMessages(channelId) {
     ...msgs.map((m) => el('div', { class: `chat-msg${m.notification ? ' note' : ''}${m.mine ? ' mine' : ''}` },
       el('div', { class: 'chat-meta' }, el('b', { text: m.sender || (m.notification ? 'Xtime' : '') }), el('span', { text: chatWhen(m.time) })),
       el('div', { class: 'chat-text' }, ...withMentions(m.text, m.mentions)))));
-  setTimeout(() => { out.scrollTop = out.scrollHeight; }, 0);
   return out;
 }
 
@@ -380,6 +379,21 @@ function renderChat() {
   if (!chat.channel && ro && convs.length === 1 && convs[0].channelId) { chat.channel = convs[0].channelId; chatAskHistory(chat.channel); }
   const open = chat.channel ? all.find((c) => c.channelId === chat.channel) || { channelId: chat.channel, ro } : null;
 
+  // Only redraw when what's shown changed: the panel used to be rebuilt on every update of the app's screen (and every
+  // background refresh), which made it flicker and jump back to the bottom
+  const h = open ? chat.hist.get(open.channelId) || {} : null;
+  const key = JSON.stringify([ro, chat.channel, chat.listError, chat.list == null, open && [open.vehicle, open.customer, open.tech, open.ro],
+    open ? [h.loading && !h.messages, h.error, (h.messages || []).map((m) => [m.id, m.time, m.text, m.unread, m.sender])]
+      : convs.map((c) => [c.channelId, c.ro, c.customer, c.time, c.unread, c.sender, c.text])]);
+  let main = box.querySelector(':scope > .chat-main');
+  if (main && key === chat.drawn) return;
+  chat.drawn = key;
+  // Where you were: at the bottom of a conversation stays at the bottom (new messages come into view); scrolled up, or
+  // down the list, stays put
+  const was = main?.querySelector('.chat-msgs, .chat-list');
+  const keep = was && was.dataset.view === (open ? `c:${open.channelId}` : `l:${ro || ''}`)
+    ? { top: was.scrollTop, atBottom: was.scrollHeight - was.scrollTop - was.clientHeight < 40 } : null;
+
   const head = el('div', { class: 'chat-head' },
     open || ro ? el('button', { class: 'ghost small', text: '‹ All', title: 'All dealership conversations',
       onclick: () => { chat.channel = null; chat.ro = null; renderChat(); } }) : null,
@@ -410,9 +424,15 @@ function renderChat() {
   const foot = open ? composer.box
     : el('button', { class: 'link-like small chat-foot', text: ro && !convs.length ? "Start a conversation on Xtime's page" : "Open Xtime's message center",
       onclick: () => api.send('open-messages') });
-  let main = box.querySelector(':scope > .chat-main');
   if (!main) { main = el('div', { class: 'chat-main' }); box.replaceChildren(main); }
   main.replaceChildren(head, body);
+  const now = main.querySelector('.chat-msgs, .chat-list');
+  if (now) {
+    now.dataset.view = open ? `c:${open.channelId}` : `l:${ro || ''}`;
+    // a conversation opens at its newest message; otherwise back where you were
+    if (open && (!keep || keep.atBottom)) now.scrollTop = now.scrollHeight;
+    else if (keep) now.scrollTop = keep.top;
+  }
   if (box.lastChild !== foot) { [...box.children].forEach((n) => { if (n !== main) n.remove(); }); box.append(foot); }
 }
 const usd = (n) => (n == null ? '' : n.toLocaleString([], { style: 'currency', currency: 'USD' }));
@@ -1073,9 +1093,20 @@ function showWhatsNew(w) {
     : w.reason === 'hot' ? 'This update was applied without restarting, so nothing you were doing was interrupted.'
     : 'PTS Workbench was updated. Here\'s what changed:';
   const groups = Array.isArray(w.groups) ? w.groups : [];
+  // each update's items under their category (Bug Fixes, Improvements…), in the order the file lists them
+  const sections = (g) => {
+    const order = [], by = new Map();
+    g.items.forEach((t, i) => {
+      const c = (g.cats || [])[i] || '';
+      if (!by.has(c)) { by.set(c, []); order.push(c); }
+      by.get(c).push(t);
+    });
+    return order.map((c) => el('div', { class: 'wn-cat' },
+      c ? el('div', { class: `wn-cat-name${/fix|bug/i.test(c) ? ' fix' : /improv|new|feature/i.test(c) ? ' new' : ''}`, text: c }) : null,
+      el('ul', {}, ...by.get(c).map((t) => el('li', {}, wnText(t))))));
+  };
   $('wn-list').replaceChildren(...(groups.length ? groups.map((g) => el('div', { class: 'wn-group' },
-    g.head ? el('div', { class: 'wn-head', text: g.head }) : null,
-    el('ul', {}, ...g.items.map((t) => el('li', {}, wnText(t))))))
+    g.head ? el('div', { class: 'wn-head', text: g.head }) : null, ...sections(g)))
     : [el('p', { class: 'muted small', text: 'Fixes and small improvements.' })]));
   $('wn-later').hidden = w.reason !== 'ready';
   $('wn-ok').textContent = w.reason === 'ready' ? 'Restart now' : 'Got it';
@@ -1658,9 +1689,11 @@ $('new-profile-name').addEventListener('keydown', (e) => {
 function renderLogins() {
   const list = $('logins-list');
   const logins = state?.logins || [];
+  const linux = /Linux/.test(navigator.userAgent);
   $('logins-note').textContent = state?.canSavePasswords === false
-    ? "This computer can't encrypt passwords for this app, so logins aren't saved."
-    : 'Saved when you sign in to Xtime, PTS or ProDemand in this window, encrypted with your Windows account. Only this window uses them.';
+    ? (linux ? "No system keyring is running (GNOME Keyring or KWallet), so passwords can't be stored safely and logins aren't saved."
+      : "This computer can't encrypt passwords for this app, so logins aren't saved.")
+    : `Saved when you sign in to Xtime, PTS or ProDemand in this window, encrypted with ${linux ? 'your system keyring' : 'your Windows account'}. Only this window uses them.`;
   list.replaceChildren(...(logins.length ? logins.map((l) => el('div', { class: 'profile-row' },
     el('span', { class: 'strong', text: l.host }),
     l.username ? el('span', { class: 'muted small', text: ` · ${l.username}` }) : null,

@@ -177,6 +177,7 @@ module.exports = function install(my) {
     if (ws.asleep) { ws.asleep = false; setTimeout(my.pushState, 0); } // woken up by being looked at
     if (tab.kind === 'manual' || tab.kind === 'pced') { tab.view = my.makeManualView(ws, tab); return; } // PC/ED: the same viewer, Ford's PC/ED book
     if (tab.kind === 'oasisview') { tab.view = my.makeManualView(ws, tab, 'oasis/oasis.html'); return; }
+    if (tab.kind === 'cvview') { tab.view = my.makeManualView(ws, tab, 'connected-vehicle/cv.html'); return; }
     if (tab.kind === 'diag') { tab.view = my.makeManualView(ws, tab, 'diagnostics/diag.html'); return; }
     if (tab.kind === 'tsb') { tab.view = my.makeManualView(ws, tab, 'tsb/tsb.html'); return; }
     if (tab.kind === 'labor') { tab.view = my.makeManualView(ws, tab, 'labor-times/labor.html'); return; }

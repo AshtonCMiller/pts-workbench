@@ -679,3 +679,10 @@ body.chat .findbar { right: calc(var(--chat) + 8px); }
 .wn-head { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin-bottom: 4px; }
 .wn-list ul { margin: 0; padding-left: 18px; }
 .wn-list li { margin: 5px 0; line-height: 1.45; font-size: 13.5px; }
+
+/* What's new: categories within an update (Bug Fixes, Improvements…) */
+.wn-cat + .wn-cat { margin-top: 8px; }
+.wn-cat-name { display: inline-block; font-size: 11.5px; font-weight: 700; padding: 1px 8px; border-radius: 10px; margin: 4px 0 2px;
+  background: var(--hover); color: var(--text); }
+.wn-cat-name.fix { background: rgba(220, 38, 38, .12); color: #dc2626; }
+.wn-cat-name.new { background: rgba(37, 99, 235, .12); color: #2563eb; }

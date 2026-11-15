@@ -6,6 +6,8 @@
 //                                              goes to Xtime's HandleRedInspectionFormItem, as Xtime's page does when the
 //                                              store uses "common ops"
 //   { type: 'switch', formId }               → PUT …/RepairOrders/{RO}/InspectionForm  (Xtime's form drop-down)
+//   { type: 'opcodes', search }              → the store's CDK op codes matching the search (Xtime's Op Code box:
+//                                              GET /api/Stores/{store}/OpCodes/?SearchString=…)
 // Where the form comes from: the RO's details page names its scripts (InspectionFormData = the form, AvailableForms,
 // StoreData) and holds the RO's answers (InspectionItem_ROSpecific); …/InspectionItems has the latest answers.
 (async (STORE, RO, DETAILS_PATH, ACTION) => {
@@ -125,6 +127,18 @@
         duration: c.EstimatedDuration == null ? null : Number(c.EstimatedDuration) })),
     } };
   }
+  if (ACTION?.type === 'opcodes') { // Xtime's Op Code box (onOpCodeSearchChange): the store's CDK op codes for what's typed
+    const q = String(ACTION.search || '').trim();
+    if (!q) return { ok: true, opcodes: [] };
+    const r = await call('GET', `/api/Stores/${encodeURIComponent(STORE)}/OpCodes/?SearchString=${encodeURIComponent(q)}`);
+    if (!r.ok) return r;
+    const list = Array.isArray(r.data) ? r.data : Array.isArray(r.data?.Data) ? r.data.Data : [];
+    const num = (v) => (v === '' || v == null || Number.isNaN(Number(v)) ? null : Number(v));
+    return { ok: true, opcodes: list.filter((o) => o && o.Id != null).slice(0, 60).map((o) => ({
+      id: String(o.Id), description: String(o.Description || '').trim(), complaint: String(o.Complaint || '').trim(),
+      dispatch: String(o.DispatchCode || ''), duration: num(o.EstimatedDuration), hours: num(o.FlatHours), sell: num(o.FlatSellRate),
+    })) };
+  }
   if (ACTION?.type === 'addLine') { // Xtime's EditFormService.saveLine for a new line (ID 0)
     const d = await details();
     if (!d.ok) return d;
@@ -146,6 +160,7 @@
       ServiceGuideSpecialItemName: a.details || '', Complaint: a.complaint || '', Cause: a.cause || '', Correction: a.correction || '',
       TechnicianNote: a.techNote || '', IsGbb: false, ServiceType: null,
       DispatchCode: dispatch || null, EstimatedDuration: dur,
+      OpCodeDms: a.opCodeDms ? String(a.opCodeDms) : null, // the CDK op code (Xtime's Op Code box)
       EnableInternalLinePrice: store?.Labor?.InternalLinePriceDefaultValue ?? null, EnableWarrantyLinePrice: store?.Labor?.WarrantyLinePriceDefaultValue ?? null,
     };
     if (!line.SGCID) return { ok: false, error: 'Pick a service first' };
@@ -175,6 +190,7 @@
     line.Complaint = a.complaint ?? line.Complaint; line.Cause = a.cause ?? line.Cause; line.Correction = a.correction ?? line.Correction;
     line.TechnicianNote = a.techNote ?? line.TechnicianNote;
     if (a.dispatchCode) line.DispatchCode = String(a.dispatchCode);
+    if (a.opCodeDms) line.OpCodeDms = String(a.opCodeDms); // the CDK op code
     if (a.duration !== '' && a.duration != null && Number(a.duration) > 0) line.EstimatedDuration = Number(a.duration);
     else if (!line.EstimatedDuration) line.EstimatedDuration = (codes.find((c) => c.Code === line.DispatchCode) || codes.find((c) => c.IsDefault))?.EstimatedDuration ?? null;
     // as Xtime: the address only wants the service type's code

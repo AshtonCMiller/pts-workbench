@@ -19,7 +19,7 @@ module.exports = function install(my) {
         tabs: kept.map((t) => ({ kind: t.kind, title: t.title, ...(t.url ? { url: t.url } : {}), ...(t.manualState ? { state: t.manualState } : {}) })),
         activeIndex: Math.max(0, kept.findIndex((t) => t.id === ws.activeTab)),
         svcIndex: kept.findIndex((t) => t.id === ws.svcTab),
-        layout: 6,
+        layout: 7,
         };
       }),
     });
@@ -83,6 +83,8 @@ module.exports = function install(my) {
   }
   function retrySyncedROs() { for (const [ro, ymm] of syncWaiting) if (!my.workspaces.has(ro) && !syncOpening.has(ro)) openSyncedRO(ro, ymm); }
 
+  // has the Service Manual (checked here rather than with tabs.js, which may not be set up yet when this runs)
+  const hasService = (ws) => ws.tabs.some((t) => t.kind === 'service');
   function loadWorkspaces() {
     const saved = my.readJson('workspaces.json', null);
     for (const ro of saved?.hidden || []) my.hiddenROs.add(String(ro));
@@ -95,13 +97,13 @@ module.exports = function install(my) {
       const ws = { ro: w.ro, vin: w.vin, ymm: w.ymm || '', tabs, activeTab: tabs[w.activeIndex || 0]?.id ?? tabs[0].id,
         svcTab: w.svcIndex >= 0 ? tabs[w.svcIndex]?.id ?? null : null };
       if (!(w.layout >= 3)) my.upgradeTabs(ws, ws.activeTab); // saved before Xtime | PTS | Service Manual
-      else if (w.layout < 4 && my.serviceTab(ws) && !ws.tabs.some((t) => t.kind === 'tsb')) { // saved before the TSBs tab
+      else if (w.layout < 4 && hasService(ws) && !ws.tabs.some((t) => t.kind === 'tsb')) { // saved before the TSBs tab
         const t = my.addTab(ws, 'tsb', { activate: false });
         ws.tabs.splice(ws.tabs.indexOf(t), 1);
         const diag = ws.tabs.findIndex((x) => x.kind === 'diag');
         ws.tabs.splice(diag >= 0 ? diag + 1 : ws.tabs.length, 0, t);
       }
-      if (w.layout >= 3 && w.layout < 5 && my.serviceTab(ws)) { // saved before Wiring Diagrams was in the Service Manual
+      if (w.layout >= 3 && w.layout < 5 && hasService(ws)) { // saved before Wiring Diagrams was in the Service Manual
         const t = ws.tabs.find((x) => x.kind === 'wiring') || my.addTab(ws, 'wiring', { activate: false });
         if (t.title === 'Wiring') t.title = my.TAB_NAMES.wiring;
         ws.tabs.splice(ws.tabs.indexOf(t), 1);
@@ -114,6 +116,12 @@ module.exports = function install(my) {
         ws.tabs.splice(ws.tabs.indexOf(t), 1);
         const xt = ws.tabs.findIndex((x) => x.kind === 'xtime');
         ws.tabs.splice(xt >= 0 ? xt + 1 : 0, 0, t);
+      }
+      if (!(w.layout >= 7) && hasService(ws) && !ws.tabs.some((x) => x.kind === 'cvview')) { // saved before the Connected Vehicle tab
+        const t = my.addTab(ws, 'cvview', { activate: false });
+        ws.tabs.splice(ws.tabs.indexOf(t), 1);
+        const oasis = ws.tabs.findIndex((x) => x.kind === 'oasisview');
+        ws.tabs.splice(oasis >= 0 ? oasis + 1 : ws.tabs.length, 0, t);
       }
       my.workspaces.set(w.ro, ws);
     }

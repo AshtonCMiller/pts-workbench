@@ -148,3 +148,6 @@
 .x-modal { z-index: 30; }
 /* Technician Note in the Add / Edit Service window: room for a parts list, one per line */
 .x-f textarea.x-note { min-height: 150px; line-height: 1.45; }
+
+/* the CDK op code matches: only while there are some to pick from */
+.x-svc-list[hidden] { display: none; }

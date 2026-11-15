@@ -10,12 +10,12 @@ module.exports = function install(my) {
   // ---------- workspaces ----------
   // A vehicle's tabs: Xtime | PTS | Service Manual (+ any added). "Service Manual" holds its own tabs:
   // OASIS | Diagnostics | Workshop Manual | Labor Times (the app's own pages).
-  const SVC_KINDS = new Set(['oasisview', 'diag', 'tsb', 'manual', 'pced', 'wiring', 'labor', 'article', 'doc']); // article: Ford's page for an FSA etc. · doc: one of its PDFs
-  const SVC_DEFAULTS = ['oasisview', 'diag', 'tsb', 'manual', 'wiring', 'labor'];
+  const SVC_KINDS = new Set(['oasisview', 'cvview', 'diag', 'tsb', 'manual', 'pced', 'wiring', 'labor', 'article', 'doc']); // article: Ford's page for an FSA etc. · doc: one of its PDFs
+  const SVC_DEFAULTS = ['oasisview', 'cvview', 'diag', 'tsb', 'manual', 'wiring', 'labor']; // cvview: Connected Vehicle
   my.SVC_DEFAULTS = SVC_DEFAULTS;
   const inService = (kind) => SVC_KINDS.has(kind);
   my.inService = inService;
-  // The Service Manual's main tabs (OASIS, Diagnostics, TSBs, Workshop Manual, Wiring Diagrams, Labor Times) can't be
+  // The Service Manual's main tabs (OASIS, Connected Vehicle, Diagnostics, TSBs, Workshop Manual, Wiring Diagrams, Labor Times) can't be
   // closed (nor Service Manual itself, which would close them); extra ones (a second Workshop Manual, an FSA, a TSB…) can
   // PC/ED (only for vehicles that have one) counts as a main tab too once it's there
   const isFixedTab = (ws, t) => t.kind === 'service' || ([...SVC_DEFAULTS, 'pced'].includes(t.kind) && ws.tabs.find((x) => x.kind === t.kind) === t);
@@ -78,7 +78,7 @@ module.exports = function install(my) {
     if (was) setActive(ws, was); else ws.activeTab = topTab(ws)?.id ?? null;
   }
 
-  const TAB_NAMES = { xview: 'Xtime View', tsb: 'TSBs', article: 'Article', doc: 'Document', service: 'Service Manual', labor: 'Labor Times', diag: 'Diagnostics', xtime: 'Xtime', oasisview: 'OASIS', manual: 'Workshop Manual', pced: 'PC/ED', wiring: 'Wiring Diagrams', pts: 'PTS', ota: 'OTA Updates', cvd: 'Connected Data', prodemand: 'ProDemand', oasis: 'OASIS' };
+  const TAB_NAMES = { xview: 'Xtime View', tsb: 'TSBs', article: 'Article', doc: 'Document', service: 'Service Manual', labor: 'Labor Times', diag: 'Diagnostics', xtime: 'Xtime', oasisview: 'OASIS', cvview: 'Connected Vehicle', manual: 'Workshop Manual', pced: 'PC/ED', wiring: 'Wiring Diagrams', pts: 'PTS', ota: 'OTA Updates', cvd: 'Connected Data', prodemand: 'ProDemand', oasis: 'OASIS' };
   my.TAB_NAMES = TAB_NAMES;
   function addTab(ws, kind, { activate = true, front = false } = {}) {
     const n = ws.tabs.filter((t) => t.kind === kind).length;
@@ -196,7 +196,7 @@ module.exports = function install(my) {
         if (t.kind === 'manual' || t.kind === 'pced') t.manualState = null; // the open procedures were for the old VIN
         if (t.kind === 'diag') t.manualState = null;
         if (t.kind === 'tsb') t.manualState = null;
-        if ((t.kind === 'manual' || t.kind === 'pced' || t.kind === 'wiring' || t.kind === 'oasisview' || t.kind === 'diag' || t.kind === 'tsb') && t.view) my.destroyTab(t); // reopen for the right vehicle
+        if ((t.kind === 'manual' || t.kind === 'pced' || t.kind === 'wiring' || t.kind === 'oasisview' || t.kind === 'cvview' || t.kind === 'diag' || t.kind === 'tsb') && t.view) my.destroyTab(t); // reopen for the right vehicle
       }
     }
     else if (!quiet) prefetchVehicle(ws); // already open: fetch what its tabs haven't loaded yet

@@ -49,7 +49,21 @@ async function syncRequest(method, url, body) {
 function prepareSession(id) {
   const ses = session.fromPartition(partitionFor(id));
   // Present as plain Chrome so the sites treat the app like your normal browser.
-  ses.setUserAgent(ses.getUserAgent().replace(/\s(?:Electron|pts-workbench|PTS Workbench)\/\S+/gi, ''));
+  let ua = ses.getUserAgent().replace(/\s(?:Electron|pts-workbench|PTS Workbench)\/\S+/gi, '');
+  // For development on Linux: PTS_AS_WINDOWS=1 makes the sites see Chrome on Windows, like the shop's computers
+  // (the browser's name for the system, and the "platform" Chrome adds to requests)
+  if (process.platform === 'linux' && process.env.PTS_AS_WINDOWS) {
+    ua = ua.replace(/\([^)]*Linux[^)]*\)/, '(Windows NT 10.0; Win64; x64)');
+    ses.webRequest.onBeforeSendHeaders((details, done) => {
+      const h = details.requestHeaders;
+      for (const k of Object.keys(h)) {
+        if (/^sec-ch-ua-platform$/i.test(k)) h[k] = '"Windows"';
+        if (/^sec-ch-ua-platform-version$/i.test(k)) h[k] = '"15.0.0"';
+      }
+      done({ requestHeaders: h });
+    });
+  }
+  ses.setUserAgent(ua);
   keepXtimeSignedIn(ses, id);
 }
 

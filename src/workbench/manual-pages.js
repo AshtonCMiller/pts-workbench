@@ -18,6 +18,44 @@ module.exports = function install(my) {
   my.manualSes = manualSes;
   const manualService = new ManualService(manualSes, profileFile(my.profile.id, 'manual-cache'), profileFile(my.profile.id, 'manual.log'));
   my.manualService = manualService;
+  // PTS's vehicle page, opened unseen for a VIN: PTS's own script there sets up what its book pages need for that
+  // vehicle (its PTSSession / FeaturesAttributes cookies). Used when Ford's books say "not available" because of it.
+  manualService.openVehicleInPts = (vin) => new Promise((resolve) => {
+    const w = new BrowserWindow({ show: false, webPreferences: { partition: my.PARTITION, sandbox: true, contextIsolation: true } });
+    let finished = false;
+    const finish = (how) => { if (finished) return; finished = true; clearTimeout(limit); setTimeout(() => { try { w.destroy(); } catch {} resolve(how); }, 0); };
+    const limit = setTimeout(() => finish('timed out'), 30 * 1000);
+    w.webContents.on('did-finish-load', () => {
+      const url = w.webContents.getURL();
+      if (my.hostOf(url) !== my.hostOf(PTS_ORIGIN)) return finish('sent to sign in');
+      if (/\/transport/i.test(url)) return; // still on its way to the vehicle page
+      setTimeout(() => finish('loaded'), 4000); // PTS's script sets its cookies once the page is up
+    });
+    w.loadURL(my.settings.ptsTransportUrl.replace('{LINK}', '704').replace('{VIN}', encodeURIComponent(vin))).catch(() => {});
+  });
+
+  // What PTS's own pages ask Ford for when they open a book (address, referrer, which cookies went with it: names
+  // only), written to manual.log, to compare with the app's own requests. Only Ford's book / vehicle addresses.
+  {
+    const filter = { urls: ['https://www.fordtechservice.dealerconnection.com/publication/*', 'https://www.fordtechservice.dealerconnection.com/VehicleId/*',
+      'https://www.fordtechservice.dealerconnection.com/transport*', 'https://www.fordtechservice.dealerconnection.com/Publication/*'] };
+    const sent = new Map(); // request id -> what was sent
+    manualSes.webRequest.onSendHeaders(filter, (d) => {
+      const mine = !d.webContentsId; // the app's own: only its book requests, to compare
+      if (mine && !/\/publication\/Book\//i.test(d.url)) return;
+      const h = d.requestHeaders || {};
+      const cookie = Object.entries(h).find(([k]) => /^cookie$/i.test(k))?.[1] || '';
+      const names = cookie.split(';').map((x) => x.split('=')[0].trim()).filter(Boolean);
+      const other = Object.keys(h).filter((k) => !/^(cookie|user-agent|accept-language|accept-encoding|sec-ch-ua(-mobile|-platform)?|sec-fetch-.*|upgrade-insecure-requests|connection|host|cache-control|pragma)$/i.test(k));
+      sent.set(d.id, `cookies ${names.length} (${names.filter((n) => !/^OpenIdConnect\.nonce/i.test(n)).join(',')}) · headers ${other.map((k) => (/^referer$/i.test(k) ? `Referer=${String(h[k]).slice(0, 140)}` : k)).join(', ')}`);
+    });
+    manualSes.webRequest.onCompleted(filter, (d) => {
+      const info = sent.get(d.id); sent.delete(d.id);
+      if (!d.webContentsId && !/\/publication\/Book\//i.test(d.url)) return;
+      manualService.log(`${d.webContentsId ? 'PTS page' : 'The app'} asked: ${d.method} ${d.url.slice(0, 220)} → ${d.statusCode} [${d.resourceType}]${info ? ` · ${info}` : ''}`);
+    });
+  }
+
   // Pictures on Ford's document server need its sign-on cookies: one sign-on at a time, at most every 30 s
   let deniedRun = null, deniedAt = 0;
   manualService.onDenied = () => {
@@ -247,6 +285,24 @@ module.exports = function install(my) {
         try { return await manualService.oasis(ws.vin); } catch (e) { return fail(e); }
       case 'cv':
         try { return await manualService.connectedVehicle(ws.vin); } catch (e) { return fail(e); }
+      // ---- Connected Vehicle tab: health history, over-the-air updates, software subscriptions ----
+      case 'cv-history':
+        try { return await manualService.cvHistory(ws.vin, String(payload?.from || ''), String(payload?.to || '')); } catch (e) { return fail(e); }
+      case 'cv-modules': // module names for module addresses (726 → BCM)
+        try { return await manualService.cvModules(await manualService.cvContext(ws.vin)); } catch (e) { return fail(e); }
+      case 'cv-articles': // TSBs / GSBs / SSMs for each DTC
+        try { return { list: await manualService.cvArticles(ws.vin) }; } catch (e) { return fail(e); }
+      case 'cv-describe': { // what each DTC means: [{ code, ecu, ft, sb }]
+        const hex = (v, n) => (typeof v === 'string' && new RegExp(`^[0-9A-F]{1,${n}}$`, 'i').test(v) ? v.toUpperCase() : '');
+        const dtcs = (Array.isArray(payload) ? payload : []).slice(0, 300)
+          .map((d) => ({ code: /^[PBUC][0-9A-F]{4}$/i.test(d?.code || '') ? d.code.toUpperCase() : '', ecu: hex(d?.ecu, 4), ft: hex(d?.ft, 2), sb: hex(d?.sb, 2) }))
+          .filter((d) => d.code);
+        try { return await manualService.cvDescribe(ws.vin, dtcs); } catch (e) { return fail(e); }
+      }
+      case 'cv-ota':
+        try { return await manualService.cvOta(ws.vin); } catch (e) { return fail(e); }
+      case 'cv-subs':
+        try { return await manualService.cvSubscriptions(ws.vin); } catch (e) { return fail(e); }
       case 'slts': // Labor Times tab: Ford's SLTS pages for this vehicle
         try {
           const q = payload || {};
@@ -282,7 +338,7 @@ module.exports = function install(my) {
       case 'open-log': shell.openPath(profileFile(my.profile.id, 'manual.log')).catch(() => {}); return true;
       case 'log': manualService.log(`viewer: ${String(payload || '').slice(0, 500)}`); return true;
       case 'open-pts': {
-        const t = my.addTab(ws, 'pts');
+        const t = my.addTab(ws, ['cvd', 'ota'].includes(payload) ? payload : 'pts'); // cvd / ota: Ford's own Connected Data / OTA pages
         my.saveWorkspaces(); my.layout(); my.pushState();
         return t.id;
       }
