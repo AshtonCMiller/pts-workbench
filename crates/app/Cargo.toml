@@ -23,8 +23,22 @@ xtime.workspace = true
 ford.workspace = true
 launcher.workspace = true
 feedback.workspace = true
+hours.workspace = true
 keyring.workspace = true
 iced.workspace = true
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+chrono.workspace = true
+
+
+[target.'cfg(windows)'.dependencies]
+# Windows' light/dark setting for the Auto appearance (system_theme.rs), and printing (print/windows.rs: the Print
+# window and drawing on the printer)
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Registry",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Printing",
+    "Win32_Storage_Xps",
+] }

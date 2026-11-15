@@ -1,6 +1,12 @@
 //! The vehicles open in the Workbench, and the tabs each one has (as in the Electron app).
 
+use std::collections::{HashMap, HashSet};
+use std::time::Instant;
+
 use xtime::dashboard::AssignedRo;
+use xtime::ro::RoView;
+
+use crate::ros::LoadError;
 
 /// One open vehicle (RO)
 #[derive(Debug, Clone)]
@@ -8,14 +14,33 @@ pub struct Workspace {
     pub ro: AssignedRo,
     pub tab: Tab,
     pub manual: ManualTab,
+    /// The Xtime View tab: the RO as Xtime has it
+    pub xv: XtimeView,
+}
+
+/// The Xtime View tab's RO and what's open on it
+#[derive(Debug, Clone, Default)]
+pub struct XtimeView {
+    pub view: Option<RoView>,
+    pub loading: bool,
+    /// Why the last read didn't work (the last good RO stays shown)
+    pub error: Option<LoadError>,
+    /// When it was last read (seconds since 1970)
+    pub at: Option<i64>,
+    /// Lines shown opened (by line ID), and when each was opened (for its slide in)
+    pub open: HashMap<String, Instant>,
+    pub show_inspection: bool,
+    /// Lines whose Done is being sent to Xtime
+    pub busy: HashSet<String>,
 }
 
 impl Workspace {
     pub fn new(ro: AssignedRo) -> Self {
         Self {
             ro,
-            tab: Tab::ServiceManual,
+            tab: Tab::XtimeView, // a vehicle opens on its RO
             manual: ManualTab::Oasis,
+            xv: XtimeView::default(),
         }
     }
 
@@ -101,6 +126,21 @@ impl ManualTab {
             ManualTab::Wiring => "Wiring diagrams for this VIN: contents, pages and connector views.",
             ManualTab::Labor => "SLTS labor times for this VIN, with parts and a tray for the RO.",
         }
+    }
+}
+
+/// My ROs' groups in the sidebar, in order
+pub const STAGES: [&str; 5] = ["Inspection", "Approval", "Repair", "Review", "Done"];
+
+/// Which of [`STAGES`] an RO is in by its Xtime mode: not started yet (Pre-RO, Dispatch) counts as Inspection; closed,
+/// or a stage the app doesn't know, as Done
+pub fn stage(mode: Option<f64>) -> usize {
+    match mode.map(|m| m as i64) {
+        Some(2 | 3 | 9) | None => 0,
+        Some(4 | 5) => 1,
+        Some(6) => 2,
+        Some(7) => 3,
+        _ => 4,
     }
 }
 

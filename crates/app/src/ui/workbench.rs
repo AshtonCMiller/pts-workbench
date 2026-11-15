@@ -1,5 +1,6 @@
 //! The Workbench: the vehicle picked in the sidebar, with its tabs (Xtime View, Service Manual) and the Service Manual's
-//! own tabs (OASIS, Connected Vehicle, Diagnostics…). Until Xtime and Ford are connected, each tab says what it'll show.
+//! own tabs (OASIS, Connected Vehicle, Diagnostics…). Xtime View is in xtime_view.rs; until Ford is connected, each
+//! Service Manual tab says what it'll show.
 
 use iced::widget::{Row, button, column, container, horizontal_space, row, scrollable, text};
 use iced::{Alignment, Element, Length};
@@ -76,7 +77,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
         _ => (ws.tab, ws.manual),
     };
     let content = match tab {
-        Tab::XtimeView => xtime_view(ws),
+        Tab::XtimeView => super::xtime_view::view(app, ws),
         Tab::ServiceManual => manual(ws, manual_tab),
     };
     page.push(anim::page(
@@ -130,40 +131,6 @@ fn coming<'a>(title: &'a str, about: &'a str, needs: &'a str) -> Element<'a, Mes
     .padding(14)
     .width(Length::Fill)
     .style(style::card)
-    .into()
-}
-
-fn xtime_view(ws: &Workspace) -> Element<'_, Message> {
-    let waiting = [
-        (ws.ro.waiting_parts, "parts"),
-        (ws.ro.waiting_customer, "the customer"),
-        (ws.ro.waiting_warranty, "warranty"),
-    ]
-    .iter()
-    .filter(|(on, _)| *on)
-    .map(|(_, w)| *w)
-    .collect::<Vec<_>>()
-    .join(", ");
-    column![
-        vehicle_card(ws),
-        container(
-            column![
-                text("Status").size(16).font(style::BOLD),
-                fact("Waiting on", waiting),
-                fact("Advisor", ws.ro.dash.advisor_name.clone())
-            ]
-            .spacing(6)
-        )
-        .padding(14)
-        .width(Length::Fill)
-        .style(style::card),
-        coming(
-            "Lines",
-            "The RO's lines: concerns, corrections, technician notes; adding and editing lines; marking them done.",
-            "Comes when Xtime is connected."
-        ),
-    ]
-    .spacing(12)
     .into()
 }
 

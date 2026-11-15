@@ -15,8 +15,6 @@ fn field_id(f: Field) -> text_input::Id {
         Field::StoreId => "store-id",
         Field::DealerCode => "dealer-code",
         Field::EmployeeNumber => "employee-number",
-        Field::TechId => "tech-id",
-        Field::Name => "name",
     })
 }
 
@@ -46,20 +44,29 @@ fn fields(app: &App) -> Element<'_, Message> {
         field("Dealer code", "Your dealership's Ford P&A code.", &d.dealer_code, Field::DealerCode),
         field(
             "Employee number",
-            "Your Xtime employee number: your ROs are found with it.",
+            "Your Xtime employee number: your name and ROs are found with it.",
             &d.employee_number,
             Field::EmployeeNumber
         ),
-        field(
-            "Technician ID",
-            "Found from your employee number once Xtime is connected; or type it.",
-            &d.tech_id,
-            Field::TechId
-        ),
-        field("Your name", "Sent with your feedback, so replies reach you.", &d.name, Field::Name),
+        from_xtime(app),
     ]
     .spacing(14)
     .into()
+}
+
+/// Who Xtime says you are (found from your employee number; not typed in)
+fn from_xtime(app: &App) -> Element<'_, Message> {
+    let s = &app.settings;
+    let changed = app.draft.employee_number.trim() != s.employee_number.trim();
+    let line = if changed || s.tech_id.is_empty() {
+        "Your name and technician ID come from Xtime once you're signed in.".to_string()
+    } else {
+        let name = if s.name.is_empty() { "Found in Xtime" } else { s.name.as_str() };
+        format!("{name} · technician ID {}", s.tech_id)
+    };
+    column![text("From Xtime").font(style::BOLD), text(line).size(13).style(style::muted)]
+        .spacing(4)
+        .into()
 }
 
 fn notice(app: &App) -> Element<'_, Message> {

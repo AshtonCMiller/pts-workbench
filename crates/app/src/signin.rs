@@ -43,6 +43,20 @@ impl Site {
         }
     }
 
+    /// Extra arguments for the sign-in window: Xtime goes on from Scheduling to Inspect (that needs the store ID)
+    fn extra_args(self, store: &str) -> Vec<String> {
+        match self {
+            Site::Xtime => vec![
+                "--then".into(),
+                xtime::signin::INSPECT.replace("{STORE}", &encode(store.trim())),
+                "--then-from".into(),
+                xtime::signin::LANDING.into(),
+                "--done-cookie".into(),
+            ],
+            Site::Ford => vec![],
+        }
+    }
+
     /// An address on the site, to tell whether there's a sign-in for it
     pub fn check_url(self) -> Url {
         Url::parse(self.start()).expect("sign-in address")
@@ -76,9 +90,22 @@ pub enum Outcome {
     Failed(String),
 }
 
+/// For a store ID in an address
+fn encode(s: &str) -> String {
+    s.bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() {
+                (b as char).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
+        .collect()
+}
+
 /// Opens the sign-in window for a site and waits for it. `web_dir`: the web view's own profile folder (keeps
-/// "remember me" and saved passwords between sign-ins).
-pub async fn run(site: Site, web_dir: PathBuf) -> Outcome {
+/// "remember me" and saved passwords between sign-ins). `store`: the Xtime store ID from settings.
+pub async fn run(site: Site, web_dir: PathBuf, store: String) -> Outcome {
     let out = tokio::process::Command::new(program())
         .arg("--title")
         .arg(format!("Sign in to {}", site.name()))
@@ -90,6 +117,7 @@ pub async fn run(site: Site, web_dir: PathBuf) -> Outcome {
         .arg(site.cookie_domains().join(","))
         .arg("--data-dir")
         .arg(&web_dir)
+        .args(site.extra_args(&store))
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .output()

@@ -1,0 +1,653 @@
+//! Xtime View: the app's own page for an RO in Xtime (the Electron app's xtime-view/ro-view.js). The header (stage,
+//! waiter / express…), Service Details, Vehicle Info, then the lines: customer concerns with the recommendations added
+//! under them, the other recommendations, and the inspection lines (hidden until asked for). Each line shows its
+//! approval, labor type, hours and price, and a Done box that changes it in Xtime; click a line for its concern, cause,
+//! correction, notes and parts. Read from Xtime every minute while it's showing. No customer details are read.
+
+use std::collections::HashMap;
+
+use iced::alignment::Horizontal;
+use iced::widget::{Column, Row, Space, button, checkbox, column, container, horizontal_space, row, text};
+use iced::{Alignment, Color, Element, Length};
+use xtime::ro::{self, Line, RoView, Sections};
+
+use super::{anim, pill, style};
+use crate::app::{App, Message};
+use crate::ros::{self, LoadError};
+use crate::timecard;
+use crate::workspace::{Workspace, XtimeView};
+
+fn money(n: Option<f64>) -> String {
+    n.map(|n| format!("${n:.2}")).unwrap_or_default()
+}
+
+fn hours(n: Option<f64>) -> String {
+    n.map(|n| format!("{n:.1} h")).unwrap_or_default()
+}
+
+/// Room for the Flag button (kept on lines without one, so the prices line up)
+const FLAG_WIDTH: f32 = 104.0;
+
+/// Room for the Done box (kept on lines without one, so the prices line up)
+const DONE_WIDTH: f32 = 64.0;
+
+const GREEN: [u8; 3] = [0x15, 0x80, 0x3d];
+const RED: [u8; 3] = [0xb4, 0x23, 0x18];
+const AMBER: [u8; 3] = [0xd9, 0x77, 0x06];
+const GREY: [u8; 3] = [0x5d, 0x66, 0x70];
+const BLUE: [u8; 3] = [0x1a, 0x5f, 0xb4];
+
+fn color(c: [u8; 3]) -> Color {
+    Color::from_rgb8(c[0], c[1], c[2])
+}
+
+/// What a line card needs besides the line: the tab's state, and the line's flag (your hours)
+struct Ctx<'a> {
+    xv: &'a XtimeView,
+    /// By Xtime's line ID: lines that count toward your hours, and the hours flagged when they're flagged
+    flags: HashMap<String, Option<f64>>,
+}
+
+pub fn view<'a>(app: &'a App, ws: &'a Workspace) -> Element<'a, Message> {
+    let xv = &ws.xv;
+    let Some(v) = &xv.view else {
+        return first_read(ws, xv);
+    };
+    let flags = timecard::lines_of(v)
+        .into_iter()
+        .filter(|(_, l)| l.counts())
+        .map(|(id, l)| (id, app.hours.flag_for(&v.ro, &l.key).map(|f| f.hours)))
+        .collect();
+    let cx = Ctx { xv, flags };
+    let sections = v.sections();
+    let mut page = column![header(app, ws, v), top_cards(v)].spacing(12);
+    if let Some(e) = &xv.error {
+        page = page.push(
+            text(format!("Couldn't refresh: {}", e.text().trim_start_matches("Xtime: ")))
+                .size(13)
+                .style(style::muted),
+        );
+    }
+    page = page.push(section(
+        &cx,
+        "Customer Initial Concerns",
+        sections.concerns.iter().map(|(c, kids)| (*c, kids.clone())).collect(),
+        v,
+    ));
+    page = page.push(section(
+        &cx,
+        "Additional Service Recommendations",
+        sections.loose.iter().map(|&i| (i, vec![])).collect(),
+        v,
+    ));
+    if v.lines.iter().all(Line::is_inspection) {
+        page = page.push(empty_card("No lines on this RO yet."));
+    }
+    page = page.push(inspection(&cx, v, &sections));
+    page.into()
+}
+
+/// Before the RO has been read: reading, or why it couldn't be
+fn first_read<'a>(ws: &'a Workspace, xv: &'a XtimeView) -> Element<'a, Message> {
+    let ro = ws.ro.ro.clone();
+    let body: Element<'a, Message> = match &xv.error {
+        None => text("Reading this RO from Xtime…").style(style::muted).into(),
+        Some(e) => {
+            let (title, about) = match e {
+                LoadError::SignedOut => (
+                    "Sign in to Xtime",
+                    "Xtime needs you to sign in again (in the bottom bar or Settings).".to_string(),
+                ),
+                other => ("Couldn't read this RO", other.text()),
+            };
+            column![
+                text(title).size(16).font(style::BOLD),
+                text(about).style(style::muted),
+                button(text("Try again").font(style::BOLD))
+                    .padding([6, 14])
+                    .style(button::primary)
+                    .on_press_maybe((!xv.loading).then(|| Message::LoadView(ro, true))),
+            ]
+            .spacing(8)
+            .into()
+        }
+    };
+    container(body).padding(16).width(Length::Fill).style(style::card).into()
+}
+
+fn header<'a>(app: &'a App, ws: &'a Workspace, v: &'a RoView) -> Element<'a, Message> {
+    let xv = &ws.xv;
+    let title = if v.tag.is_empty() {
+        format!("RO {}", v.ro)
+    } else {
+        format!("RO {} · Tag {}", v.ro, v.tag)
+    };
+    let ymm = [v.vehicle.year.as_str(), v.vehicle.make.as_str(), v.vehicle.model.as_str()]
+        .iter()
+        .filter(|s| !s.is_empty())
+        .copied()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut sub = row![pill(ro::mode_name(v.mode), BLUE)].spacing(6).align_y(Alignment::Center);
+    let mut since = String::new();
+    if !v.mode_since.is_empty() {
+        since = format!("since {}", ro::when(&v.mode_since));
+    }
+    if !ymm.is_empty() {
+        since = if since.is_empty() { ymm } else { format!("{since} · {ymm}") };
+    }
+    if !since.is_empty() {
+        sub = sub.push(text(since).size(13).style(style::muted));
+    }
+    for (on, label, c) in [
+        (v.waiter, "Waiter", AMBER),
+        (v.express, "Express", BLUE),
+        (v.internal, "Internal", GREY),
+        (v.warranty, "Warranty", [0x7c, 0x3a, 0xed]),
+        (v.cpo, "CPO", GREY),
+    ] {
+        if on {
+            sub = sub.push(pill(label, c));
+        }
+    }
+    let updated = match (xv.loading, xv.at) {
+        (true, _) => "Reading…".to_string(),
+        (false, Some(at)) => format!("Updated {}", ros::ago(app.now - at)),
+        (false, None) => String::new(),
+    };
+    // the spiff: approved recommendations over $150 can be printed and turned in
+    let total = v.spiff_total();
+    let spiff: Element<'a, Message> = if let Some(done) = app.hours.spiffed(&v.ro) {
+        // turned in already: say so (with what it came to then); it can be printed again, or unmarked
+        row![
+            pill(format!("Spiffed · {}", money(Some(done.total))), GREEN),
+            button(text("Print again").size(13))
+                .padding([5, 10])
+                .style(style::ghost)
+                .on_press_maybe((v.spiff_earned() && app.print_job.is_none()).then_some(Message::PrintSpiff)),
+            button(text("Unmark").size(13))
+                .padding([5, 10])
+                .style(style::ghost)
+                .on_press(Message::MarkSpiffed(false)),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center)
+        .into()
+    } else if v.spiff_earned() {
+        row![
+            text(format!("Spiff {}", money(Some(total))))
+                .size(13)
+                .font(style::BOLD)
+                .style(text::success),
+            button(text("Print Spiff").size(13).font(style::BOLD))
+                .padding([5, 12])
+                .style(button::success)
+                .on_press_maybe((app.print_job.is_none()).then_some(Message::PrintSpiff)),
+            button(text("Mark spiffed").size(13))
+                .padding([5, 10])
+                .style(style::ghost)
+                .on_press(Message::MarkSpiffed(true)),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .into()
+    } else if total > 0.0 {
+        text(format!(
+            "Recommendations {} · spiff over {}",
+            money(Some(total)),
+            money(Some(ro::SPIFF_OVER))
+        ))
+        .size(12)
+        .style(style::muted)
+        .into()
+    } else {
+        Space::with_width(0).into()
+    };
+    container(
+        row![
+            column![text(title).size(20).font(style::BOLD), sub].spacing(6),
+            horizontal_space(),
+            spiff,
+            text(updated).size(12).style(style::muted),
+            button(text("Refresh").size(13))
+                .padding([5, 12])
+                .style(style::ghost)
+                .on_press_maybe((!xv.loading).then(|| Message::LoadView(ws.ro.ro.clone(), true))),
+        ]
+        .spacing(10)
+        .align_y(Alignment::Center),
+    )
+    .padding(14)
+    .width(Length::Fill)
+    .style(style::card)
+    .into()
+}
+
+/// One label / value line of a card; `copy`: click the value to copy it (named for the notice)
+fn fact<'a>(label: &'a str, value: String, copy: Option<&'a str>) -> Element<'a, Message> {
+    let shown: Element<'a, Message> = match copy {
+        Some(what) if !value.is_empty() => button(text(value.clone()).font(style::MONO).size(13))
+            .padding([1, 6])
+            .style(style::ghost)
+            .on_press(Message::Copy(value, what.to_string()))
+            .into(),
+        _ if value.is_empty() => text("—").style(style::muted).into(),
+        _ => text(value).into(),
+    };
+    row![text(label).width(130).style(style::muted), shown]
+        .spacing(10)
+        .align_y(Alignment::Center)
+        .into()
+}
+
+fn card_of<'a>(title: &'a str, rows: Vec<Element<'a, Message>>) -> Element<'a, Message> {
+    container(column![text(title).size(16).font(style::BOLD), Column::with_children(rows).spacing(6)].spacing(10))
+        .padding(14)
+        .width(Length::Fill)
+        .style(style::card)
+        .into()
+}
+
+/// Service Details and Vehicle Info, side by side
+fn top_cards(v: &RoView) -> Element<'_, Message> {
+    let (p_date, p_time) = ro::promised(&v.promised_date, &v.promised_time);
+    let mut flags = Row::new().spacing(4);
+    let mut any = false;
+    for (on, label, c) in [
+        (v.waiting_parts, "PA · Parts", RED),
+        (v.waiting_customer, "CA · Customer Approval", AMBER),
+        (v.waiting_warranty, "WA · Warranty Approval", [0x7c, 0x3a, 0xed]),
+        (v.on_hold, "OH · On Hold", GREY),
+    ] {
+        if on {
+            flags = flags.push(pill(label, c));
+            any = true;
+        }
+    }
+    for f in &v.flags {
+        flags = flags.push(pill(f.as_str(), GREY));
+        any = true;
+    }
+    let flags_row: Element<'_, Message> = row![
+        text("Flags").width(130).style(style::muted),
+        if any {
+            flags.into()
+        } else {
+            Element::from(text("None").style(style::muted))
+        }
+    ]
+    .spacing(10)
+    .align_y(Alignment::Center)
+    .into();
+    let ymm = [v.vehicle.year.as_str(), v.vehicle.make.as_str(), v.vehicle.model.as_str()]
+        .iter()
+        .filter(|s| !s.is_empty())
+        .copied()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mileage = v.vehicle.mileage.map(thousands).unwrap_or_default();
+    row![
+        card_of(
+            "Service Details",
+            vec![
+                fact("Tag Number", v.tag.clone(), Some("Tag")),
+                fact("Advisor", v.advisor.label(), None),
+                fact("Technician", v.technician.label(), None),
+                fact("Parts Employee", v.parts_employee.clone(), None),
+                fact("Promise Date", p_date, None),
+                fact("Promise Time", p_time, None),
+                flags_row,
+            ]
+        ),
+        card_of(
+            "Vehicle Info",
+            vec![
+                fact("VIN", v.vehicle.vin.clone(), Some("VIN")),
+                fact("Vehicle", ymm, None),
+                fact("Mileage", mileage, None),
+            ]
+        ),
+    ]
+    .spacing(12)
+    .into()
+}
+
+/// 123456 → "123,456"
+fn thousands(n: f64) -> String {
+    let s = format!("{}", n.round() as i64);
+    let (sign, digits) = s.strip_prefix('-').map(|d| ("-", d)).unwrap_or(("", &s));
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    format!("{sign}{out}")
+}
+
+fn empty_card<'a>(msg: &'a str) -> Element<'a, Message> {
+    container(text(msg).style(style::muted))
+        .padding(14)
+        .width(Length::Fill)
+        .style(style::card)
+        .into()
+}
+
+/// A section's title, its count, and what's approved in it (recommendations only)
+fn section_head<'a>(title: &'a str, count: usize, approved: &[&Line]) -> Row<'a, Message> {
+    let mut h = row![text(title).size(16).font(style::BOLD), pill(count.to_string(), GREY)]
+        .spacing(8)
+        .align_y(Alignment::Center);
+    if !approved.is_empty() {
+        let hrs: f64 = approved.iter().filter_map(|l| l.hours).sum();
+        let total: f64 = approved.iter().filter_map(|l| l.total).sum();
+        h = h.push(
+            text(format!(
+                "{} approved · {} · {}",
+                approved.len(),
+                hours(Some(hrs)),
+                money(Some(total))
+            ))
+            .size(13)
+            .style(style::muted),
+        );
+    }
+    h
+}
+
+/// Lines with the recommendations under each (indexes into the RO's lines)
+fn section<'a>(cx: &Ctx<'a>, title: &'a str, groups: Vec<(usize, Vec<usize>)>, v: &'a RoView) -> Element<'a, Message> {
+    if groups.is_empty() {
+        return Space::with_height(0).into();
+    }
+    let recs: Vec<&Line> = groups
+        .iter()
+        .flat_map(|(i, kids)| std::iter::once(*i).chain(kids.iter().copied()))
+        .map(|i| &v.lines[i])
+        .filter(|l| !l.primary && l.approved && !l.declined)
+        .collect();
+    let mut list = column![section_head(title, groups.len(), &recs)].spacing(8);
+    for (i, kids) in groups {
+        list = list.push(line_card(cx, &v.lines[i], kids.iter().map(|&k| &v.lines[k]).collect()));
+    }
+    list.into()
+}
+
+fn inspection<'a>(cx: &Ctx<'a>, v: &'a RoView, s: &Sections) -> Element<'a, Message> {
+    let xv = cx.xv;
+    if s.inspection.is_empty() {
+        return Space::with_height(0).into();
+    }
+    let head = section_head("Inspection lines", s.inspection.len(), &[])
+        .push(horizontal_space())
+        .push(
+            button(text(if xv.show_inspection { "Hide" } else { "Show" }).size(13))
+                .padding([4, 12])
+                .style(style::ghost)
+                .on_press(Message::ToggleInspection),
+        );
+    let mut list = column![head].spacing(8);
+    if xv.show_inspection {
+        for &i in &s.inspection {
+            list = list.push(line_card(cx, &v.lines[i], vec![]));
+        }
+    } else {
+        list = list.push(
+            text("Multipoint inspection and green tires / battery / brakes.")
+                .size(13)
+                .style(style::muted),
+        );
+    }
+    list.into()
+}
+
+/// A line: its head (click to open), what's under it when open, and the recommendations added under it
+fn line_card<'a>(cx: &Ctx<'a>, l: &'a Line, children: Vec<&'a Line>) -> Element<'a, Message> {
+    let xv = cx.xv;
+    let key = l.key();
+    let opened = xv.open.get(&key).copied();
+    let busy = xv.busy.contains(&key);
+    // a customer concern has no approve / decline: only recommendations do
+    let (edge, status): (Color, Option<(&str, [u8; 3])>) = if l.primary {
+        (color(BLUE), None)
+    } else if l.declined {
+        (color(RED), Some(("Declined", RED)))
+    } else if l.approved {
+        (color(GREEN), Some(("Approved", GREEN)))
+    } else {
+        (color(GREY), Some(("Undecided", GREY)))
+    };
+
+    let mut name = column![text(if l.name.is_empty() { l.op_code.clone() } else { l.name.clone() }).font(style::BOLD)].spacing(2);
+    if opened.is_none() && !l.concern.is_empty() {
+        name = name.push(text(l.concern.as_str()).size(12).style(style::muted));
+    }
+    let mut head = row![
+        container(text(if l.dms.is_empty() { "·" } else { l.dms.as_str() }).font(style::BOLD))
+            .width(28)
+            .align_x(Alignment::Center),
+        container(name).width(Length::Fill),
+    ]
+    .spacing(10)
+    .align_y(Alignment::Center);
+    if let Some((label, c)) = status {
+        head = head.push(pill(label, c));
+    }
+    if !l.pay_type.is_empty() {
+        head = head.push(pill(l.pay_type.as_str(), GREY));
+    }
+    head = head
+        .push(text(hours(l.hours)).size(13).width(56).align_x(Horizontal::Right))
+        .push(text(money(l.total)).size(13).font(style::BOLD).width(80).align_x(Horizontal::Right));
+    // + to open, – to close (plain characters: arrows like ▸ aren't in every Windows font)
+    let twisty = match (l.has_detail(), opened.is_some()) {
+        (false, _) => " ",
+        (true, true) => "–",
+        (true, false) => "+",
+    };
+    let head_button = button(head.push(text(twisty).size(16).width(14).style(style::muted)))
+        .width(Length::Fill)
+        .padding([8, 10])
+        .style(style::list_item(false))
+        .on_press(Message::ToggleLine(key.clone()));
+    // Done: changes the line in Xtime. Only for work that can be done (not declined, not waiting on approval); the
+    // space stays so the prices still line up. Not while the last change is on its way.
+    let done_key = key.clone();
+    let done: Element<'a, Message> = if l.can_be_done() {
+        checkbox("Done", l.completed)
+            .size(16)
+            .text_size(13)
+            .on_toggle_maybe((!busy).then(|| move |on| Message::SetDone(done_key.clone(), on)))
+            .into()
+    } else {
+        Space::with_width(DONE_WIDTH).into()
+    };
+    let done = container(done).width(DONE_WIDTH);
+    // Flag: the line's hours go on your hours report (only lines that count: approved, a concern, or done)
+    let flag: Element<'a, Message> = match cx.flags.get(&key) {
+        Some(Some(h)) => button(text(format!("Flagged {}", hours(Some(*h)))).size(12).font(style::BOLD))
+            .padding([4, 10])
+            .style(button::success)
+            .on_press(Message::FlagLine(key.clone(), false))
+            .into(),
+        Some(None) => button(text("Flag").size(12))
+            .padding([4, 10])
+            .style(style::ghost)
+            .on_press(Message::FlagLine(key.clone(), true))
+            .into(),
+        None => Space::with_width(0).into(),
+    };
+    let flag = container(flag).width(FLAG_WIDTH).align_x(Alignment::End);
+    let mut card = column![
+        row![head_button, flag, done]
+            .spacing(10)
+            .align_y(Alignment::Center)
+            .padding([0, 10])
+    ]
+    .spacing(0);
+
+    if let Some(at) = opened {
+        card = card.push(anim::page(line_body(l), anim::Phase::Entering(at)).on_card());
+    }
+    if !children.is_empty() {
+        let label = if l.dms.is_empty() {
+            "Recommended for this concern".to_string()
+        } else {
+            format!("Recommended for {}", l.dms)
+        };
+        let mut kids = column![text(label).size(12).font(style::BOLD).style(style::muted)].spacing(6);
+        for c in children {
+            kids = kids.push(line_card(cx, c, vec![]));
+        }
+        card = card.push(container(kids).padding(iced::Padding {
+            top: 4.0,
+            right: 10.0,
+            bottom: 10.0,
+            left: 34.0,
+        }));
+    }
+    let faded = l.completed;
+    container(card)
+        .width(Length::Fill)
+        .style(move |theme: &iced::Theme| {
+            let mut s = style::card(theme);
+            s.border.color = edge;
+            s.border.width = if faded { 1.0 } else { 1.5 };
+            s
+        })
+        .into()
+}
+
+/// A label over its text (Concern, Cause…)
+fn labeled<'a>(k: &'a str, v: String) -> Element<'a, Message> {
+    column![text(k).size(12).font(style::BOLD).style(style::muted), text(v)]
+        .spacing(2)
+        .into()
+}
+
+/// The parts table's column widths (0: the rest)
+const PART_COLS: [f32; 5] = [150.0, 0.0, 50.0, 160.0, 80.0];
+
+fn cell(e: Element<'_, Message>, i: usize) -> Element<'_, Message> {
+    let width = if PART_COLS[i] == 0.0 {
+        Length::Fill
+    } else {
+        Length::Fixed(PART_COLS[i])
+    };
+    container(e).width(width).into()
+}
+
+/// What's under a line when it's open: concern, cause, correction, notes, parts, and the rest in one line
+fn line_body(l: &Line) -> Element<'_, Message> {
+    let mut body = column![].spacing(8);
+    for (k, v) in [
+        ("Concern", &l.concern),
+        ("Cause", &l.cause),
+        ("Correction", &l.correction),
+        ("Technician note", &l.tech_note),
+        ("Advisor note", &l.advisor_note),
+        ("Manager note", &l.manager_note),
+        ("Parts note", &l.parts_note),
+    ] {
+        if !v.is_empty() {
+            body = body.push(labeled(k, v.clone()));
+        }
+    }
+    if !l.sub_lines.is_empty() {
+        body = body.push(labeled("Sub-operations", l.sub_lines.join(" · ")));
+    }
+    if !l.part_list.is_empty() {
+        let head = row(["Part #", "Description", "Qty", "Status", "Price"]
+            .iter()
+            .enumerate()
+            .map(|(i, h)| cell(text(*h).size(12).font(style::BOLD).style(style::muted).into(), i)))
+        .spacing(8);
+        let mut table = column![head].spacing(4);
+        for p in &l.part_list {
+            let number: Element<'_, Message> = if p.number.is_empty() {
+                text("—").into()
+            } else {
+                button(text(p.number.as_str()).font(style::MONO).size(13))
+                    .padding([1, 4])
+                    .style(style::ghost)
+                    .on_press(Message::Copy(p.number.clone(), "Part number".into()))
+                    .into()
+            };
+            let status = [p.status.as_str(), if p.picked_up { "picked up" } else { "" }]
+                .iter()
+                .filter(|s| !s.is_empty())
+                .copied()
+                .collect::<Vec<_>>()
+                .join(" · ");
+            table = table.push(
+                row![
+                    cell(number, 0),
+                    cell(text(p.description.as_str()).size(13).into(), 1),
+                    cell(text(p.quantity.map(|q| q.to_string()).unwrap_or_default()).size(13).into(), 2),
+                    cell(text(status).size(13).into(), 3),
+                    cell(text(money(p.price)).size(13).into(), 4),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
+            );
+        }
+        body = body.push(column![text("Parts").size(12).font(style::BOLD).style(style::muted), table].spacing(4));
+    } else if l.parts_not_needed {
+        body = body.push(text("No parts needed").size(12).style(style::muted));
+    }
+    let mut meta: Vec<String> = Vec::new();
+    if !l.dispatch.is_empty() {
+        meta.push(format!("Dispatch {}", l.dispatch));
+    }
+    if let Some(e) = l.estimate.filter(|e| *e > 0.0) {
+        meta.push(format!("Estimated {}", hours(Some(e))));
+    }
+    if l.labor.is_some() {
+        meta.push(format!("Labor {}", money(l.labor)));
+    }
+    if l.parts.is_some() {
+        meta.push(format!("Parts {}", money(l.parts)));
+    }
+    if !l.techs.is_empty() {
+        meta.push(format!("Tech: {}", l.techs.join(", ")));
+    }
+    if !l.tech_start.is_empty() {
+        meta.push(format!("Started {}", ro::when(&l.tech_start)));
+    }
+    if !l.tech_end.is_empty() {
+        meta.push(format!("Finished {}", ro::when(&l.tech_end)));
+    }
+    if l.images > 0 {
+        meta.push(format!("{} picture{} in Xtime", l.images, if l.images == 1 { "" } else { "s" }));
+    }
+    if !l.added_by.is_empty() {
+        meta.push(format!("Added by {}", l.added_by));
+    }
+    if l.parts_picked_up {
+        meta.push("Parts picked up".into());
+    }
+    if !meta.is_empty() {
+        body = body.push(text(meta.join(" · ")).size(12).style(style::muted));
+    }
+    container(body)
+        .padding(iced::Padding {
+            top: 2.0,
+            right: 14.0,
+            bottom: 12.0,
+            left: 48.0,
+        })
+        .width(Length::Fill)
+        .into()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn writes_thousands() {
+        assert_eq!(super::thousands(1234.0), "1,234");
+        assert_eq!(super::thousands(123456.0), "123,456");
+        assert_eq!(super::thousands(12.0), "12");
+        assert_eq!(super::thousands(1000000.0), "1,000,000");
+    }
+}

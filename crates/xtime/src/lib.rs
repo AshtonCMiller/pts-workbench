@@ -13,6 +13,7 @@
 pub mod dashboard;
 pub mod employee;
 mod json;
+pub mod ro;
 
 use std::sync::{Arc, Mutex};
 
@@ -27,14 +28,27 @@ pub mod paths {
     pub const EMPLOYEES: &str = "/JS/Employees?storeID={STORE}";
     /// `{RO}`: the RO number
     pub const RO_DETAILS: &str = "/RepairOrder/Details/{RO}";
+
+    /// The staff list's address for a store
+    pub fn employees(store: &str) -> String {
+        EMPLOYEES.replace("{STORE}", &crate::employee::encode(store.trim()))
+    }
 }
 
-/// Signing in: the sign-in window starts here (Xtime sends it on to Cox's sign-in page when needed) and is done once
-/// it's back on [`paths::DATA_HOST`]. The cookies of these sites are taken (Cox's sign-in, Xtime's login and chat).
+/// Signing in: the sign-in window starts here (Xtime sends it on to Cox's sign-in page when needed). After signing in,
+/// Cox sends you to Xtime's Scheduling page (on [`signin::LANDING`]), not to Inspect, so the window then opens Inspect
+/// the way Scheduling's menu does ([`signin::INSPECT`]). Inspect shows inside that page, so the window is done once
+/// Inspect ([`paths::DATA_HOST`]) has given it a new sign-in cookie (or the window is on Inspect itself). The cookies
+/// of these sites are taken (Cox's sign-in, Xtime's login and chat).
 pub mod signin {
     pub const START: &str = "https://www.inspect.app.coxautoinc.com/";
     pub const DONE_HOST: &str = super::paths::DATA_HOST;
     pub const COOKIE_DOMAINS: &[&str] = &["coxautoinc.com", "xtime.com"];
+    /// Where Cox sends you after signing in (Scheduling: x1.xtime.app.coxautoinc.com/panama/…)
+    pub const LANDING: &str = "xtime.app.coxautoinc.com";
+    /// Inspect, opened from there. `{DOMAIN}`: the landing page's address without its first part
+    /// (xtime.app.coxautoinc.com); `{STORE}`: the store ID from settings
+    pub const INSPECT: &str = "https://login.{DOMAIN}/?pt=svp&view=svp&StoreID={STORE}";
 }
 
 #[derive(Debug, thiserror::Error)]

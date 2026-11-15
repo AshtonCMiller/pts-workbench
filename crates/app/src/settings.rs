@@ -24,18 +24,30 @@ pub struct Settings {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ThemeChoice {
+    /// Follows Windows' own light or dark setting (and changes with it)
     #[default]
+    Auto,
     Light,
     Dark,
 }
 
 impl ThemeChoice {
-    pub const ALL: [ThemeChoice; 2] = [ThemeChoice::Light, ThemeChoice::Dark];
+    pub const ALL: [ThemeChoice; 3] = [ThemeChoice::Auto, ThemeChoice::Light, ThemeChoice::Dark];
+
+    /// Light or Dark: Auto is whichever the system uses now
+    pub fn resolve(self, system_dark: bool) -> ThemeChoice {
+        match self {
+            ThemeChoice::Auto if system_dark => ThemeChoice::Dark,
+            ThemeChoice::Auto => ThemeChoice::Light,
+            other => other,
+        }
+    }
 }
 
 impl std::fmt::Display for ThemeChoice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
+            ThemeChoice::Auto => "Auto",
             ThemeChoice::Light => "Light",
             ThemeChoice::Dark => "Dark",
         })
@@ -105,6 +117,17 @@ mod tests {
         // a field added later just takes its default
         let s: Settings = serde_json::from_str(r#"{ "store_id": "1" }"#).unwrap();
         assert_eq!(s.store_id, "1");
+        assert_eq!(s.theme, ThemeChoice::Auto);
+        // a saved choice stays
+        let s: Settings = serde_json::from_str(r#"{ "theme": "Light" }"#).unwrap();
         assert_eq!(s.theme, ThemeChoice::Light);
+    }
+
+    #[test]
+    fn auto_follows_the_system() {
+        assert_eq!(ThemeChoice::Auto.resolve(true), ThemeChoice::Dark);
+        assert_eq!(ThemeChoice::Auto.resolve(false), ThemeChoice::Light);
+        assert_eq!(ThemeChoice::Light.resolve(true), ThemeChoice::Light);
+        assert_eq!(ThemeChoice::Dark.resolve(false), ThemeChoice::Dark);
     }
 }

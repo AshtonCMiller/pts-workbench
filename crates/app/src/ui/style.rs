@@ -42,6 +42,7 @@ const DARK: Colors = Colors {
     accent: rgb(0x4a8fe0),
 };
 
+/// The iced theme for Light or Dark (Auto is resolved first: [`ThemeChoice::resolve`])
 pub fn theme(choice: ThemeChoice) -> Theme {
     match choice {
         ThemeChoice::Light => Theme::custom(
@@ -54,7 +55,7 @@ pub fn theme(choice: ThemeChoice) -> Theme {
                 danger: rgb(0xb42318),
             },
         ),
-        ThemeChoice::Dark => Theme::custom(
+        ThemeChoice::Dark | ThemeChoice::Auto => Theme::custom(
             "PTS Workbench Dark".into(),
             Palette {
                 background: rgb(0x15181c),

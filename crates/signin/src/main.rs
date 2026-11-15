@@ -2,6 +2,15 @@
 //! prints its cookies as one line of JSON and closes:
 //!
 //!   pts-signin --title <window title> --start <address> --done-host <host> --domains <a,b> --data-dir <folder>
+//!              [--then <address> --then-from <host>] [--done-cookie]
+//!
+//! Done once the window is back on `--done-host` (and still there a moment later). For sites that land you somewhere
+//! else after signing in: `--then-from` — when a page on that host (or under it) loads, go on to `--then` (`{DOMAIN}`
+//! there: that page's host without its first part). `--done-cookie` — also done once `--done-host` has set a new
+//! cookie (for a site shown inside another page, so the window itself never goes there).
+//!
+//! The hosts and paths it went through (never the rest of the address, nor any cookie) are written to
+//! `signin-log.txt` in `--data-dir`, to see where a sign-in got stuck.
 //!
 //! Prints `{"ok":true,"cookies":[…]}` (each like `workbench_net::SiteCookie`), or `{"ok":false,"cancelled":true}` when
 //! the window is closed first (exit code 1). Only cookies of the `--domains` sites are printed, and only to the app
@@ -9,8 +18,9 @@
 //! which keeps "remember me" and saved passwords between sign-ins, as a browser does.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // no console window on Windows
 
+use std::collections::HashSet;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use tao::dpi::LogicalSize;
@@ -51,6 +61,9 @@ struct Args {
     done_host: String,
     domains: Vec<String>,
     data_dir: PathBuf,
+    then: Option<String>,
+    then_from: Option<String>,
+    done_cookie: bool,
 }
 
 fn args() -> Option<Args> {
@@ -66,6 +79,9 @@ fn args() -> Option<Args> {
             .filter(|d| !d.is_empty())
             .collect(),
         data_dir: PathBuf::from(get("--data-dir")?),
+        then: get("--then"),
+        then_from: get("--then-from").map(|h| h.trim_start_matches('.').to_ascii_lowercase()),
+        done_cookie: list.iter().any(|a| a == "--done-cookie"),
     })
 }
 
@@ -99,6 +115,51 @@ fn signed_in(url: &str, done_host: &str) -> bool {
             .any(|w| path.contains(w))
 }
 
+/// The path of an address, in small letters (without ? or #)
+fn path_of(url: &str) -> String {
+    url.split_once("://")
+        .map(|(_, r)| r)
+        .unwrap_or(url)
+        .split(['?', '#'])
+        .next()
+        .unwrap_or("")
+        .split_once('/')
+        .map(|(_, p)| format!("/{}", p.to_ascii_lowercase()))
+        .unwrap_or_else(|| "/".into())
+}
+
+/// On a sign-in page (or nowhere yet)
+fn on_signin_page(url: &str) -> bool {
+    let host = host_of(url);
+    let path = path_of(url);
+    host.is_empty()
+        || !url.contains("://")
+        || url.starts_with("about:")
+        || host.split('.').any(|l| l == "signin")
+        || ["login", "signin", "sign-in", "logon", "account/log"]
+            .iter()
+            .any(|w| path.contains(w))
+}
+
+/// A page on `from` (or under it) that isn't a sign-in page, nor the page `--then` opens (login.<domain>)
+fn go_on_from(url: &str, from: &str) -> bool {
+    let host = host_of(url);
+    (host == from || host.ends_with(&format!(".{from}"))) && !host.starts_with("login.") && !on_signin_page(url)
+}
+
+/// `--then` for the page at `url`: `{DOMAIN}` is its host without the first part
+fn then_address(then: &str, url: &str) -> String {
+    let host = host_of(url);
+    let domain = host.split_once('.').map(|(_, d)| d).unwrap_or(&host);
+    then.replace("{DOMAIN}", domain)
+}
+
+/// A cookie of `host` itself (`www.` aside), not of a wider domain
+fn cookie_of(domain: &str, host: &str) -> bool {
+    let d = domain.trim_start_matches('.').to_ascii_lowercase();
+    d == host || format!("www.{d}") == host
+}
+
 fn wanted(domain: &str, domains: &[String]) -> bool {
     let d = domain.trim_start_matches('.').to_ascii_lowercase();
     domains.iter().any(|w| d == *w || d.ends_with(&format!(".{w}")))
@@ -107,8 +168,42 @@ fn wanted(domain: &str, domains: &[String]) -> bool {
 enum UserEvent {
     /// A page finished loading
     Loaded(String),
-    /// A moment after landing on the site: still there? (Sites can load first and send you to sign in after.)
+    /// Every 1.5 s: signed in yet? (Done only when it's so twice in a row: sites can load first and send you to sign
+    /// in after.)
     Check,
+}
+
+/// The `--done-host` cookies there are now, as name=value
+fn done_host_cookies(webview: &wry::WebView, host: &str) -> HashSet<String> {
+    webview
+        .cookies()
+        .map(|list| {
+            list.iter()
+                .filter(|c| c.domain().is_some_and(|d| cookie_of(d, host)))
+                .map(|c| format!("{}={}", c.name(), c.value()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The sign-in's path, for `signin-log.txt` (hosts and paths only)
+struct Log(Option<std::fs::File>);
+
+impl Log {
+    fn open(dir: &std::path::Path) -> Log {
+        let _ = std::fs::create_dir_all(dir);
+        Log(std::fs::File::create(dir.join("signin-log.txt")).ok())
+    }
+    fn line(&mut self, what: &str) {
+        use std::io::Write;
+        if let Some(f) = &mut self.0 {
+            let secs = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+            let _ = writeln!(f, "{secs} {what}");
+        }
+    }
+    fn page(&mut self, what: &str, url: &str) {
+        self.line(&format!("{what} {}{}", host_of(url), path_of(url)));
+    }
 }
 
 fn main() {
@@ -142,13 +237,11 @@ fn main() {
 
     let proxy = event_loop.create_proxy();
     let mut context = WebContext::new(Some(a.data_dir.clone()));
-    let builder = WebViewBuilder::with_web_context(&mut context)
-        .with_url(&a.start)
-        .with_on_page_load_handler(move |event, url| {
-            if let PageLoadEvent::Finished = event {
-                let _ = proxy.send_event(UserEvent::Loaded(url));
-            }
-        });
+    let builder = WebViewBuilder::with_web_context(&mut context).with_on_page_load_handler(move |event, url| {
+        if let PageLoadEvent::Finished = event {
+            let _ = proxy.send_event(UserEvent::Loaded(url));
+        }
+    });
     // Linux: the web view goes in the window's GTK box (works on Wayland and X11); elsewhere in the window itself
     #[cfg(target_os = "linux")]
     let webview = {
@@ -171,29 +264,60 @@ fn main() {
         }
     };
 
+    // What Inspect had before signing in (an old sign-in kept in the profile): only a new cookie means signed in
+    let before = if a.done_cookie {
+        done_host_cookies(&webview, &a.done_host)
+    } else {
+        HashSet::new()
+    };
+    let mut log = Log::open(&a.data_dir);
+    log.page("start", &a.start);
+    if let Err(e) = webview.load_url(&a.start) {
+        log.line(&format!("couldn't open the start page: {e}"));
+    }
+
     let check_proxy = event_loop.create_proxy();
-    let mut waiting = false;
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(Duration::from_millis(1500));
+            if check_proxy.send_event(UserEvent::Check).is_err() {
+                break; // the window has closed
+            }
+        }
+    });
+    let mut ready_checks = 0;
+    let mut went_on: Option<Instant> = None;
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
         let _keep = (&window, &context); // the window and the web view's profile live as long as the web view
         match event {
-            Event::UserEvent(UserEvent::Loaded(url)) if !waiting && signed_in(&url, &a.done_host) => {
-                waiting = true;
-                let p = check_proxy.clone();
-                std::thread::spawn(move || {
-                    std::thread::sleep(Duration::from_millis(2000));
-                    let _ = p.send_event(UserEvent::Check);
-                });
+            Event::UserEvent(UserEvent::Loaded(url)) => {
+                log.page("loaded", &url);
+                // Landed somewhere else after signing in (Xtime: Scheduling): go on (not more than every 20 s)
+                let go_on = match (&a.then, &a.then_from) {
+                    (Some(then), Some(from)) if go_on_from(&url, from) => Some(then_address(then, &url)),
+                    _ => None,
+                };
+                if let Some(next) = go_on.filter(|_| went_on.is_none_or(|t| t.elapsed() > Duration::from_secs(20))) {
+                    went_on = Some(Instant::now());
+                    log.page("going on to", &next);
+                    let _ = webview.load_url(&next);
+                }
             }
             Event::UserEvent(UserEvent::Check) => {
-                waiting = false;
                 let here = webview.url().unwrap_or_default();
-                if !signed_in(&here, &a.done_host) {
-                    return; // sent on to sign in after all: wait for the next page
+                let ready = signed_in(&here, &a.done_host)
+                    || (a.done_cookie
+                        && !on_signin_page(&here)
+                        && done_host_cookies(&webview, &a.done_host).difference(&before).next().is_some());
+                ready_checks = if ready { ready_checks + 1 } else { 0 };
+                if ready_checks < 2 {
+                    return;
                 }
+                log.page("signed in at", &here);
                 match webview.cookies() {
                     Ok(list) => {
-                        let cookies = list
+                        let cookies: Vec<SiteCookie> = list
                             .iter()
                             .filter_map(|c| {
                                 let domain = c.domain().map(str::to_string).unwrap_or_else(|| a.done_host.clone());
@@ -208,6 +332,7 @@ fn main() {
                                 })
                             })
                             .collect();
+                        log.line(&format!("handing over {} cookies", cookies.len()));
                         answer(&Answer {
                             ok: true,
                             cancelled: false,
@@ -217,6 +342,7 @@ fn main() {
                         *control_flow = ControlFlow::Exit;
                     }
                     Err(e) => {
+                        log.line(&format!("couldn't read the cookies: {e}"));
                         answer(&Answer {
                             ok: false,
                             cancelled: false,
@@ -231,6 +357,7 @@ fn main() {
                 event: WindowEvent::CloseRequested,
                 ..
             } => {
+                log.page("closed at", &webview.url().unwrap_or_default());
                 answer(&Answer {
                     ok: false,
                     cancelled: true,
@@ -259,6 +386,42 @@ mod tests {
         ));
         assert!(!signed_in("https://www.inspect.app.coxautoinc.com/Account/Login", host));
         assert!(!signed_in("about:blank", host));
+    }
+
+    #[test]
+    fn goes_on_from_scheduling_to_inspect() {
+        let from = "xtime.app.coxautoinc.com";
+        let sched = "https://x1.xtime.app.coxautoinc.com/panama/scheduling?a=b";
+        assert!(go_on_from(sched, from));
+        assert!(!go_on_from(
+            "https://login.xtime.app.coxautoinc.com/?pt=svp&view=svp&StoreID=1",
+            from
+        ));
+        assert!(!go_on_from("https://xtime.signin.coxautoinc.com/?x", from));
+        assert!(!go_on_from("https://www.inspect.app.coxautoinc.com/", from));
+        assert_eq!(
+            then_address("https://login.{DOMAIN}/?pt=svp&view=svp&StoreID=3590", sched),
+            "https://login.xtime.app.coxautoinc.com/?pt=svp&view=svp&StoreID=3590"
+        );
+    }
+
+    #[test]
+    fn knows_sign_in_pages() {
+        assert!(on_signin_page("https://xtime.signin.coxautoinc.com/?return=x"));
+        assert!(on_signin_page("about:blank"));
+        assert!(on_signin_page(""));
+        assert!(on_signin_page("https://www.inspect.app.coxautoinc.com/Account/Login?r=1"));
+        assert!(!on_signin_page("https://login.xtime.app.coxautoinc.com/?pt=svp&view=svp&StoreID=1"));
+        assert!(!on_signin_page("https://x1.xtime.app.coxautoinc.com/panama/"));
+    }
+
+    #[test]
+    fn inspects_own_cookies_only() {
+        let host = "www.inspect.app.coxautoinc.com";
+        assert!(cookie_of("www.inspect.app.coxautoinc.com", host));
+        assert!(cookie_of(".inspect.app.coxautoinc.com", host));
+        assert!(!cookie_of(".coxautoinc.com", host));
+        assert!(!cookie_of(".app.coxautoinc.com", host));
     }
 
     #[test]

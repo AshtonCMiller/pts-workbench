@@ -6,8 +6,11 @@
 //!   sidebar.rs    open vehicles and your ROs
 //!   dashboard.rs  your Xtime dashboard (a table of your ROs, with search)
 //!   workbench.rs  one vehicle: its tabs and the Service Manual's tabs
+//!   xtime_view.rs the Xtime View tab: an RO as Xtime has it, its lines, marking them done
 //!   settings.rs   first setup and Settings
 //!   feedback.rs   Feedback: send a bug or an idea, your reports, everyone's (the admin)
+//!   hours_report.rs  your hours: one pay period's flags, confirmed, clocked, efficiency, spiffs
+//!   print_window.rs  the app's Print window: a preview of every page, the printer, copies
 //!   anim.rs       motion: tabs whose highlight slides, pages that slide and fade
 //!   style.rs      colors and shared styles
 
@@ -17,10 +20,13 @@ pub mod style;
 mod bottombar;
 mod dashboard;
 mod feedback;
+pub mod hours_report;
+mod print_window;
 mod settings;
 mod sidebar;
 mod topbar;
 mod workbench;
+mod xtime_view;
 
 pub use settings::focus_first_field;
 
@@ -54,12 +60,14 @@ pub fn view(app: &App) -> Element<'_, Message> {
         .style(style::page)
         .width(Length::Fill)
         .height(Length::Fill);
-    // Settings or Feedback: a card over everything, the page frosted behind it
+    // Settings, Feedback, Print or Hours: a card over everything, the page frosted behind it
     match app.overlay {
         Some((which, phase)) => {
             let (card, close) = match which {
                 Overlay::Settings => (settings::card(app), Message::CloseSettings),
                 Overlay::Feedback => (feedback::card(app), Message::CloseFeedback),
+                Overlay::Print => (print_window::card(app), Message::ClosePrint),
+                Overlay::Hours => (hours_report::card(app), Message::CloseHours),
             };
             iced::widget::stack![base, anim::modal(card, phase, close)].into()
         }
@@ -88,7 +96,7 @@ fn chat<'a>() -> Element<'a, Message> {
 }
 
 /// A small coloured label: an RO's mode, a waiting flag
-pub fn pill<'a>(label: &'a str, rgb: [u8; 3]) -> Element<'a, Message> {
+pub fn pill<'a>(label: impl iced::widget::text::IntoFragment<'a>, rgb: [u8; 3]) -> Element<'a, Message> {
     container(text(label).size(11))
         .padding([1, 8])
         .style(style::pill(Color::from_rgb8(rgb[0], rgb[1], rgb[2])))
