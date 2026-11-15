@@ -1,0 +1,44 @@
+//! The top bar: getting around (Xtime / Workbench, Chat, My ROs, Settings). What's going on is in the bottom bar.
+
+use iced::widget::{button, container, horizontal_space, row, text};
+use iced::{Alignment, Element, Length};
+
+use super::{anim, style};
+use crate::app::{App, Message, Mode};
+
+pub fn view(app: &App) -> Element<'_, Message> {
+    let mode = |label: String, m: Mode| {
+        button(text(label).font(style::BOLD))
+            .padding([6, 14])
+            .style(style::tab(app.mode == m))
+            .on_press(Message::SetMode(m))
+    };
+    let workbench = if app.open.is_empty() {
+        "Workbench".to_string()
+    } else {
+        format!("Workbench  {}", app.open.len())
+    };
+
+    let modes = anim::tabs(
+        if app.mode == Mode::Xtime { 0 } else { 1 },
+        vec![mode("Xtime".into(), Mode::Xtime).into(), mode(workbench, Mode::Workbench).into()],
+    );
+    let mut bar = row![modes, horizontal_space()].spacing(6).align_y(Alignment::Center);
+    let toggle = |label: &'static str, on: bool, msg: Message| button(text(label)).padding([5, 10]).style(style::toggle(on)).on_press(msg);
+    bar = bar
+        .push(toggle("Chat", app.chat, Message::ToggleChat))
+        .push(toggle("My ROs", app.sidebar, Message::ToggleSidebar))
+        .push(
+            button(text("Settings"))
+                .padding([5, 10])
+                .style(style::ghost)
+                .on_press(Message::OpenSettings),
+        );
+
+    container(bar.padding([0, 12]))
+        .height(48)
+        .width(Length::Fill)
+        .align_y(Alignment::Center)
+        .style(style::panel)
+        .into()
+}

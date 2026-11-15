@@ -1,0 +1,44 @@
+
+# PTS Workbench, the Rust version. One workspace, a crate per part:
+#   crates/app    the app itself (the binary): windows, settings, and wiring the parts together
+#   crates/net    web requests with the sign-in cookies, shared by the parts below (and saving those sign-ins)
+#   crates/xtime  Xtime: your ROs, the RO view and line changes, the Dealership chat
+#   crates/ford   Ford PTS: the Service Manual and the rest of Ford's pages (PC/ED, wiring, TSBs, OASIS…)
+# Nothing runs inside Xtime's or Ford's pages: each part asks their sites directly, the way their own pages do.
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+default-members = ["crates/app"]
+
+# Set version number here once; each crate listens with `name.workspace = true`
+[workspace.package]
+version = "0.5.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+
+[workspace.dependencies]
+# Our own crates
+workbench-net = { path = "crates/net" }
+xtime = { path = "crates/xtime" }
+ford = { path = "crates/ford" }
+launcher = { path = "crates/launcher" }
+feedback = { path = "crates/feedback" }
+
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "cookies", "rustls-tls", "gzip"] }
+reqwest_cookie_store = "0.8"
+cookie_store = "0.21"
+serde = { version = "1", features = ["derive"] }
+# preserve_order: fields stay in the order Xtime sends them (the loose field matching picks the first match, as JS does)
+serde_json = { version = "1", features = ["preserve_order"] }
+thiserror = "2"
+url = "2"
+regex = "1"
+# Native Rust UI
+iced = { version = "0.13", features = ["tokio", "advanced"] }
+# passwords kept by the system (Windows Credential Manager, the Secret Service on Linux): the feedback admin's
+keyring = { version = "3", features = ["windows-native", "sync-secret-service", "crypto-rust"] }
+# Web view for sign in windows
+tao = "0.30"
+wry = "0.47"

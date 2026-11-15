@@ -1,0 +1,16 @@
+[package]
+name = "feedback"
+description = "Bug reports and feature ideas: sending them to the sync server, their replies, and the admin's list"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+workbench-net.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

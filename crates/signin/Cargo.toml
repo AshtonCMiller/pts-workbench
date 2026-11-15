@@ -1,0 +1,19 @@
+[package]
+name = "signin"
+description = "The sign-in windows: Cox's or Ford's own sign-in page in a web view, handing the cookies to the app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# A program of its own: the web view's window system (tao) and iced's both want the main thread, so they can't share
+# one program. The app starts this one and reads what it prints.
+[[bin]]
+name = "pts-signin"
+path = "src/main.rs"
+
+[dependencies]
+tao.workspace = true
+wry.workspace = true
+serde.workspace = true
+serde_json.workspace = true

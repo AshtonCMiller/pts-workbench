@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS reports (
   platform TEXT NOT NULL DEFAULT '',
   screen TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL DEFAULT 'new',  -- new · planned · in-progress · done · wont-do
-  reply TEXT NOT NULL DEFAULT ''       -- a note back to the person, shown in their list
+  reply TEXT NOT NULL DEFAULT '',      -- a note back to the person, shown in their list
+  fixed_in TEXT NOT NULL DEFAULT ''    -- the version it was fixed in ("0.5.0"), set when it's marked done
 );
 CREATE INDEX IF NOT EXISTS reports_reporter ON reports (reporter, created_at);

@@ -1,0 +1,13 @@
+[package]
+name = "ford"
+description = "Ford PTS for PTS Workbench: the Service Manual, PC/ED, wiring, TSBs, OASIS, Connected Vehicle, labor times"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+workbench-net.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

@@ -1,0 +1,175 @@
+//! First setup (the store ID and dealer code, before anything else) and Settings.
+
+use iced::Task;
+use iced::widget::{button, column, container, horizontal_space, pick_list, row, scrollable, text, text_input};
+use iced::{Alignment, Element, Length};
+
+use super::style;
+use crate::app::{App, Field, Message};
+use crate::settings::ThemeChoice;
+use crate::signin::Site;
+
+/// Each field's name, for moving to it
+fn field_id(f: Field) -> text_input::Id {
+    text_input::Id::new(match f {
+        Field::StoreId => "store-id",
+        Field::DealerCode => "dealer-code",
+        Field::EmployeeNumber => "employee-number",
+        Field::TechId => "tech-id",
+        Field::Name => "name",
+    })
+}
+
+/// Puts the cursor in the form's first field (when first setup or Settings opens)
+pub fn focus_first_field() -> Task<Message> {
+    text_input::focus(field_id(Field::StoreId))
+}
+
+fn field<'a>(label: &'a str, help: &'a str, value: &'a str, f: Field) -> Element<'a, Message> {
+    column![
+        text(label).font(style::BOLD),
+        text_input("", value)
+            .id(field_id(f))
+            .on_input(move |v| Message::Edit(f, v))
+            .on_submit(Message::SaveSettings)
+            .padding(8),
+        text(help).size(12).style(style::muted),
+    ]
+    .spacing(4)
+    .into()
+}
+
+fn fields(app: &App) -> Element<'_, Message> {
+    let d = &app.draft;
+    column![
+        field("Store ID", "Your dealership's Xtime store ID.", &d.store_id, Field::StoreId),
+        field("Dealer code", "Your dealership's Ford P&A code.", &d.dealer_code, Field::DealerCode),
+        field(
+            "Employee number",
+            "Your Xtime employee number: your ROs are found with it.",
+            &d.employee_number,
+            Field::EmployeeNumber
+        ),
+        field(
+            "Technician ID",
+            "Found from your employee number once Xtime is connected; or type it.",
+            &d.tech_id,
+            Field::TechId
+        ),
+        field("Your name", "Sent with your feedback, so replies reach you.", &d.name, Field::Name),
+    ]
+    .spacing(14)
+    .into()
+}
+
+fn notice(app: &App) -> Element<'_, Message> {
+    match &app.notice {
+        Some(n) => text(n.as_str()).size(13).into(),
+        None => text("").into(),
+    }
+}
+
+/// Xtime and Ford PTS: signed in or not, and a button to sign in (again)
+fn accounts(app: &App) -> Element<'_, Message> {
+    let mut list = column![text("Accounts").font(style::BOLD)].spacing(6);
+    for site in Site::ALL {
+        let (state, again) = if app.signing_in == Some(site) {
+            ("Signing in…", "Sign in")
+        } else if app.signed_in(site) {
+            ("Signed in", "Sign in again")
+        } else {
+            ("Not signed in", "Sign in")
+        };
+        list = list.push(
+            row![
+                text(site.name()).width(120),
+                text(state).style(style::muted),
+                horizontal_space(),
+                button(text(again))
+                    .padding([5, 12])
+                    .style(style::ghost)
+                    .on_press_maybe(app.signing_in.is_none().then_some(Message::SignIn(site))),
+            ]
+            .spacing(10)
+            .align_y(Alignment::Center),
+        );
+    }
+    list.push(
+        text("Sign-ins open Xtime's or Ford's own sign-in page in a small window.")
+            .size(12)
+            .style(style::muted),
+    )
+    .into()
+}
+
+/// The first screen on a new computer
+pub fn setup(app: &App) -> Element<'_, Message> {
+    let card = container(
+        column![
+            text("Welcome to PTS Workbench").size(22).font(style::BOLD),
+            text("A few details about your dealership first. You can change them later in Settings.").style(style::muted),
+            fields(app),
+            row![
+                notice(app),
+                horizontal_space(),
+                button(text("Start").font(style::BOLD))
+                    .padding([8, 20])
+                    .style(button::primary)
+                    .on_press(Message::SaveSettings)
+            ]
+            .align_y(Alignment::Center),
+        ]
+        .spacing(16),
+    )
+    .padding(24)
+    .width(520)
+    .style(style::card);
+    container(card)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_x(Alignment::Center)
+        .align_y(Alignment::Center)
+        .style(style::page)
+        .into()
+}
+
+/// Settings, as a card over everything (from the top bar)
+pub fn card(app: &App) -> Element<'_, Message> {
+    // the card scrolls when the window is short
+    container(scrollable(
+        container(
+            column![
+                row![
+                    text("Settings").size(20).font(style::BOLD),
+                    horizontal_space(),
+                    button(text("Close"))
+                        .padding([5, 12])
+                        .style(style::ghost)
+                        .on_press(Message::CloseSettings)
+                ]
+                .align_y(Alignment::Center),
+                fields(app),
+                accounts(app),
+                column![
+                    text("Appearance").font(style::BOLD),
+                    pick_list(&ThemeChoice::ALL[..], Some(app.draft.theme), Message::SetTheme).padding(6),
+                ]
+                .spacing(4),
+                row![
+                    notice(app),
+                    horizontal_space(),
+                    button(text("Save").font(style::BOLD))
+                        .padding([8, 20])
+                        .style(button::primary)
+                        .on_press(Message::SaveSettings)
+                ]
+                .align_y(Alignment::Center),
+            ]
+            .spacing(16),
+        )
+        .padding(24),
+    ))
+    .width(560)
+    .style(style::floating_card)
+    .into()
+}

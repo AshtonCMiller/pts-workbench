@@ -1,0 +1,105 @@
+//! The bottom bar: the shift clock, what's going on (Xtime's state, the latest message), and Feedback.
+//! Keeps the top bar for getting around (Xtime / Workbench, Chat, My ROs, Settings).
+
+use iced::widget::{button, container, horizontal_space, row, text};
+use iced::{Alignment, Element, Length};
+
+use super::{pill, style};
+use crate::app::{App, Message};
+use crate::signin::Site;
+
+pub fn view(app: &App) -> Element<'_, Message> {
+    // the shift clock
+    let clock: Element<'_, Message> = match app.clock.elapsed(app.now) {
+        Some(on) => row![
+            pill("Clocked in", [0x15, 0x80, 0x3d]),
+            text(on).size(13),
+            button(text("Clock out").size(13))
+                .padding([3, 10])
+                .style(style::ghost)
+                .on_press(Message::ToggleClock),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .into(),
+        None => row![
+            pill("Clocked out", [0x5d, 0x66, 0x70]),
+            button(text("Clock in").size(13))
+                .padding([3, 10])
+                .style(style::ghost)
+                .on_press(Message::ToggleClock),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .into(),
+    };
+
+    let mut bar = row![clock, divider()].spacing(12).align_y(Alignment::Center);
+
+    // Xtime's state: signing in, signed out, or (for now) sample data
+    if app.signing_in == Some(Site::Xtime) {
+        bar = bar.push(text("Signing in to Xtime…").size(13).style(style::muted));
+    } else if !app.signed_in(Site::Xtime) {
+        bar = bar.push(
+            row![
+                pill("Xtime: not signed in", [0xb4, 0x23, 0x18]),
+                button(text("Sign in").size(13).font(style::BOLD))
+                    .padding([3, 10])
+                    .style(button::primary)
+                    .on_press_maybe(app.signing_in.is_none().then_some(Message::SignIn(Site::Xtime))),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        );
+    } else if app.sample_data {
+        bar = bar.push(pill("Sample data: Xtime isn't connected yet", [0xd9, 0x77, 0x06]));
+    }
+
+    // the latest message ("Settings saved", a sign-in that failed…)
+    if let Some(n) = &app.notice {
+        bar = bar.push(
+            row![
+                text(n.as_str()).size(13),
+                button(text("×"))
+                    .padding([0, 6])
+                    .style(button::text)
+                    .on_press(Message::DismissNotice)
+            ]
+            .spacing(4)
+            .align_y(Alignment::Center),
+        );
+    }
+
+    bar = bar.push(horizontal_space()).push(
+        button(
+            text(if app.is_admin() && app.reports.new_count > 0 {
+                format!("Feedback  {}", app.reports.new_count)
+            } else {
+                "Feedback".to_string()
+            })
+            .size(13),
+        )
+        .padding([3, 10])
+        .style(style::ghost)
+        .on_press(Message::OpenFeedback),
+    );
+
+    container(bar.padding([0, 12]))
+        .height(36)
+        .width(Length::Fill)
+        .align_y(Alignment::Center)
+        .style(style::panel)
+        .into()
+}
+
+/// A thin upright line between parts of the bar
+fn divider<'a>() -> Element<'a, Message> {
+    container(text(""))
+        .width(1)
+        .height(18)
+        .style(|theme: &iced::Theme| container::Style {
+            background: Some(style::colors(theme).line.into()),
+            ..Default::default()
+        })
+        .into()
+}

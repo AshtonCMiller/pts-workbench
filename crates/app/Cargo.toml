@@ -1,0 +1,30 @@
+[package]
+name = "pts-workbench"
+description = "Workbench: Uniting Technician Workflows."
+version.workspace = true # fetch version number from workspace cargo.toml
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+default-run = "pts-workbench-app"
+
+# the app (started by the launcher, crates/launcher; standalone during development.
+[[bin]]
+name = "pts-workbench-app"
+path = "src/main.rs"
+
+# command line to try the Xtime crate against the real site (src/bin/pts-try.rs)
+[[bin]]
+name = "pts-try"
+path = "src/bin/pts-try.rs"
+
+[dependencies]
+workbench-net.workspace = true
+xtime.workspace = true
+ford.workspace = true
+launcher.workspace = true
+feedback.workspace = true
+keyring.workspace = true
+iced.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
