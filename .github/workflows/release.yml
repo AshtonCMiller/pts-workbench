@@ -31,6 +31,11 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
     steps:
+      # Windows Defender scans every file the compiler writes: off for this throwaway build machine, builds go much quicker
+      - name: Speed up the build machine
+        shell: pwsh
+        run: Set-MpPreference -DisableRealtimeMonitoring $true
+
       - uses: actions/checkout@v4
 
       - name: Work out the version
@@ -66,14 +71,6 @@ jobs:
           echo "number=$NUMBER" >> "$GITHUB_OUTPUT"
           echo "numeric=$BASE" >> "$GITHUB_OUTPUT"
 
-      # Only for this build (not committed): the version every crate (and so the launcher and the app) is built with
-      - name: Set the version v${{ steps.version.outputs.number }}
-        if: steps.version.outputs.exists == 'false'
-        shell: bash
-        run: |
-          sed -i '/^\[workspace.package\]/,/^\[/ s/^version *= *"[^"]*"/version = "${{ steps.version.outputs.number }}"/' Cargo.toml
-          grep -A3 '^\[workspace.package\]' Cargo.toml
-
       - name: Set up Rust
         if: steps.version.outputs.exists == 'false'
         shell: bash
@@ -82,21 +79,26 @@ jobs:
           rustup default stable
           rustc --version
 
-      # Compiled crates (and PDFium's download, beside the app) kept between builds: much quicker
+      # Compiled crates kept between builds (only rebuilding what changed): named from Cargo.toml / Cargo.lock as
+      # committed, before the version is set below, so the next build finds this one exactly (and doesn't save it again)
       - uses: Swatinem/rust-cache@v2
         if: steps.version.outputs.exists == 'false'
+        with:
+          shared-key: release
+          cache-on-failure: true
+
+      # Only for this build (not committed): the version every crate (and so the launcher and the app) is built with
+      - name: Set the version v${{ steps.version.outputs.number }}
+        if: steps.version.outputs.exists == 'false'
+        shell: bash
+        run: |
+          sed -i '/^\[workspace.package\]/,/^\[/ s/^version *= *"[^"]*"/version = "${{ steps.version.outputs.number }}"/' Cargo.toml
+          grep -A3 '^\[workspace.package\]' Cargo.toml
 
       - name: Build
         if: steps.version.outputs.exists == 'false'
         shell: bash
         run: cargo build --workspace --release
-
-      # A failing test is reported, but doesn't hold the build back
-      - name: Test
-        if: steps.version.outputs.exists == 'false'
-        continue-on-error: true
-        shell: bash
-        run: cargo test --workspace --release
 
       - name: Gather the program files
         if: steps.version.outputs.exists == 'false'
@@ -118,6 +120,14 @@ jobs:
             cp "target/release/$f" dist/app/
           done
           ls -la dist/app
+
+      # The installer maker, kept between builds (installing it takes a while)
+      - name: Reuse the installer maker
+        if: steps.version.outputs.exists == 'false'
+        uses: actions/cache@v4
+        with:
+          path: C:\Program Files (x86)\NSIS
+          key: nsis-${{ runner.os }}-1
 
       - name: Make the installer
         if: steps.version.outputs.exists == 'false'
@@ -203,3 +213,28 @@ jobs:
           if gh release view "v${{ steps.version.outputs.number }}" --json isDraft -q .isDraft 2>/dev/null | grep -q true; then
             gh release delete "v${{ steps.version.outputs.number }}" --yes
           fi
+
+  # The tests, beside the release (they don't hold it back): a failure shows as a red ✗ on the push in GitHub
+  test:
+    runs-on: windows-latest
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: Speed up the build machine
+        shell: pwsh
+        run: Set-MpPreference -DisableRealtimeMonitoring $true
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test
+          cache-on-failure: true
+      - name: Set up Rust
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: Test
+        shell: bash
+        env:
+          PTS_NO_PDFIUM: '1' # (tests don't need the PDF engine)
+        run: cargo test --workspace
