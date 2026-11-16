@@ -1,6 +1,6 @@
 [package]
 name = "workbench-sync"
-descriptionm = "Sync between local computer & Cloud servers. Everything encrypted."
+description = "Sync between local computer & Cloud servers. Everything encrypted."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

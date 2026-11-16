@@ -67,7 +67,7 @@ function showWindow() {
     .bar{height:4px;background:#e3ecf8;border-radius:2px;margin-top:14px;overflow:hidden}
     .bar i{display:block;height:100%;width:30%;background:#1a5fb4;border-radius:2px;animation:m 1.2s ease-in-out infinite}
     @keyframes m{0%{transform:translateX(-100%)}100%{transform:translateX(340%)}}</style>
-    <h1>Moving to the new PTS Workbench</h1><div id="t">Downloading it…</div><div class="bar"><i></i></div>`;
+    <h1>Moving to the new PTS Workbench</h1><div id="t">Downloading…</div><div class="bar"><i></i></div>`;
   win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
   win.once('ready-to-show', () => win && win.show());
 }
@@ -124,13 +124,13 @@ if (!app.requestSingleInstanceLock()) {
     log('moving to the new app');
     try {
       const file = await download();
-      say('Installing it…');
+      say('Installing…');
       await install(file);
       try { fs.rmSync(file, { force: true }); } catch { /* temp */ }
       if (!fs.existsSync(LAUNCHER)) throw new Error('the installer finished, but the new app isn\'t there');
       const pins = movePins();
       log(`moved: installed in ${INSTALL_DIR}${pins ? `, ${pins} taskbar pin(s) moved` : ''}`);
-      say('Done: starting it…');
+      say('Done: starting…');
       // (the installer starts the new app itself)
       setTimeout(() => app.quit(), 1500);
     } catch (e) {
