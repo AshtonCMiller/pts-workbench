@@ -102,6 +102,16 @@ jobs:
         if: steps.version.outputs.exists == 'false'
         shell: bash
         run: |
+          # PDFium is put beside the app by crates/app/build.rs; if that didn't happen, it's fetched here
+          if [ ! -f target/release/pdfium.dll ]; then
+            echo "::warning::pdfium.dll wasn't put beside the app by the build; downloading it"
+            for try in 1 2 3; do
+              curl -fsSL -o pdfium.tgz https://github.com/bblanchon/pdfium-binaries/releases/latest/download/pdfium-win-x64.tgz && break
+              sleep 15
+            done
+            mkdir -p pdfium && tar -xzf pdfium.tgz -C pdfium
+            cp pdfium/bin/pdfium.dll target/release/
+          fi
           mkdir -p dist/app
           for f in pts-workbench.exe pts-workbench-app.exe pts-signin.exe pdfium.dll; do
             if [ ! -f "target/release/$f" ]; then echo "::error::target/release/$f wasn't built"; exit 1; fi

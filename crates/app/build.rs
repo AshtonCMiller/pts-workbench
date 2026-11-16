@@ -41,6 +41,8 @@ fn main() {
         return;
     };
     let dest = dir.join(name);
+    // (gone from beside the app, say after a cache brought back only the compiled crates: fetched again)
+    println!("cargo:rerun-if-changed={}", dest.display());
     if dest.exists() {
         return; // there already (kept between builds)
     }
