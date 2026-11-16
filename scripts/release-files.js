@@ -42,7 +42,9 @@ const files = PROGRAM.map((n) => {
 const setupFile = path.join(dist, SETUP);
 if (!fs.existsSync(setupFile)) { console.error(`Missing ${setupFile}`); process.exit(1); }
 const setup = info(setupFile, SETUP);
-fs.writeFileSync(path.join(dist, 'workbench.json'), JSON.stringify({ version: VERSION, launcher: level, files, setup }, null, 2));
+// (with its "What's new", shown while it waits for a restart)
+const notes = fs.readFileSync(path.join(root, 'crates', 'app', 'whats-new.md'), 'utf8');
+fs.writeFileSync(path.join(dist, 'workbench.json'), JSON.stringify({ version: VERSION, launcher: level, files, setup, notes }, null, 2));
 
 // ---------- the move, as the Electron app's "app files" ----------
 // .asar is Electron's archive: an 8-byte size, a JSON index of the files (with their offsets), then the files

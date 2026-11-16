@@ -14,6 +14,7 @@
 //! signing in to PTS, the bottom bar's notice) goes back to it as [`Out`]s.
 
 pub mod article;
+pub mod diagnostics;
 pub mod doc_tab;
 pub mod document;
 pub mod manual;
@@ -22,6 +23,7 @@ pub mod pdf;
 pub mod pinpoint;
 pub mod tsb;
 
+pub use diagnostics::{DiagMsg, DiagView};
 pub use doc_tab::{DocMsg as DocTabMsg, DocTab};
 pub use manual::{ManualMsg, ManualView};
 pub use oasis::{OasisMsg, OasisView};
@@ -53,6 +55,15 @@ pub enum Out {
     /// PTS needs to have shown this vehicle (VIN) once: open it in PTS, unseen (the tab hears back with
     /// [`crate::oasis::OasisMsg::SetUp`])
     SetUpPts(String),
+    /// Open a Workshop Manual procedure (a pinpoint test's link: at the test) in the Workshop Manual tab
+    OpenProcedure { link: ford::doc::ProcLink, title: String },
+    /// Open a bulletin (`kind`: "TSB", "GSB", "SSM") in the TSBs tab
+    OpenBulletin {
+        kind: String,
+        id: String,
+        title: String,
+        url: String,
+    },
 }
 
 /// Why asking Ford didn't work (kept short)

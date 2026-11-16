@@ -291,6 +291,27 @@ impl ManualView {
         Task::batch([load, iced::widget::scrollable::snap_to(scroll_id(), RelativeOffset::START)])
     }
 
+    /// Opens a procedure from elsewhere (the Diagnostics tab) in a tab of its own: a pinpoint test's link opens at the
+    /// test
+    pub fn open_procedure(&mut self, env: &Env, link: ProcLink, title: String) -> Task<ManualMsg> {
+        let key = link.key();
+        let ppt = link.ppt.clone();
+        let Some(d) = self.docs.iter_mut().find(|d| d.key == key) else {
+            return self.open_doc(env, link, title, String::new(), true);
+        };
+        // already open: a test asked for opens over it (once it's read, if it's still being read)
+        let loaded = d.page.is_some();
+        if !ppt.is_empty() && !loaded {
+            d.link.ppt = ppt.clone();
+        }
+        let shown = self.open_doc(env, link, title, String::new(), true);
+        if ppt.is_empty() || !loaded {
+            return shown;
+        }
+        let test = self.procedure_link(env, &key, &format!("ppt:{ppt}"));
+        Task::batch([shown, test])
+    }
+
     pub fn update(&mut self, msg: ManualMsg, env: &Env) -> (Task<ManualMsg>, Vec<Out>) {
         let mut outs = Vec::new();
         let task = match msg {

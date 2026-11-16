@@ -21,11 +21,14 @@ path = "src/bin/pts-try.rs"
 workbench-net.workspace = true
 # updates: each downloaded file checked agsint its release's checksum
 sha2.workspace = true
+# "What's new": which items were shown, named as the Electron app names them.
+sha1.workspace = true
 xtime.workspace = true
 ford.workspace = true
 launcher.workspace = true
 feedback.workspace = true
 hours.workspace = true
+workbench-sync = { path = "../sync" }
 ui-kit.workspace = true
 xtime-ui.workspace = true
 hours-ui.workspace = true

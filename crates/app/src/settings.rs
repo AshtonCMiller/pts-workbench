@@ -20,6 +20,8 @@ pub struct Settings {
     /// Your name, sent with feedback (later also from Xtime)
     pub name: String,
     pub theme: ThemeChoice,
+    /// Sync between your computers turned off (it's on unless you turn it off)
+    pub sync_off: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

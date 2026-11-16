@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use ford::fsa::FsaPage;
 use iced::widget::image::Handle;
-use iced::widget::{Column, Space, button, column, container, horizontal_space, image, row, text};
+use iced::widget::{Column, Space, button, column, container, image, row, text};
 use iced::{Alignment, Element, Length, Task};
 use ui_kit::scroll::scrollable;
 use ui_kit::{anim, pill, style};

@@ -17,6 +17,8 @@ pub struct Workspace {
     pub tsb: ford_ui::TsbView,
     /// The Workshop Manual tab
     pub wsm: ford_ui::ManualView,
+    /// The Diagnostics tab (Ford's search for DTCs and symptoms)
+    pub diag: ford_ui::DiagView,
     /// Tabs of their own for Ford's documents (an FSA opened from OASIS…), and the next one's number
     pub docs: Vec<ford_ui::DocTab>,
     pub next_doc: u32,
@@ -28,6 +30,7 @@ impl Workspace {
         let oasis = ford_ui::OasisView::new(ro.vin.clone());
         let tsb = ford_ui::TsbView::new(ro.vin.clone());
         let wsm = ford_ui::ManualView::new(ro.vin.clone());
+        let diag = ford_ui::DiagView::new(ro.vin.clone());
         Self {
             ro,
             tab: Tab::XtimeView, // a vehicle opens on its RO
@@ -36,6 +39,7 @@ impl Workspace {
             oasis,
             tsb,
             wsm,
+            diag,
             docs: Vec::new(),
             next_doc: 1,
         }
@@ -44,6 +48,11 @@ impl Workspace {
     /// "2026 Ford Bronco"
     pub fn vehicle(&self) -> String {
         vehicle_name(&self.ro)
+    }
+
+    /// One of the sample ROs shown before Xtime is connected (its VIN isn't real: nothing is asked about it)
+    pub fn is_sample(&self) -> bool {
+        self.ro.vin.starts_with("SAMPLE")
     }
 }
 

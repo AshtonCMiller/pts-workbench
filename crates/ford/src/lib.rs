@@ -16,6 +16,7 @@
 //! The dealer code comes from the app's settings (set on first setup), never from the code. Nothing about the
 //! vehicle's owner is kept.
 
+pub mod diagnostics;
 pub mod doc;
 pub mod fsa;
 pub mod html;
@@ -202,6 +203,8 @@ pub struct Ford {
     log: Log,
     /// Where the manual's contents are kept (see [`Ford::with_cache`])
     cache: Option<std::path::PathBuf>,
+    /// Each VIN's side of the diagnostics search, and when it was read (see diagnostics.rs)
+    diag: Arc<Mutex<HashMap<String, (Instant, diagnostics::DiagContext)>>>,
 }
 
 impl Ford {
@@ -216,6 +219,7 @@ impl Ford {
             trimmed_at: Arc::default(),
             log: Log::default(),
             cache: None,
+            diag: Arc::default(),
         })
     }
 
@@ -248,6 +252,7 @@ impl Ford {
     /// Forget what's remembered (signed in as someone else)
     pub fn reset(&self) {
         self.books.lock().expect("books lock").clear();
+        self.diag.lock().expect("diag lock").clear();
     }
 
     pub(crate) fn url(&self, path: &str) -> Result<Url> {

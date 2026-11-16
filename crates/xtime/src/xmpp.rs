@@ -16,7 +16,7 @@ use workbench_net::{Url, WebSocket};
 
 use crate::chat::{b64_decode, escape_node};
 use crate::xml::{self, escape};
-use crate::{Error, Result};
+use crate::{Error};
 
 /// Xtime's chat domain (every chat address ends in it)
 pub const DOMAIN: &str = "chat.xtime.com";

@@ -36,7 +36,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
 
 fn open_item<'a>(app: &'a App, ws: &'a Workspace) -> Element<'a, Message> {
     let selected = app.selected.as_deref() == Some(ws.ro.ro.as_str());
-    row![
+    let item = row![
         button(column![text(format!("RO {}", ws.ro.ro)).font(style::BOLD), text(ws.vehicle()).size(13)].spacing(2))
             .width(Length::Fill)
             .padding(8)
@@ -47,6 +47,12 @@ fn open_item<'a>(app: &'a App, ws: &'a Workspace) -> Element<'a, Message> {
             .style(button::text)
             .on_press(Message::CloseRo(ws.ro.ro.clone())),
     ]
-    .align_y(Alignment::Center)
-    .into()
+    .align_y(Alignment::Center);
+    if !selected {
+        return item.into();
+    }
+    // the vehicle you're on: its lines under it (to flag, change their hours…)
+    column![item, super::lines::panel(app, &ws.ro.ro, app.hours.ro_summary(&ws.ro.ro))]
+        .spacing(4)
+        .into()
 }

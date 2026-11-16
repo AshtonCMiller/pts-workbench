@@ -18,10 +18,12 @@ pub use ui_kit::{anim, pill, style};
 
 mod bottombar;
 mod feedback;
+pub mod lines;
 mod print_window;
 mod settings;
 mod sidebar;
 mod topbar;
+mod whats_new;
 mod workbench;
 
 pub use settings::focus_first_field;
@@ -64,6 +66,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 Overlay::Settings => (settings::card(app), Message::CloseSettings),
                 Overlay::Feedback => (feedback::card(app), Message::CloseFeedback),
                 Overlay::Print => (print_window::card(app), Message::ClosePrint),
+                Overlay::WhatsNew => (whats_new::card(app), Message::CloseWhatsNew),
                 Overlay::Hours => (
                     hours_ui::card(
                         &app.hours_view,

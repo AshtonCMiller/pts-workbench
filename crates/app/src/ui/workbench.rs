@@ -177,16 +177,17 @@ fn manual<'a>(app: &'a App, ws: &'a Workspace, tab: ManualTab) -> Element<'a, Me
         // crates/ford-ui: its own messages, for this RO
         ManualTab::Oasis => {
             let today = chrono::Local::now().date_naive();
-            ford_ui::oasis::view(&ws.oasis, app.sample_data, today).map(move |m| Message::Oasis(ro.clone(), m))
+            ford_ui::oasis::view(&ws.oasis, ws.is_sample(), today).map(move |m| Message::Oasis(ro.clone(), m))
         }
-        ManualTab::Tsbs => ford_ui::tsb::view(&ws.tsb, app.sample_data).map(move |m| Message::Tsb(ro.clone(), m)),
-        ManualTab::Workshop => ford_ui::manual::view(&ws.wsm, app.sample_data).map(move |m| Message::Wsm(ro.clone(), m)),
+        ManualTab::Tsbs => ford_ui::tsb::view(&ws.tsb, ws.is_sample()).map(move |m| Message::Tsb(ro.clone(), m)),
+        ManualTab::Workshop => ford_ui::manual::view(&ws.wsm, ws.is_sample()).map(move |m| Message::Wsm(ro.clone(), m)),
+        ManualTab::Diagnostics => ford_ui::diagnostics::view(&ws.diag, ws.is_sample()).map(move |m| Message::Diag(ro.clone(), m)),
         ManualTab::Doc(key) => match ws.docs.iter().find(|d| d.key == key) {
             Some(d) => ford_ui::doc_tab::view(d).map(move |m| Message::Doc(ro.clone(), key, m)),
             None => text("This tab was closed.").into(),
         },
         _ => scrollable(
-            container(column![vehicle_card(ws), coming(tab.label(), tab.about(), "Coming soon.")].spacing(12))
+            container(column![vehicle_card(ws), coming(tab.label(), tab.about(), "Comes in a later stage.")].spacing(12))
                 .padding(16)
                 .width(Length::Fill),
         )

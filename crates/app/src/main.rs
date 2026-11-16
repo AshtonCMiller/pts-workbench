@@ -3,12 +3,15 @@
 //!
 //!   app.rs        state, messages, what each message changes
 //!   clock.rs      the time, for what the app shows
+//!   syncing.rs    sync between your computers (crates/sync): when, what came in, ROs opened / closed elsewhere
 //!   updates.rs    the app updating itself from GitHub releases (Beta updates too), for the launcher to start
 //!   timecard.rs   your hours (crates/hours) in the app: the file, bringing over the old app's, an RO's lines
 //!   settings.rs   saved settings (first setup asks for the store ID and dealer code)
 //!   signin.rs     signing in to Xtime and Ford PTS (the sign-in window, crates/signin)
 //!   system_theme.rs  whether Windows is set to dark (the Auto appearance)
 //!   workspace.rs  open vehicles and their tabs
+//!   whats_new.rs  "What's new" (whats-new.md): after an update, when one's waiting, from Settings
+//!   vehicles.rs   the vehicles open, kept between starts (the Electron app's workspaces.json) and for sync
 //!   print/        printing inside the app (the spiff sheet): Windows' Print window, then drawn on the printer
 //!   ros.rs        your ROs from Xtime (loaded every minute while signed in)
 //!   reports.rs    the Feedback screen: sending bug reports and ideas, their replies (the feedback crate asks)
@@ -24,10 +27,13 @@ mod ros;
 mod sample;
 mod settings;
 mod signin;
+mod syncing;
 mod system_theme;
 mod timecard;
 mod ui;
 mod updates;
+mod vehicles;
+mod whats_new;
 mod workspace;
 
 fn main() -> iced::Result {

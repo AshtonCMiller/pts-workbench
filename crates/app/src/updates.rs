@@ -40,6 +40,8 @@ pub struct Manifest {
     pub files: Vec<FileInfo>,
     /// The installer (for a new launcher)
     pub setup: Option<FileInfo>,
+    /// Its "What's new" (the app's whats-new.md)
+    pub notes: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -75,6 +77,8 @@ pub struct Found {
 pub struct Ready {
     pub version: String,
     pub installer: Option<PathBuf>,
+    /// Its "What's new"
+    pub notes: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -341,6 +345,7 @@ pub async fn download(http: Http, found: Found) -> Result<Ready, String> {
         return Ok(Ready {
             version,
             installer: Some(dest),
+            notes: m.notes.clone(),
         });
     }
 
@@ -402,7 +407,11 @@ pub async fn download(http: Http, found: Found) -> Result<Ready, String> {
             }
         }
     }
-    Ok(Ready { version, installer: None })
+    Ok(Ready {
+        version,
+        installer: None,
+        notes: m.notes.clone(),
+    })
 }
 
 /// The code the app exits with once its window is closed: set for "Restart to update"

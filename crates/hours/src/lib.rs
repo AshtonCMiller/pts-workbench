@@ -31,14 +31,30 @@ pub struct Hours {
     /// Last time the app was seen running, and closed (for "forgot to clock out")
     pub last_seen: Option<i64>,
     pub last_closed: Option<i64>,
+    /// The latest any of your computers closed the app (from sync)
+    pub last_closed_all: Option<i64>,
     pub next_flag_id: u64,
     /// Spiffs turned in, by RO number (the Rust app's; the Electron app keeps this field as it is)
     pub spiffs: BTreeMap<String, Spiff>,
+    /// The ROs open in the Workbench, by RO number (no VIN): what the Electron app's sync carries between your
+    /// computers (`w/RO` records), as it names it
+    #[serde(rename = "openROs")]
+    pub open_ros: BTreeMap<String, OpenRo>,
+    /// Who closed an RO that was open (from sync: "app", or "old" for an app that didn't know about open ROs)
+    pub open_closed_by: BTreeMap<String, String>,
     /// The Electron app's hours have been brought over (once)
     pub imported_from_electron: bool,
     /// Anything else the file has (kept as it is)
     #[serde(flatten)]
     pub other: Map<String, Value>,
+}
+
+/// An RO open in the Workbench, as sync carries it
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OpenRo {
+    /// "2023 Ford Bronco Sport"
+    pub ymm: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -106,6 +122,52 @@ impl TLine {
     pub fn flag_label(&self) -> String {
         format!("{}{}", if self.diag { "Diag: " } else { "" }, self.text())
     }
+}
+
+/// Where a line is: still to do, done in Xtime, or flagged by you
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineStatus {
+    Todo,
+    Done,
+    Flagged,
+}
+
+/// A line's flag, as a line shows it
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FlagInfo {
+    pub id: u64,
+    pub flagged_at: i64,
+    pub confirmed: bool,
+}
+
+/// One of an RO's lines, as the sidebar shows it ([`Hours::ro_summary`])
+#[derive(Debug, Clone, PartialEq)]
+pub struct LineRow {
+    pub key: String,
+    pub dms: String,
+    /// What it's called (your name for it, or Xtime's)
+    pub text: String,
+    pub service: String,
+    /// Xtime's own wording, when you've renamed it
+    pub original: String,
+    /// Xtime's hours, and yours when they differ
+    pub hours: f64,
+    pub override_hours: Option<f64>,
+    /// What it pays (a flag's hours, once flagged)
+    pub paid: f64,
+    pub primary: bool,
+    pub diag: bool,
+    pub status: LineStatus,
+    pub flag: Option<FlagInfo>,
+}
+
+/// An RO's lines and what they come to
+#[derive(Debug, Clone, PartialEq)]
+pub struct RoSummary {
+    pub lines: Vec<LineRow>,
+    pub total: f64,
+    pub flagged: f64,
+    pub flagged_count: usize,
 }
 
 /// A flagged line: its paid hours, and when you flagged it (which pay period it's in)
@@ -369,6 +431,9 @@ impl Hours {
         self.shifts = shifts;
         self.last_seen = self.last_seen.max(old.last_seen);
         self.last_closed = self.last_closed.max(old.last_closed);
+        for (ro, o) in old.open_ros {
+            self.open_ros.entry(ro).or_insert(o);
+        }
         Some(count)
     }
 
@@ -402,7 +467,11 @@ impl Hours {
     /// On start: a shift still open from an earlier day means you forgot to clock out, so it ends when the app was
     /// last seen running. Returns when it was ended.
     pub fn startup_check<Tz: TimeZone>(&mut self, tz: &Tz, now: i64) -> Option<i64> {
-        let last = self.last_closed.unwrap_or(0).max(self.last_seen.unwrap_or(0));
+        let last = self
+            .last_closed
+            .unwrap_or(0)
+            .max(self.last_seen.unwrap_or(0))
+            .max(self.last_closed_all.unwrap_or(0));
         let s = self.shifts.last_mut().filter(|s| s.end.is_none())?;
         if last == 0 || start_of_day(tz, last) >= start_of_day(tz, now) {
             return None; // the same day: keep going
@@ -501,6 +570,78 @@ impl Hours {
         }
     }
 
+    /// Your hours for a line (`None`: back to Xtime's). An unconfirmed flag keeps in step with them.
+    pub fn set_override(&mut self, ro: &str, key: &str, hours: Option<f64>) {
+        let Some(line) = self.ros.get_mut(ro).and_then(|r| r.lines.get_mut(key)) else {
+            return;
+        };
+        line.override_hours = hours.filter(|h| h.is_finite() && *h >= 0.0).map(round2);
+        let paid = line.paid();
+        if let Some(f) = self.flags.iter_mut().find(|f| f.ro == ro && f.key == key && !f.confirmed) {
+            f.hours = paid;
+        }
+    }
+
+    /// When a flag counts as flagged (it decides the pay period it's in)
+    pub fn set_flagged_at(&mut self, id: u64, at: i64) {
+        if let Some(f) = self.flags.iter_mut().find(|f| f.id == id) {
+            f.flagged_at = at;
+        }
+    }
+
+    /// An RO's lines that count, each with what it pays and whether it's flagged (the Electron app's `roSummary`)
+    pub fn ro_summary(&self, ro: &str) -> Option<RoSummary> {
+        let rec = self.ros.get(ro)?;
+        let lines: Vec<LineRow> = rec
+            .order
+            .iter()
+            .filter_map(|k| rec.lines.get(k))
+            .filter(|l| l.counts())
+            .map(|l| {
+                let flag = self.flag_for(ro, &l.key);
+                LineRow {
+                    key: l.key.clone(),
+                    dms: l.dms.clone(),
+                    text: l.text().to_string(),
+                    service: l.service.clone(),
+                    original: if l.name.is_some() {
+                        [&l.complaint, &l.service]
+                            .into_iter()
+                            .find(|s| !s.is_empty())
+                            .cloned()
+                            .unwrap_or_default()
+                    } else {
+                        String::new()
+                    },
+                    hours: l.hours,
+                    override_hours: l.override_hours,
+                    paid: flag.map_or(l.paid(), |f| f.hours),
+                    primary: l.primary,
+                    diag: l.diag,
+                    status: if flag.is_some() {
+                        LineStatus::Flagged
+                    } else if l.completed {
+                        LineStatus::Done
+                    } else {
+                        LineStatus::Todo
+                    },
+                    flag: flag.map(|f| FlagInfo {
+                        id: f.id,
+                        flagged_at: f.flagged_at,
+                        confirmed: f.confirmed,
+                    }),
+                }
+            })
+            .collect();
+        let sum = |pick: &dyn Fn(&LineRow) -> bool| round2(lines.iter().filter(|l| pick(l)).map(|l| l.paid).sum());
+        Some(RoSummary {
+            total: sum(&|_| true),
+            flagged: sum(&|l| l.status == LineStatus::Flagged),
+            flagged_count: lines.iter().filter(|l| l.status == LineStatus::Flagged).count(),
+            lines,
+        })
+    }
+
     // ----- spiffs -----
 
     pub fn spiffed(&self, ro: &str) -> Option<&Spiff> {
@@ -571,6 +712,15 @@ impl Hours {
             spiffs,
             is_current: offset == 0,
         }
+    }
+
+    /// The ROs open now (for sync): whether that changed
+    pub fn set_open_ros(&mut self, open: BTreeMap<String, OpenRo>) -> bool {
+        if self.open_ros == open {
+            return false;
+        }
+        self.open_ros = open;
+        true
     }
 
     /// Keeps the file small: ROs with no flags, no spiff and no use for `keep_days` go; flags and shifts are kept
@@ -735,5 +885,64 @@ mod tests {
         h.save(&saved).unwrap();
         assert_eq!(Hours::load(&saved), h);
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn keeps_open_ros_as_the_electron_app_names_them() {
+        let h: Hours =
+            serde_json::from_str(r#"{"openROs":{"820367":{"ymm":"2023 Ford Bronco Sport"}},"openClosedBy":{"1":"app"}}"#).unwrap();
+        assert_eq!(h.open_ros["820367"].ymm, "2023 Ford Bronco Sport");
+        assert_eq!(h.open_closed_by["1"], "app");
+        assert!(h.other.is_empty());
+        let out = serde_json::to_value(&h).unwrap();
+        assert_eq!(out["openROs"]["820367"]["ymm"], "2023 Ford Bronco Sport");
+        let mut h = h;
+        assert!(!h.set_open_ros(h.open_ros.clone()));
+        assert!(h.set_open_ros(BTreeMap::new()));
+    }
+
+    #[test]
+    fn sums_up_an_ros_lines() {
+        let mut h = Hours::default();
+        let line = |key: &str, hours: f64, completed: bool| TLine {
+            key: key.into(),
+            dms: key.into(),
+            complaint: format!("Concern {key}"),
+            hours,
+            approved: true,
+            completed,
+            ..Default::default()
+        };
+        let declined = TLine {
+            declined: true,
+            ..line("C", 9.0, false)
+        };
+        h.update_lines(
+            "1",
+            vec![line("A", 1.5, false), line("B", 0.3, true), declined],
+            "2024 Ford F-150",
+            10,
+        );
+        h.flag_line("1", "A", 20);
+        let s = h.ro_summary("1").unwrap();
+        assert_eq!(s.lines.len(), 2); // the declined line doesn't count
+        assert_eq!((s.lines[0].status, s.lines[1].status), (LineStatus::Flagged, LineStatus::Done));
+        assert_eq!((s.total, s.flagged, s.flagged_count), (1.8, 1.5, 1));
+
+        // your hours: an unconfirmed flag follows them; back to Xtime's with none
+        h.set_override("1", "A", Some(2.0));
+        assert_eq!(h.ro_summary("1").unwrap().lines[0].paid, 2.0);
+        assert_eq!(h.ro_summary("1").unwrap().lines[0].override_hours, Some(2.0));
+        h.set_override("1", "A", None);
+        assert_eq!(h.ro_summary("1").unwrap().lines[0].paid, 1.5);
+        // a confirmed flag keeps its hours
+        let id = h.flag_for("1", "A").unwrap().id;
+        h.set_confirmed(id, true);
+        h.set_override("1", "A", Some(3.0));
+        assert_eq!(h.flag_for("1", "A").unwrap().hours, 1.5);
+        // when it was flagged
+        h.set_flagged_at(id, 5);
+        assert_eq!(h.ro_summary("1").unwrap().lines[0].flag.unwrap().flagged_at, 5);
+        assert!(h.ro_summary("2").is_none());
     }
 }

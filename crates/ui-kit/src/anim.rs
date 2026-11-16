@@ -1144,3 +1144,146 @@ mod tests {
         assert_eq!(SideState { open: false, start: None }.amount(), 0.0);
     }
 }
+
+// =====================================================================================================================
+// A status dot
+// =====================================================================================================================
+
+/// One pulse of a [`dot`] that's busy
+pub const PULSE: Duration = Duration::from_millis(1400);
+/// A [`dot`] changing color pops into it
+pub const POP: Duration = Duration::from_millis(420);
+
+/// A small round light (sync's state, in the bottom bar): `busy`, it sends out a soft ring now and then; changing
+/// color, it pops (shrinks a little and springs back, overshooting a touch)
+pub struct Dot {
+    color: Color,
+    busy: bool,
+}
+
+pub fn dot(color: Color, busy: bool) -> Dot {
+    Dot { color, busy }
+}
+
+#[derive(Default)]
+struct DotState {
+    color: Option<Color>,
+    /// When it last changed color
+    changed: Option<Instant>,
+    /// When the pulsing started
+    since: Option<Instant>,
+}
+
+const DOT_BOX: f32 = 16.0;
+const DOT_R: f32 = 4.0;
+
+impl<Message> Widget<Message, Theme, Renderer> for Dot {
+    fn size(&self) -> Size<Length> {
+        Size::new(Length::Fixed(DOT_BOX), Length::Fixed(DOT_BOX))
+    }
+
+    fn tag(&self) -> tree::Tag {
+        tree::Tag::of::<DotState>()
+    }
+
+    fn state(&self) -> tree::State {
+        tree::State::new(DotState::default())
+    }
+
+    fn layout(&self, _tree: &mut Tree, _renderer: &Renderer, _limits: &layout::Limits) -> layout::Node {
+        layout::Node::new(Size::new(DOT_BOX, DOT_BOX))
+    }
+
+    fn draw(
+        &self,
+        tree: &Tree,
+        renderer: &mut Renderer,
+        _theme: &Theme,
+        _style: &renderer::Style,
+        layout: Layout<'_>,
+        _cursor: mouse::Cursor,
+        _viewport: &Rectangle,
+    ) {
+        let st = tree.state.downcast_ref::<DotState>();
+        let c = layout.bounds().center();
+        let circle = |r: f32| Rectangle {
+            x: c.x - r,
+            y: c.y - r,
+            width: r * 2.0,
+            height: r * 2.0,
+        };
+        let round = |r: f32| Border {
+            radius: r.into(),
+            ..Border::default()
+        };
+        // busy: a ring spreading out and fading
+        if let (true, Some(since)) = (self.busy, st.since) {
+            let t = (since.elapsed().as_secs_f32() % PULSE.as_secs_f32()) / PULSE.as_secs_f32();
+            let r = DOT_R + 4.0 * ease_out(t);
+            renderer.fill_quad(
+                Quad {
+                    bounds: circle(r),
+                    border: round(r),
+                    ..Quad::default()
+                },
+                Background::Color(Color {
+                    a: 0.45 * (1.0 - t),
+                    ..self.color
+                }),
+            );
+        }
+        // a new color: a pop
+        let scale = match st.changed {
+            Some(at) if at.elapsed() < POP => 0.55 + 0.45 * ease_out_back(at.elapsed().as_secs_f32() / POP.as_secs_f32()),
+            _ => 1.0,
+        };
+        let r = DOT_R * scale;
+        renderer.fill_quad(
+            Quad {
+                bounds: circle(r),
+                border: round(r),
+                ..Quad::default()
+            },
+            Background::Color(self.color),
+        );
+    }
+
+    fn on_event(
+        &mut self,
+        tree: &mut Tree,
+        _event: Event,
+        _layout: Layout<'_>,
+        _cursor: mouse::Cursor,
+        _renderer: &Renderer,
+        _clipboard: &mut dyn Clipboard,
+        shell: &mut Shell<'_, Message>,
+        _viewport: &Rectangle,
+    ) -> event::Status {
+        let st = tree.state.downcast_mut::<DotState>();
+        match st.color {
+            // (shown the first time as it is: no pop)
+            None => st.color = Some(self.color),
+            Some(c) if c != self.color => {
+                st.color = Some(self.color);
+                st.changed = Some(Instant::now());
+            }
+            _ => {}
+        }
+        if self.busy {
+            st.since.get_or_insert_with(Instant::now);
+        } else {
+            st.since = None;
+        }
+        let popping = st.changed.is_some_and(|at| at.elapsed() < POP);
+        if self.busy || popping {
+            shell.request_redraw(window::RedrawRequest::NextFrame);
+        }
+        event::Status::Ignored
+    }
+}
+
+impl<'a, Message: 'a> From<Dot> for Element<'a, Message> {
+    fn from(d: Dot) -> Self {
+        Element::new(d)
+    }
+}

@@ -11,10 +11,12 @@ use std::sync::Arc;
 
 use iced::keyboard::{Key, key::Named};
 use iced::widget::text_editor::{Action, Binding, Content, Edit, KeyPress};
-use iced::widget::{Column, Space, button, column, container, horizontal_space, row, scrollable::RelativeOffset, text, text_editor};
+use iced::widget::{
+    Column, Space, button, column, container, horizontal_space, rich_text, row, scrollable::RelativeOffset, span, text, text_editor,
+};
 use iced::{Alignment, Border, Color, Element, Length, Task, Theme};
 use ui_kit::scroll::scrollable;
-use ui_kit::{pill, style};
+use ui_kit::{anim, pill, style};
 use xtime::chat::{ChatConfig, ChatMessage, ChatPerson, conversations, to_markup};
 
 use crate::{Env, LoadError};
@@ -49,6 +51,8 @@ pub struct ChatPanel {
     pub history_loading: Option<String>,
     pub history_error: Option<LoadError>,
     pub filter: Filter,
+    /// The RO whose conversation the RO tab shows (the vehicle showing when it was picked)
+    pub this_ro: Option<String>,
     /// Conversations opened here: when (milliseconds), so only messages after it count as new
     pub seen: HashMap<String, i64>,
     /// What's typed in each conversation's message box (kept until it's sent)
@@ -114,6 +118,8 @@ pub enum ChatMsg {
     Back,
     History(String, Result<Vec<ChatMessage>, LoadError>),
     Filter(Filter),
+    /// The RO tab: that RO's conversation, straight away
+    ThisRo(String),
     /// Open the conversation's RO in the Workbench
     OpenRo(String),
     /// Typing (and moving about) in the open conversation's message box
@@ -157,6 +163,11 @@ impl ChatPanel {
     }
 
     /// Conversations with something new (for the Chat button)
+    /// An RO's conversation (the newest, when there's more than one)
+    pub fn channel_for_ro(&self, ro: &str) -> Option<String> {
+        self.conversations().into_iter().find(|c| c.ro == ro).map(|c| c.channel_id)
+    }
+
     pub fn unread(&self) -> usize {
         self.conversations().iter().filter(|c| c.unread).count()
     }
@@ -336,7 +347,19 @@ impl ChatPanel {
                         self.error = Some(e);
                     }
                 }
-                Task::none()
+                // the RO tab waiting for its RO's conversation: there now
+                let waiting = self
+                    .this_ro
+                    .clone()
+                    .filter(|_| self.filter == Filter::ThisRo && self.open.is_none());
+                match waiting.and_then(|ro| self.channel_for_ro(&ro)) {
+                    Some(ch) => {
+                        let (task, mut more) = self.update(ChatMsg::Open(ch), env, ros);
+                        outs.append(&mut more);
+                        task
+                    }
+                    None => Task::none(),
+                }
             }
             ChatMsg::Open(ch) => {
                 self.open = Some(ch.clone());
@@ -394,7 +417,21 @@ impl ChatPanel {
             }
             ChatMsg::Filter(f) => {
                 self.filter = f;
+                if f == Filter::All {
+                    self.open = None; // (the RO's conversation slides away: the list)
+                }
                 Task::none()
+            }
+            ChatMsg::ThisRo(ro) => {
+                self.filter = Filter::ThisRo;
+                self.this_ro = Some(ro.clone());
+                match self.channel_for_ro(&ro) {
+                    Some(ch) => return self.update(ChatMsg::Open(ch), env, ros),
+                    None => {
+                        self.open = None; // none yet: the tab says so
+                        Task::none()
+                    }
+                }
             }
             ChatMsg::OpenRo(ro) => {
                 outs.push(ChatOut::OpenRo(ro));
@@ -596,18 +633,37 @@ fn short(s: &str, n: usize) -> String {
     }
 }
 
-/// A small round dot (unread)
-fn dot<'a>() -> Element<'a, ChatMsg> {
-    container(Space::new(8, 8))
-        .style(|theme: &Theme| container::Style {
-            background: Some(theme.palette().primary.into()),
-            border: Border {
-                radius: 999.0.into(),
-                ..Default::default()
-            },
-            ..Default::default()
-        })
-        .into()
+/// A conversation with something new in it
+const UNREAD: Color = Color::from_rgb(0.23, 0.51, 0.96);
+/// A mention in a message
+const MENTION: Color = Color::from_rgb(0.48, 0.35, 0.96);
+
+/// A message's words with its @mentions picked out: (words, a mention). Each mention found is in `found`.
+fn mention_spans(text: &str, names: &[String], found: &mut Vec<String>) -> Vec<(String, bool)> {
+    let mut out: Vec<(String, bool)> = Vec::new();
+    let mut rest = text;
+    loop {
+        // the next mention: the earliest "@Name" (the longest name, when two start in the same place)
+        let next = names
+            .iter()
+            .filter(|n| !n.is_empty())
+            .filter_map(|n| rest.find(&format!("@{n}")).map(|i| (i, n)))
+            .min_by_key(|(i, n)| (*i, std::cmp::Reverse(n.len())));
+        let Some((i, name)) = next else { break };
+        if i > 0 {
+            out.push((rest[..i].to_string(), false));
+        }
+        let len = name.len() + 1;
+        out.push((rest[i..i + len].to_string(), true));
+        if !found.contains(name) {
+            found.push(name.clone());
+        }
+        rest = &rest[i + len..];
+    }
+    if !rest.is_empty() {
+        out.push((rest.to_string(), false));
+    }
+    out
 }
 
 fn note<'a>(s: impl text::IntoFragment<'a>) -> Element<'a, ChatMsg> {
@@ -618,13 +674,49 @@ fn note<'a>(s: impl text::IntoFragment<'a>) -> Element<'a, ChatMsg> {
         .into()
 }
 
-/// The list, with a conversation sliding in over it from the right when one's opened (and back out with Back). The
-/// list stays underneath the whole time, so it's still where you left it.
+/// The chat: its name and Refresh, All / this RO when a vehicle's showing, then the list, with a conversation sliding
+/// in over it from the right when one's opened (and back out with Back). The list stays underneath the whole time,
+/// so it's still where you left it. The RO tab is that RO's conversation itself (sliding in the same way).
 pub fn panel<'a>(chat: &'a ChatPanel, shown: ChatShown<'a>) -> Element<'a, ChatMsg> {
-    let base = container(list(chat, &shown)).padding(12).width(Length::Fill).height(Length::Fill);
-    let top: Element<'a, ChatMsg> = match &chat.showing {
-        Some(ch) => container(conversation(chat, ch, &shown))
-            .padding(12)
+    // the RO tab: for the vehicle showing (another vehicle since: the list, until its tab's picked)
+    let ro_view = chat.filter == Filter::ThisRo && shown.ro.is_some() && chat.this_ro.as_deref() == shown.ro;
+    let mut head = row![text("Dealership chat").size(16).font(style::BOLD), horizontal_space()].align_y(Alignment::Center);
+    if !shown.sample {
+        head = head.push(
+            button(text(if chat.loading { "Checking…" } else { "Refresh" }).size(12))
+                .padding([3, 8])
+                .style(style::ghost)
+                .on_press_maybe((!chat.loading).then_some(ChatMsg::Refresh)),
+        );
+    }
+    let mut top_bar = column![head].spacing(10);
+    if let Some(ro) = shown.ro {
+        let tab = |label: String, on: bool, msg: ChatMsg| {
+            button(text(label).size(13).font(style::BOLD))
+                .padding([4, 12])
+                .style(style::tab(on))
+                .on_press(msg)
+        };
+        top_bar = top_bar.push(ui_kit::anim::tabs(
+            usize::from(ro_view),
+            vec![
+                tab("All".into(), !ro_view, ChatMsg::Filter(Filter::All)).into(),
+                tab(format!("RO {ro}"), ro_view, ChatMsg::ThisRo(ro.to_string())).into(),
+            ],
+        ));
+    }
+
+    // (no space above: the name and tabs are just there)
+    let edge = iced::Padding {
+        top: 0.0,
+        right: 12.0,
+        bottom: 12.0,
+        left: 12.0,
+    };
+    let base = container(list(chat, &shown)).padding(edge).width(Length::Fill).height(Length::Fill);
+    let over = |content: Element<'a, ChatMsg>| -> Element<'a, ChatMsg> {
+        container(content)
+            .padding(edge)
             .width(Length::Fill)
             .height(Length::Fill)
             .style(|theme: &Theme| container::Style {
@@ -636,10 +728,25 @@ pub fn panel<'a>(chat: &'a ChatPanel, shown: ChatShown<'a>) -> Element<'a, ChatM
                 },
                 ..style::panel(theme)
             })
-            .into(),
-        None => Space::new(Length::Fill, Length::Fill).into(),
+            .into()
     };
-    container(ui_kit::anim::push(base, top, chat.open.is_some()))
+    let top: Element<'a, ChatMsg> = match (&chat.showing, ro_view && chat.open.is_none()) {
+        // the RO tab, and no conversation on it yet
+        (_, true) => over(note(if shown.sample {
+            "Your Xtime conversations show here once you're signed in to Xtime.".to_string()
+        } else if chat.loaded_at.is_none() {
+            "Reading your chat…".to_string()
+        } else {
+            format!(
+                "No messages about RO {} yet. When someone starts one in Xtime, it shows here.",
+                shown.ro.unwrap_or("")
+            )
+        })),
+        (Some(ch), false) => over(conversation(chat, ch, &shown, ro_view)),
+        (None, false) => Space::new(Length::Fill, Length::Fill).into(),
+    };
+    let slid_in = if ro_view { true } else { chat.open.is_some() };
+    container(column![container(top_bar).padding([12, 12]), ui_kit::anim::push(base, top, slid_in)].height(Length::Fill))
         .width(Length::Fill)
         .height(Length::Fill)
         .style(style::panel)
@@ -647,55 +754,23 @@ pub fn panel<'a>(chat: &'a ChatPanel, shown: ChatShown<'a>) -> Element<'a, ChatM
 }
 
 fn list<'a>(chat: &'a ChatPanel, shown: &ChatShown<'a>) -> Element<'a, ChatMsg> {
-    let mut head = row![text("Dealership chat").size(16).font(style::BOLD), horizontal_space()].align_y(Alignment::Center);
-    if !shown.sample {
-        head = head.push(
-            button(text(if chat.loading { "Checking…" } else { "Refresh" }).size(12))
-                .padding([3, 8])
-                .style(style::ghost)
-                .on_press_maybe((!chat.loading).then_some(ChatMsg::Refresh)),
-        );
-    }
-    let mut top = column![head].spacing(10);
-
-    // All / this RO
-    if let Some(ro) = shown.ro {
-        let tab = |label: String, f: Filter| {
-            button(text(label).size(13).font(style::BOLD))
-                .padding([4, 12])
-                .style(style::tab(chat.filter == f))
-                .on_press(ChatMsg::Filter(f))
-        };
-        let active = if chat.filter == Filter::ThisRo { 1 } else { 0 };
-        top = top.push(ui_kit::anim::tabs(
-            active,
-            vec![
-                tab("All".into(), Filter::All).into(),
-                tab(format!("RO {ro}"), Filter::ThisRo).into(),
-            ],
-        ));
-    }
-
     if shown.sample {
-        return column![top, note("Your Xtime conversations show here once you're signed in to Xtime.")].into();
+        return note("Your Xtime conversations show here once you're signed in to Xtime.");
     }
-    let all = chat.conversations();
-    let ro_only = shown.ro.filter(|_| chat.filter == Filter::ThisRo);
-    let convs: Vec<ChatMessage> = all.into_iter().filter(|c| ro_only.is_none_or(|ro| c.ro == ro)).collect();
+    let convs: Vec<ChatMessage> = chat.conversations();
 
     let content: Element<'a, ChatMsg> = if convs.is_empty() {
         match (&chat.error, chat.loaded_at) {
             (Some(LoadError::SignedOut), _) => note("Sign in to Xtime to see your chat (the bottom bar has Sign in)."),
             (Some(e), _) => note(format!("Couldn't read your chat ({})", e.plain())),
             (None, None) => note("Reading your chat…"),
-            (None, Some(_)) if ro_only.is_some() => note("No conversations on this RO yet."),
             (None, Some(_)) => note(format!("No conversations in the last {DAYS} days.")),
         }
     } else {
         let items = Column::with_children(convs.into_iter().map(|c| conversation_item(c, shown.now))).spacing(2);
         scrollable(items).height(Length::Fill).into()
     };
-    let mut col = column![top].spacing(10);
+    let mut col = Column::new().spacing(10);
     if let (Some(e), false) = (&chat.error, chat.messages.is_empty()) {
         col = col.push(
             text(format!("Couldn't check for new messages ({})", e.plain()))
@@ -712,16 +787,13 @@ fn conversation_item<'a>(c: ChatMessage, now: i64) -> Element<'a, ChatMsg> {
     } else {
         format!("RO {}", c.ro)
     };
-    let mut first = row![
+    let first = row![
         text(title).font(style::BOLD),
         horizontal_space(),
         text(when(c.time, now)).size(12).style(style::muted)
     ]
     .spacing(6)
     .align_y(Alignment::Center);
-    if c.unread {
-        first = first.push(dot());
-    }
     let who = if c.mine {
         "You: ".to_string()
     } else if c.ro.is_empty() || c.sender.is_empty() {
@@ -731,15 +803,23 @@ fn conversation_item<'a>(c: ChatMessage, now: i64) -> Element<'a, ChatMsg> {
     };
     let preview = text(format!("{who}{}", short(&c.text, 90))).size(13);
     let preview = if c.unread { preview } else { preview.style(style::muted) };
-    button(column![first, preview].spacing(3))
-        .width(Length::Fill)
-        .padding(8)
-        .style(style::list_item(false))
-        .on_press(ChatMsg::Open(c.channel_id))
-        .into()
+    // what needs you: a light on the left, centred (it pops in when something new comes)
+    // (always there, clear when there's nothing new: so it pops when something comes)
+    let light: Element<'a, ChatMsg> = anim::dot(if c.unread { UNREAD } else { Color::TRANSPARENT }, false).into();
+    button(
+        row![light, column![first, preview].spacing(3).width(Length::Fill)]
+            .spacing(6)
+            .align_y(Alignment::Center),
+    )
+    .width(Length::Fill)
+    .padding(8)
+    .style(style::list_item(false))
+    .on_press(ChatMsg::Open(c.channel_id))
+    .into()
 }
 
-fn conversation<'a>(chat: &'a ChatPanel, ch: &'a str, shown: &ChatShown<'a>) -> Element<'a, ChatMsg> {
+/// A conversation: Back to the list (not as the RO tab, which is left with All), its messages, the message box
+fn conversation<'a>(chat: &'a ChatPanel, ch: &'a str, shown: &ChatShown<'a>, in_tab: bool) -> Element<'a, ChatMsg> {
     // its newest from the list says what it's about until its messages are read
     let about = chat.conversations().into_iter().find(|c| c.channel_id == ch);
     let ro = about.as_ref().map(|c| c.ro.clone()).unwrap_or_default();
@@ -749,16 +829,16 @@ fn conversation<'a>(chat: &'a ChatPanel, ch: &'a str, shown: &ChatShown<'a>) -> 
         about.as_ref().map(|c| c.sender.clone()).unwrap_or_else(|| "Conversation".into())
     };
 
-    let mut head = row![
-        button(text("‹ Back").size(13))
-            .padding([3, 8])
-            .style(style::ghost)
-            .on_press(ChatMsg::Back),
-        text(title).size(15).font(style::BOLD),
-        horizontal_space(),
-    ]
-    .spacing(8)
-    .align_y(Alignment::Center);
+    let mut head = row![].spacing(8).align_y(Alignment::Center);
+    if !in_tab {
+        head = head.push(
+            button(text("‹ Back").size(13))
+                .padding([3, 8])
+                .style(style::ghost)
+                .on_press(ChatMsg::Back),
+        );
+    }
+    head = head.push(text(title).size(15).font(style::BOLD)).push(horizontal_space());
     // the RO, when it's one of yours (and not the one showing)
     if !ro.is_empty() && shown.my_ros.contains(&ro) && shown.ro != Some(ro.as_str()) {
         head = head.push(
@@ -879,7 +959,30 @@ fn bubble<'a>(m: &'a ChatMessage, named: bool, now: i64) -> Element<'a, ChatMsg>
         .into();
     }
     let mine = m.mine;
-    let body = container(text(m.text.as_str()).size(14))
+    // @mentions stand out: bold, on a tint of their own
+    let mut found = Vec::new();
+    let words: Vec<text::Span<'a, ChatMsg>> = mention_spans(&m.text, &m.mentions, &mut found)
+        .into_iter()
+        .map(|(w, mention)| {
+            if !mention {
+                return span(w);
+            }
+            let tint = if mine { Color::WHITE } else { MENTION };
+            span(w)
+                .font(style::BOLD)
+                .color(if mine { Color::WHITE } else { MENTION })
+                .background(Color {
+                    a: if mine { 0.22 } else { 0.14 },
+                    ..tint
+                })
+                .border(Border {
+                    radius: 4.0.into(),
+                    ..Default::default()
+                })
+                .padding([0, 2])
+        })
+        .collect();
+    let body = container(rich_text(words).size(14))
         .padding([7, 11])
         .max_width(250)
         .style(move |theme: &Theme| {
@@ -900,8 +1003,13 @@ fn bubble<'a>(m: &'a ChatMessage, named: bool, now: i64) -> Element<'a, ChatMsg>
         col = col.push(text(m.sender.as_str()).size(12).font(style::BOLD).style(style::muted));
     }
     let mut tags = row![time].spacing(6).align_y(Alignment::Center);
-    if !m.mentions.is_empty() && !mine {
-        tags = tags.push(pill(format!("@ {}", m.mentions.join(", ")), [0x7a, 0x5a, 0xf5]));
+    // (a mention not found in the words, as Xtime wrote them: under it)
+    let unseen: Vec<&String> = m.mentions.iter().filter(|n| !found.contains(n)).collect();
+    if !unseen.is_empty() && !mine {
+        tags = tags.push(pill(
+            format!("@ {}", unseen.iter().map(|n| n.as_str()).collect::<Vec<_>>().join(", ")),
+            [0x7a, 0x5a, 0xf5],
+        ));
     }
     col = col.push(body).push(tags);
     let col = if mine { col.align_x(Alignment::End) } else { col };
@@ -1009,5 +1117,23 @@ mod tests {
         assert_eq!(p.unread(), 1);
         p.messages.push(m("a", 30));
         assert_eq!(p.unread(), 2);
+    }
+
+    #[test]
+    fn picks_out_mentions() {
+        let names = vec!["Brenton".to_string(), "Brenton Skeeters".to_string(), "Ann".to_string()];
+        let mut found = Vec::new();
+        let s = mention_spans("hey @Brenton Skeeters and @Ann, see @Bob", &names, &mut found);
+        assert_eq!(
+            s,
+            vec![
+                ("hey ".to_string(), false),
+                ("@Brenton Skeeters".to_string(), true),
+                (" and ".to_string(), false),
+                ("@Ann".to_string(), true),
+                (", see @Bob".to_string(), false),
+            ]
+        );
+        assert_eq!(found, vec!["Brenton Skeeters".to_string(), "Ann".to_string()]);
     }
 }

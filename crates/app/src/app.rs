@@ -31,6 +31,37 @@ pub enum Screen {
     Main,
 }
 
+/// A line's hours or flag date being changed in the sidebar (see ui/lines.rs)
+#[derive(Debug, Clone, PartialEq)]
+pub struct LineEdit {
+    pub ro: String,
+    pub key: String,
+    pub field: LineField,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineField {
+    Hours,
+    Date,
+}
+
+/// "You were clocked out at Tue 5:02 PM, when the app was last open"
+fn clocked_out_notice(at: i64) -> String {
+    format!(
+        "You were clocked out at {}, when the app was last open",
+        chrono::TimeZone::timestamp_millis_opt(&chrono::Local, at)
+            .earliest()
+            .map(|t| t.format("%a %-I:%M %p").to_string())
+            .unwrap_or_default()
+    )
+}
+
+/// The ROs whose lines are folded away in the sidebar (this computer's `folded-lines.json`)
+fn folded_file() -> std::path::PathBuf {
+    crate::settings::app_dir().join("folded-lines.json")
+}
+
 /// A card over everything else (the page stays behind it, frosted)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Overlay {
@@ -43,6 +74,8 @@ pub enum Overlay {
     Hours,
     /// Add Service / Edit Service (Xtime's Add Service window)
     Service,
+    /// What's new (after an update, when one's waiting, from Settings)
+    WhatsNew,
 }
 
 pub struct App {
@@ -109,6 +142,18 @@ pub struct App {
     pub inner: Transition<InnerKey>,
     /// The app updating itself: what's going on, Beta updates
     pub updates: crate::updates::Updates,
+    /// What was last kept of the open vehicles (kept again when it changes)
+    open_saved: String,
+    /// The sidebar's lines: the ROs whose lines are folded away, a line's hours or date being changed, a confirmed
+    /// flag about to be taken off (asked once more first)
+    pub folded_lines: std::collections::BTreeSet<String>,
+    pub line_edit: Option<LineEdit>,
+    pub unflag_ask: Option<(String, String)>,
+    /// What's new, while its card is up; and the downloaded version whose notes were shown (once)
+    pub whats_new: Option<crate::whats_new::Shown>,
+    whats_new_for: Option<String>,
+    /// Sync between your computers
+    pub sync: crate::syncing::Syncing,
 }
 
 /// The dashboard's and My ROs' messages (crates/xtime-ui) are the app's own
@@ -191,6 +236,22 @@ pub enum Message {
     UpdateDownloaded(Result<crate::updates::Ready, String>),
     SetBetaUpdates(bool),
     RestartToUpdate,
+    /// The sidebar's lines: fold an RO's away (or back); change a line's hours or flag date (start, type, save,
+    /// cancel); flag a line or take its flag off
+    ToggleLines(String),
+    EditLine(String, String, LineField),
+    LineInput(String),
+    SaveLine,
+    CancelLine,
+    SidebarFlag(String, String, bool),
+    /// What's new: from Settings; closed (its items are then shown here)
+    ShowWhatsNew,
+    CloseWhatsNew,
+    /// Sync: now (Settings, or due after a change); how it went; on or off
+    SyncNow,
+    SyncDue,
+    Synced(Box<crate::syncing::Outcome>),
+    SetSync(bool),
     SetMode(Mode),
     Search(String),
     /// Open (or show) a vehicle by RO number
@@ -217,6 +278,8 @@ pub enum Message {
     Tsb(String, ford_ui::TsbMsg),
     /// Something in an RO's Workshop Manual tab
     Wsm(String, ford_ui::ManualMsg),
+    /// Something in an RO's Diagnostics tab
+    Diag(String, ford_ui::DiagMsg),
     /// One of an open vehicle's document tabs (its RO number, the tab's number): its own messages
     Doc(String, u32, ford_ui::DocTabMsg),
     /// Close a document tab of the vehicle showing (the tab's number)
@@ -305,16 +368,12 @@ impl App {
     pub fn new() -> (Self, Task<Message>) {
         let settings = Settings::load();
         // your hours (brought over from the Electron app the first time; a forgotten clock-out ended)
-        let opened = timecard::open();
+        // sync (on unless turned off): "forgot to clock out" waits until your other computers are heard from
+        let sync_on = !settings.sync_off && crate::syncing::derive_keys(&settings.store_id, &settings.employee_number).is_some();
+        let opened = timecard::open(sync_on);
         let notice = match (opened.imported, opened.auto_clocked_out) {
             (Some(n), _) => Some(format!("Brought over your hours from the old app ({n} flagged lines)")),
-            (None, Some(at)) => Some(format!(
-                "You were clocked out at {}, when the app was last open",
-                chrono::TimeZone::timestamp_millis_opt(&chrono::Local, at)
-                    .earliest()
-                    .map(|t| t.format("%a %-I:%M %p").to_string())
-                    .unwrap_or_default()
-            )),
+            (None, Some(at)) => Some(clocked_out_notice(at)),
             _ => None,
         };
         let screen = if settings.needs_setup() { Screen::Setup } else { Screen::Main };
@@ -338,7 +397,20 @@ impl App {
             ::feedback::Client::new(http.clone()),
             ::feedback::reporter_id(&crate::settings::app_dir()),
         );
-        let app = Self {
+        // the vehicles open last time (the Electron app's too), where they were left
+        let saved = crate::vehicles::load();
+        let open: Vec<Workspace> = saved
+            .list
+            .iter()
+            .map(|v| {
+                let mut ws = Workspace::new(v.assigned());
+                ws.tab = v.tab;
+                ws.manual = v.manual;
+                ws
+            })
+            .collect();
+        let selected = saved.active.clone();
+        let mut app = Self {
             draft: settings.clone(),
             settings,
             screen,
@@ -351,8 +423,8 @@ impl App {
             ros_loaded_at: None,
             ros_error: None,
             search: String::new(),
-            open: Vec::new(),
-            selected: None,
+            open,
+            selected,
             sidebar: true,
             chat: false,
             chat_panel: xtime_ui::chat::ChatPanel::new(),
@@ -375,7 +447,33 @@ impl App {
             system_dark: crate::system_theme::is_dark(),
             inner: Transition::new(InnerKey::None),
             updates: crate::updates::Updates::new(),
+            open_saved: String::new(),
+            folded_lines: std::fs::read_to_string(folded_file())
+                .ok()
+                .and_then(|t| serde_json::from_str(&t).ok())
+                .unwrap_or_default(),
+            line_edit: None,
+            unflag_ask: None,
+            whats_new: None,
+            whats_new_for: None,
+            sync: crate::syncing::Syncing::load(sync_on),
         };
+        // (straight onto the vehicle showing, no transition in)
+        app.outer = Transition::new(app.outer_key());
+        app.inner = Transition::new(app.inner_key());
+        app.open_saved = crate::vehicles::snapshot(&app.open, app.selected.as_deref());
+        // what this version brings that hasn't been shown here (not over first setup)
+        if app.screen == Screen::Main {
+            if let Some(shown) = crate::whats_new::on_start() {
+                app.whats_new = Some(shown);
+                app.show_overlay(Overlay::WhatsNew);
+            }
+        }
+        // the vehicles reopened: the tab showing read, the others' OASIS and TSBs ahead (with a PTS sign-in)
+        let mut reopened = vec![app.load_manual()];
+        for ro in app.open.iter().map(|w| w.ro.ro.clone()).collect::<Vec<_>>() {
+            reopened.push(app.load_ahead(&ro));
+        }
         // first setup: straight into its first field
         let focus = if app.screen == Screen::Setup {
             ui::focus_first_field()
@@ -386,7 +484,8 @@ impl App {
         let count = Task::done(Message::Report(ReportMsg::Count));
         // your ROs, when there's a sign-in to ask with (and every minute, see subscription)
         let ros = Task::done(Message::LoadRos);
-        (app, Task::batch([focus, count, ros]))
+        let sync = app.sync_now();
+        (app, Task::batch([focus, count, ros, Task::batch(reopened), sync]))
     }
 
     pub fn title(&self) -> String {
@@ -482,6 +581,7 @@ impl App {
             }
             other => self.apply(other),
         };
+        self.remember_open();
         Task::batch([task, self.start_transition()])
     }
 
@@ -527,6 +627,30 @@ impl App {
                 ws.wsm.restore().map(move |m| Message::Wsm(ro.clone(), m))
             }
             _ => Task::none(),
+        }
+    }
+
+    /// The open vehicles kept (workspaces.json) and, for sync, which ROs are open (the hours), when they've changed
+    fn remember_open(&mut self) {
+        let now = crate::vehicles::snapshot(&self.open, self.selected.as_deref());
+        if now == self.open_saved {
+            return;
+        }
+        self.open_saved = now;
+        // (the samples aren't real vehicles: not kept)
+        let real: Vec<&Workspace> = self.open.iter().filter(|w| !w.is_sample()).collect();
+        let selected = self.selected.as_deref().filter(|s| real.iter().any(|w| w.ro.ro == *s));
+        let saved = crate::vehicles::save(&real, selected);
+        let mut open_ros = crate::vehicles::open_ros(&real);
+        // (and the ones opened on another computer still waiting for their VIN here: they stay open there)
+        for (ro, ymm) in &self.sync.waiting {
+            open_ros.entry(ro.clone()).or_insert_with(|| hours::OpenRo { ymm: ymm.clone() });
+        }
+        if let Err(e) = saved {
+            self.notice = Some(format!("Couldn't keep which vehicles are open: {e}"));
+        }
+        if self.hours.set_open_ros(open_ros) {
+            self.save_hours();
         }
     }
 
@@ -599,7 +723,7 @@ impl App {
                 return self.load_manual();
             }
             Message::Oasis(ro, msg) => {
-                let env = self.ford_env();
+                let env = self.ford_env_for(&ro);
                 let Some(ws) = self.open.iter_mut().find(|w| w.ro.ro == ro) else {
                     return Task::none();
                 };
@@ -614,7 +738,7 @@ impl App {
                 return Task::batch(tasks);
             }
             Message::Tsb(ro, msg) => {
-                let env = self.ford_env();
+                let env = self.ford_env_for(&ro);
                 let Some(ws) = self.open.iter_mut().find(|w| w.ro.ro == ro) else {
                     return Task::none();
                 };
@@ -629,7 +753,7 @@ impl App {
                 return Task::batch(tasks);
             }
             Message::Wsm(ro, msg) => {
-                let env = self.ford_env();
+                let env = self.ford_env_for(&ro);
                 let Some(ws) = self.open.iter_mut().find(|w| w.ro.ro == ro) else {
                     return Task::none();
                 };
@@ -643,8 +767,23 @@ impl App {
                 }
                 return Task::batch(tasks);
             }
+            Message::Diag(ro, msg) => {
+                let env = self.ford_env_for(&ro);
+                let Some(ws) = self.open.iter_mut().find(|w| w.ro.ro == ro) else {
+                    return Task::none();
+                };
+                let (task, outs) = ws.diag.update(msg, &env);
+                let mut tasks = vec![{
+                    let ro = ro.clone();
+                    task.map(move |m| Message::Diag(ro.clone(), m))
+                }];
+                for out in outs {
+                    tasks.push(self.ford_out(&ro, out));
+                }
+                return Task::batch(tasks);
+            }
             Message::Doc(ro, key, msg) => {
-                let env = self.ford_env();
+                let env = self.ford_env_for(&ro);
                 let Some(d) = self
                     .open
                     .iter_mut()
@@ -685,7 +824,7 @@ impl App {
                 };
                 // the TSBs tab, when it was waiting on PTS too
                 let ok = r.is_ok();
-                let env = self.ford_env();
+                let env = self.ford_env_for(&ro);
                 let tsb = match self.open.iter_mut().find(|w| w.ro.ro == ro) {
                     Some(ws) if ok && ws.tsb.error == Some(ford_ui::FordError::NotSetUp) => {
                         let ro = ro.clone();
@@ -1123,8 +1262,10 @@ impl App {
                 let ok = result.is_ok();
                 self.ros_loaded(result);
                 if ok {
-                    // the chat's new messages (and the Chat button's count) with them, every minute
-                    return Task::batch([self.check_spiffs(), self.refresh_chat()]);
+                    // ROs opened on another computer whose VIN is now known; the chat's new messages (and the Chat
+                    // button's count) with them, every minute
+                    let waiting = self.open_waiting();
+                    return Task::batch([self.check_spiffs(), self.refresh_chat(), waiting]);
                 }
             }
             Message::ToggleClock => {
@@ -1146,13 +1287,99 @@ impl App {
                     self.hours.heartbeat(now);
                     let _ = timecard::save(&self.hours);
                 }
+                // sync: every minute (and soon after a change, see SyncDue)
+                let sync_due = self.sync.last_run.is_none_or(|t| self.now - t >= crate::syncing::EVERY);
+                let sync = if sync_due { self.sync_now() } else { Task::none() };
                 // updates: shortly after starting, then every half hour
                 if self.updates.on() && self.updates.due(self.now) {
-                    return self.check_updates();
+                    return Task::batch([sync, self.check_updates()]);
                 }
+                return sync;
             }
             Message::Arrive(_) => {} // handled in update
             Message::CheckUpdates => return self.check_updates(),
+            Message::ToggleLines(ro) => {
+                if !self.folded_lines.remove(&ro) {
+                    self.folded_lines.insert(ro);
+                }
+                let _ = std::fs::write(folded_file(), serde_json::to_string(&self.folded_lines).unwrap_or_default());
+            }
+            Message::EditLine(ro, key, field) => {
+                let Some(line) = self.hours.ro_summary(&ro).and_then(|s| s.lines.into_iter().find(|l| l.key == key)) else {
+                    return Task::none();
+                };
+                let value = match field {
+                    LineField::Hours => hours_ui::fmt_h(line.paid).trim_end_matches(" h").to_string(),
+                    LineField::Date => match line.flag {
+                        Some(f) => crate::ui::lines::edit_date(f.flagged_at),
+                        None => return Task::none(),
+                    },
+                };
+                self.line_edit = Some(LineEdit { ro, key, field, value });
+                self.unflag_ask = None;
+                let id = crate::ui::lines::edit_id();
+                return Task::batch([
+                    iced::widget::text_input::focus(id.clone()),
+                    iced::widget::text_input::select_all(id),
+                ]);
+            }
+            Message::LineInput(v) => {
+                if let Some(e) = &mut self.line_edit {
+                    e.value = v;
+                }
+            }
+            Message::CancelLine => self.line_edit = None,
+            Message::SaveLine => {
+                let Some(e) = self.line_edit.clone() else { return Task::none() };
+                let flag = self.hours.flag_for(&e.ro, &e.key).map(|f| f.id);
+                let v = e.value.trim().replace(',', ".");
+                match e.field {
+                    // empty: back to Xtime's hours
+                    LineField::Hours if v.is_empty() => self.hours.set_override(&e.ro, &e.key, None),
+                    LineField::Hours => match v.parse::<f64>() {
+                        Ok(n) if n.is_finite() && n >= 0.0 => match flag {
+                            Some(id) => self.hours.set_flag_hours(id, n),
+                            None => self.hours.set_override(&e.ro, &e.key, Some(n)),
+                        },
+                        _ => {
+                            self.notice = Some("The hours should be a number, like 1.5".into());
+                            return Task::none();
+                        }
+                    },
+                    LineField::Date => {
+                        let year = chrono::Datelike::year(&chrono::Local::now());
+                        match (crate::ui::lines::parse_date(&v, year), flag) {
+                            (Some(at), Some(id)) => self.hours.set_flagged_at(id, at),
+                            _ => {
+                                self.notice = Some("Type the date like 11/2/2026".into());
+                                return Task::none();
+                            }
+                        }
+                    }
+                }
+                self.line_edit = None;
+                self.save_hours();
+            }
+            Message::SidebarFlag(ro, key, on) => {
+                self.line_edit = None;
+                if on {
+                    self.unflag_ask = None;
+                    if self.hours.flag_line(&ro, &key, timecard::now_ms()) {
+                        self.save_hours();
+                    }
+                } else {
+                    // a flag already confirmed on your time sheet: asked once more before it's taken off
+                    let confirmed = self.hours.flag_for(&ro, &key).is_some_and(|f| f.confirmed);
+                    let asked = self.unflag_ask.as_ref().is_some_and(|(r, k)| *r == ro && *k == key);
+                    if confirmed && !asked {
+                        self.unflag_ask = Some((ro, key));
+                    } else {
+                        self.unflag_ask = None;
+                        self.hours.unflag_line(&ro, &key);
+                        self.save_hours();
+                    }
+                }
+            }
             Message::UpdateFound(found) => {
                 use crate::updates::State;
                 match found {
@@ -1168,10 +1395,59 @@ impl App {
             }
             Message::UpdateDownloaded(r) => {
                 use crate::updates::State;
-                self.updates.state = match r {
-                    Ok(ready) => State::Ready(ready),
-                    Err(e) => State::Failed(e),
-                };
+                match r {
+                    Ok(ready) => {
+                        // what it brings, once (unless a card's up: then it's in Settings, and on the next start)
+                        let new_notes = self.whats_new_for.as_deref() != Some(ready.version.as_str());
+                        if new_notes && self.overlay.is_none() {
+                            if let Some(shown) = crate::whats_new::for_update(&ready.version, &ready.notes) {
+                                self.whats_new_for = Some(ready.version.clone());
+                                self.whats_new = Some(shown);
+                                self.show_overlay(Overlay::WhatsNew);
+                            }
+                        }
+                        self.updates.state = State::Ready(ready);
+                    }
+                    Err(e) => self.updates.state = State::Failed(e),
+                }
+            }
+            Message::SyncNow => return self.sync_now(),
+            Message::SyncDue => {
+                if self.sync.due.is_some_and(|d| d <= std::time::Instant::now()) {
+                    self.sync.due = None;
+                    return self.sync_now();
+                }
+            }
+            Message::Synced(outcome) => return self.synced(*outcome),
+            Message::SetSync(on) => {
+                self.settings.sync_off = !on;
+                self.draft.sync_off = !on;
+                if let Err(e) = self.settings.save() {
+                    self.notice = Some(format!("Couldn't save the setting: {e}"));
+                }
+                if on {
+                    // joining afresh: what's here fills gaps, never overrules your other computers
+                    self.sync.state.rejoin();
+                    self.sync.save();
+                    return self.sync_now();
+                }
+                self.sync.status = crate::syncing::Status::Off;
+                self.sync.due = None;
+            }
+            Message::ShowWhatsNew => {
+                self.whats_new = Some(match &self.updates.state {
+                    crate::updates::State::Ready(r) => crate::whats_new::for_update(&r.version, &r.notes)
+                        .map(|s| crate::whats_new::Shown { all: true, ..s })
+                        .unwrap_or_else(crate::whats_new::recent),
+                    _ => crate::whats_new::recent(),
+                });
+                self.show_overlay(Overlay::WhatsNew);
+            }
+            Message::CloseWhatsNew => {
+                if let Some(s) = &self.whats_new {
+                    crate::whats_new::mark_seen(&s.groups);
+                }
+                return self.close_overlay();
             }
             Message::SetBetaUpdates(on) => {
                 self.updates.set_beta(on);
@@ -1179,6 +1455,10 @@ impl App {
             }
             Message::RestartToUpdate => {
                 if let crate::updates::State::Ready(r) = self.updates.state.clone() {
+                    // (what's new in it was seen: not shown again once it's started)
+                    if let Some(s) = &self.whats_new {
+                        crate::whats_new::mark_seen(&s.groups);
+                    }
                     match crate::updates::restart(&r) {
                         // (hours are kept as they change; the window closes and the launcher starts the new version)
                         Ok(()) => return iced::exit(),
@@ -1200,6 +1480,7 @@ impl App {
                     match which {
                         Overlay::Print => self.print_job = None,
                         Overlay::Service => self.service = None,
+                        Overlay::WhatsNew => self.whats_new = None,
                         _ => {}
                     }
                 }
@@ -1215,16 +1496,17 @@ impl App {
     }
 
     /// What the Service Manual's tabs ask Ford with
-    fn ford_env(&self) -> ford_ui::Env {
+    /// What a vehicle's Service Manual asks Ford with (nothing, for a sample)
+    fn ford_env_for(&self, ro: &str) -> ford_ui::Env {
         ford_ui::Env {
             ford: self.ford.clone(),
-            sample: self.sample_data,
+            sample: self.open.iter().find(|w| w.ro.ro == ro).is_some_and(Workspace::is_sample),
         }
     }
 
     /// Reads the Service Manual tab showing, when it hasn't been read yet
     fn load_manual(&mut self) -> Task<Message> {
-        let env = self.ford_env();
+        let env = self.ford_env_for(self.selected.as_deref().unwrap_or(""));
         let Some(ws) = self.workspace_mut().filter(|w| w.tab == Tab::ServiceManual) else {
             return Task::none();
         };
@@ -1233,6 +1515,8 @@ impl App {
             ManualTab::Oasis => ws.oasis.load(&env, false).map(move |m| Message::Oasis(ro.clone(), m)),
             ManualTab::Tsbs => ws.tsb.load(&env, false).map(move |m| Message::Tsb(ro.clone(), m)),
             ManualTab::Workshop => ws.wsm.load(&env, false).map(move |m| Message::Wsm(ro.clone(), m)),
+            // ready to type in (nothing to read until something's searched)
+            ManualTab::Diagnostics if ws.diag.search.is_none() => ws.diag.focus().map(move |m| Message::Diag(ro.clone(), m)),
             _ => Task::none(),
         }
     }
@@ -1240,10 +1524,10 @@ impl App {
     /// A vehicle just opened: its OASIS is read in the background (as the Electron app's "loading ahead"), so it's
     /// there by the time its tab is opened. Only with a PTS sign-in (nothing asks to sign in from here).
     fn load_ahead(&mut self, ro: &str) -> Task<Message> {
-        if self.sample_data || !self.signed_in(Site::Ford) {
+        let env = self.ford_env_for(ro);
+        if env.sample || !self.signed_in(Site::Ford) {
             return Task::none();
         }
-        let env = self.ford_env();
         let Some(ws) = self.open.iter_mut().find(|w| w.ro.ro == ro) else {
             return Task::none();
         };
@@ -1263,7 +1547,7 @@ impl App {
             ford_ui::Out::SignIn => Task::done(Message::SignIn(Site::Ford)),
             // one of Ford's documents: a Service Manual tab of its own (the one already open for it, if any)
             ford_ui::Out::OpenDoc { kind, id, title, url } => {
-                let env = self.ford_env();
+                let env = self.ford_env_for(ro);
                 let Some(ws) = self.open.iter_mut().find(|w| w.ro.ro == ro) else {
                     return Task::none();
                 };
@@ -1280,6 +1564,38 @@ impl App {
                 ws.docs.push(d);
                 ws.manual = ManualTab::Doc(key);
                 task
+            }
+            // from the Diagnostics tab: a procedure or pinpoint test in the Workshop Manual tab (in a tab of its own, at
+            // the test)
+            ford_ui::Out::OpenProcedure { link, title } => {
+                let env = self.ford_env_for(ro);
+                let Some(ws) = self.open.iter_mut().find(|w| w.ro.ro == ro) else {
+                    return Task::none();
+                };
+                ws.tab = Tab::ServiceManual;
+                ws.manual = ManualTab::Workshop;
+                let r = ro.to_string();
+                let r2 = ro.to_string();
+                Task::batch([
+                    ws.wsm.load(&env, false).map(move |m| Message::Wsm(r.clone(), m)),
+                    ws.wsm.open_procedure(&env, link, title).map(move |m| Message::Wsm(r2.clone(), m)),
+                ])
+            }
+            // …and a bulletin in the TSBs tab
+            ford_ui::Out::OpenBulletin { kind, id, title, url } => {
+                let env = self.ford_env_for(ro);
+                let Some(ws) = self.open.iter_mut().find(|w| w.ro.ro == ro) else {
+                    return Task::none();
+                };
+                ws.tab = Tab::ServiceManual;
+                ws.manual = ManualTab::Tsbs;
+                let r = ro.to_string();
+                let r2 = ro.to_string();
+                let article = ford_ui::article::ArticleView::new(&kind, &id, &title, "", &url);
+                Task::batch([
+                    ws.tsb.load(&env, false).map(move |m| Message::Tsb(r.clone(), m)),
+                    ws.tsb.open_article(&env, article).map(move |m| Message::Tsb(r2.clone(), m)),
+                ])
             }
             // opening the vehicle in PTS (unseen) to set it up: one window at a time
             ford_ui::Out::SetUpPts(vin) => {
@@ -1412,6 +1728,137 @@ impl App {
         if let Err(e) = timecard::save(&self.hours) {
             self.notice = Some(format!("Couldn't save your hours: {e}"));
         }
+        // (sent to your other computers soon)
+        if !self.settings.sync_off {
+            self.sync.changed();
+        }
+    }
+
+    // ---------- sync ----------
+
+    /// Syncs now (unless it's off, or already syncing: then once more after)
+    fn sync_now(&mut self) -> Task<Message> {
+        use crate::syncing::Status;
+        if self.settings.sync_off {
+            self.sync.status = Status::Off;
+            return Task::none();
+        }
+        let Some(keys) = crate::syncing::derive_keys(&self.settings.store_id, &self.settings.employee_number) else {
+            self.sync.status = Status::Failed("enter your employee number in Settings".into());
+            return Task::none();
+        };
+        if self.sync.running {
+            self.sync.again = true;
+            return Task::none();
+        }
+        self.sync.running = true;
+        self.sync.started_at = self.sync.generation;
+        self.sync.last_run = Some(self.now);
+        if !matches!(self.sync.status, Status::Synced(_)) {
+            self.sync.status = Status::Syncing;
+        }
+        Task::perform(
+            workbench_sync::run(
+                self.http.clone(),
+                crate::syncing::URL.to_string(),
+                keys,
+                self.hours.clone(),
+                self.sync.state.clone(),
+                timecard::now_ms(),
+            ),
+            |o| Message::Synced(Box::new(o)),
+        )
+    }
+
+    /// A sync done: what came from your other computers put in (unless the hours changed here meanwhile: then it
+    /// goes again), ROs opened or closed elsewhere opened or closed here, "forgot to clock out" checked the first time
+    fn synced(&mut self, o: crate::syncing::Outcome) -> Task<Message> {
+        use crate::syncing::Status;
+        self.sync.running = false;
+        let mut tasks = Vec::new();
+        let unchanged_here = self.sync.generation == self.sync.started_at;
+        match o.hours {
+            Some(h) if unchanged_here => {
+                // (what's only this computer's and changed meanwhile stays: when it was last seen running)
+                let last_seen = self.hours.last_seen;
+                self.hours = h;
+                self.hours.last_seen = last_seen.max(self.hours.last_seen);
+                if let Err(e) = timecard::save(&self.hours) {
+                    self.notice = Some(format!("Couldn't save your hours: {e}"));
+                }
+                self.sync.state = o.state;
+                tasks.push(self.reconcile_open_ros());
+            }
+            Some(_) => self.sync.again = true,
+            None => self.sync.state = o.state,
+        }
+        self.sync.save();
+        self.sync.status = match o.result {
+            Ok(()) => Status::Synced(timecard::now_ms()),
+            Err(e) => Status::Failed(e),
+        };
+        // the first time: a shift left open from an earlier day, now that your other computers are heard from
+        if std::mem::take(&mut self.sync.check_after_first) {
+            if let Some(at) = self.hours.startup_check(&chrono::Local, timecard::now_ms()) {
+                let _ = timecard::save(&self.hours);
+                self.notice = Some(clocked_out_notice(at));
+            }
+        }
+        if std::mem::take(&mut self.sync.again) {
+            tasks.push(self.sync_now());
+        }
+        Task::batch(tasks)
+    }
+
+    /// ROs opened on another computer open here (once their VIN is known: from your ROs in Xtime); ROs closed on
+    /// another computer close here (only when an app that syncs open ROs closed them)
+    fn reconcile_open_ros(&mut self) -> Task<Message> {
+        let want = self.hours.open_ros.clone();
+        let mut tasks = Vec::new();
+        let mut keep = false;
+        let open_here: Vec<String> = self.open.iter().filter(|w| !w.is_sample()).map(|w| w.ro.ro.clone()).collect();
+        for ro in open_here {
+            if want.contains_key(&ro) {
+                continue;
+            }
+            if self.hours.open_closed_by.get(&ro).map(String::as_str) == Some("app") {
+                tasks.push(Task::done(Message::CloseRo(ro)));
+            } else {
+                keep = true; // dropped by an older app (or never known there): it stays open, and says so again
+            }
+        }
+        self.sync.waiting.retain(|ro, _| want.contains_key(ro));
+        for (ro, w) in &want {
+            if !self.open.iter().any(|x| &x.ro.ro == ro) {
+                self.sync.waiting.insert(ro.clone(), w.ymm.clone());
+            }
+        }
+        tasks.push(self.open_waiting());
+        if keep {
+            self.open_saved.clear(); // (kept again, with these)
+        }
+        Task::batch(tasks)
+    }
+
+    /// The ROs opened elsewhere that can be opened here now (their VIN is in your ROs), opened quietly
+    fn open_waiting(&mut self) -> Task<Message> {
+        let ready: Vec<xtime::dashboard::AssignedRo> = self
+            .sync
+            .waiting
+            .keys()
+            .filter_map(|ro| self.my_ros.iter().find(|r| &r.ro == ro && !r.vin.is_empty()).cloned())
+            .collect();
+        let mut tasks = Vec::new();
+        for r in ready {
+            self.sync.waiting.remove(&r.ro);
+            if self.open.iter().any(|w| w.ro.ro == r.ro) || self.sample_data {
+                continue;
+            }
+            let ro = r.ro.clone();
+            self.open.push(Workspace::new(r));
+            tasks.push(self.load_ahead(&ro));
+        }
+        Task::batch(tasks)
     }
 
     /// Flags a line of the RO showing (by Xtime's line ID), or takes its flag off. The RO's lines are kept in the
@@ -1573,10 +2020,12 @@ impl App {
         self.ros_error = None;
         self.ros_loaded_at = Some(self.now);
         if self.sample_data {
-            // the samples' vehicles were never real: close them
+            // the samples' vehicles were never real: close them (vehicles reopened from last time stay)
             self.sample_data = false;
-            self.open.clear();
-            self.selected = None;
+            self.open.retain(|w| !w.is_sample());
+            if !self.selected.as_ref().is_some_and(|s| self.open.iter().any(|w| &w.ro.ro == s)) {
+                self.selected = None;
+            }
         }
         // open vehicles get their RO's latest (mode, waiting…); one that's gone from your list stays open as it was
         for ws in &mut self.open {
@@ -1615,6 +2064,12 @@ impl App {
                 _ => None,
             }),
             iced::time::every(std::time::Duration::from_secs(30)).map(|_| Message::Tick),
+            // a change to your hours: synced a few seconds later
+            if self.sync.due.is_some() {
+                iced::time::every(std::time::Duration::from_secs(1)).map(|_| Message::SyncDue)
+            } else {
+                Subscription::none()
+            },
             iced::window::open_events().map(|_| Message::WindowOpened),
             iced::time::every(std::time::Duration::from_secs(15 * 60)).map(|_| Message::Report(ReportMsg::Count)),
             // the Print window: printers added meanwhile (Manage printers) show up

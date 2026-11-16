@@ -1,13 +1,15 @@
-//! The bottom bar: the shift clock and your hours, what's going on (Xtime's state, the latest message), and Feedback.
+//! The bottom bar: the shift clock and your hours, what's going on (Xtime's state, the latest message), Feedback, and
+//! sync's state in the corner (a light that pulses while syncing; hover for more, click for Settings).
 //! Keeps the top bar for getting around (Xtime / Workbench, Chat, My ROs, Settings).
 
-use iced::widget::{button, container, horizontal_space, row, text};
-use iced::{Alignment, Element, Length};
+use iced::widget::{button, container, horizontal_space, row, text, tooltip};
+use iced::{Alignment, Color, Element, Length};
 
-use super::{pill, style};
+use super::{anim, pill, style};
 use crate::app::{App, Message};
 use crate::ros::{self, LoadError};
 use crate::signin::Site;
+use crate::syncing::Status;
 
 pub fn view(app: &App) -> Element<'_, Message> {
     // the shift clock
@@ -133,6 +135,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
         .style(style::ghost)
         .on_press(Message::OpenFeedback),
     );
+    bar = bar.push(sync(app));
 
     container(bar.padding([0, 12]))
         .height(36)
@@ -140,6 +143,32 @@ pub fn view(app: &App) -> Element<'_, Message> {
         .align_y(Alignment::Center)
         .style(style::panel)
         .into()
+}
+
+/// Sync's light: green synced, blue (pulsing) syncing, amber a problem, gray off
+fn sync(app: &App) -> Element<'_, Message> {
+    let rgb = |r, g, b| Color::from_rgb8(r, g, b);
+    let (color, label) = match (&app.sync.status, app.sync.running) {
+        (Status::Off, _) => (rgb(0x9a, 0xa3, 0xad), "Sync off"),
+        (_, true) | (Status::Syncing, _) => (rgb(0x3b, 0x82, 0xf6), "Syncing"),
+        (Status::Synced(_), _) => (rgb(0x16, 0xa3, 0x4a), "Synced"),
+        (Status::Failed(_), _) => (rgb(0xd9, 0x77, 0x06), "Sync problem"),
+    };
+    let light = button(
+        row![
+            anim::dot(color, app.sync.running || app.sync.status == Status::Syncing),
+            text(label).size(13)
+        ]
+        .spacing(4)
+        .align_y(Alignment::Center),
+    )
+    .padding([3, 8])
+    .style(style::ghost)
+    .on_press(Message::OpenSettings);
+    let tip = container(text(app.sync.describe(crate::timecard::now_ms())).size(12))
+        .padding([4, 8])
+        .style(style::floating_card);
+    tooltip(light, tip, tooltip::Position::Top).gap(6.0).into()
 }
 
 /// A thin upright line between parts of the bar

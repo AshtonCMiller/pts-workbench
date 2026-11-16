@@ -27,8 +27,9 @@ pub struct Opened {
     pub auto_clocked_out: Option<i64>,
 }
 
-/// The hours: brought over from the Electron app the first time, a forgotten clock-out ended, old ROs dropped
-pub fn open() -> Opened {
+/// The hours: brought over from the Electron app the first time, a forgotten clock-out ended (unless `defer_check`:
+/// with sync, that waits until your other computers are heard from), old ROs dropped
+pub fn open(defer_check: bool) -> Opened {
     let dir = crate::settings::app_dir();
     let mut h = Hours::load(&file());
     let imported = h.import_electron(&dir.join("tracking.json"));
@@ -42,7 +43,7 @@ pub fn open() -> Opened {
         h.clock_in(since * 1000);
     }
     let now = now_ms();
-    let auto_clocked_out = h.startup_check(&chrono::Local, now);
+    let auto_clocked_out = if defer_check { None } else { h.startup_check(&chrono::Local, now) };
     h.prune(now, 60, &[]);
     h.heartbeat(now);
     let _ = save(&h);

@@ -79,6 +79,34 @@ fn notice(app: &App) -> Element<'_, Message> {
     }
 }
 
+/// Sync between your computers: on or off, how it's going, Sync now
+fn sync(app: &App) -> Element<'_, Message> {
+    let on = !app.settings.sync_off;
+    column![
+        text("Sync").font(style::BOLD),
+        row![
+            checkbox("Keep my hours, flags and open ROs the same on all my computers", on)
+                .text_size(13)
+                .on_toggle(Message::SetSync),
+            horizontal_space(),
+            button(text("Sync now").size(13))
+                .padding([5, 12])
+                .style(style::ghost)
+                .on_press_maybe((on && !app.sync.running).then_some(Message::SyncNow)),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center),
+        text(format!(
+            "{} · Encrypted on this computer with your store ID and employee number; never VINs or customer details.",
+            app.sync.describe(crate::timecard::now_ms())
+        ))
+        .size(12)
+        .style(style::muted),
+    ]
+    .spacing(6)
+    .into()
+}
+
 /// The version running, how updates are going, Beta updates, and Restart to update when one's ready
 fn version(app: &App) -> Element<'_, Message> {
     let u = &app.updates;
@@ -87,6 +115,10 @@ fn version(app: &App) -> Element<'_, Message> {
             .text_size(13)
             .on_toggle_maybe(u.on().then_some(Message::SetBetaUpdates)),
         horizontal_space(),
+        button(text("What's new").size(13))
+            .padding([5, 12])
+            .style(style::ghost)
+            .on_press(Message::ShowWhatsNew),
         button(text("Check now").size(13))
             .padding([5, 12])
             .style(style::ghost)
@@ -199,6 +231,7 @@ pub fn card(app: &App) -> Element<'_, Message> {
                     pick_list(&ThemeChoice::ALL[..], Some(app.draft.theme), Message::SetTheme).padding(6),
                 ]
                 .spacing(4),
+                sync(app),
                 version(app),
                 row![
                     notice(app),
