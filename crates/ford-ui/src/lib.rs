@@ -17,6 +17,7 @@ pub mod article;
 pub mod diagnostics;
 pub mod doc_tab;
 pub mod document;
+pub mod labor;
 pub mod manual;
 pub mod oasis;
 pub mod pdf;
@@ -25,6 +26,7 @@ pub mod tsb;
 
 pub use diagnostics::{DiagMsg, DiagView};
 pub use doc_tab::{DocMsg as DocTabMsg, DocTab};
+pub use labor::{LaborMsg, LaborView};
 pub use manual::{ManualMsg, ManualView};
 pub use oasis::{OasisMsg, OasisView};
 pub use tsb::{TsbMsg, TsbView};
@@ -57,6 +59,8 @@ pub enum Out {
     SetUpPts(String),
     /// Open a Workshop Manual procedure (a pinpoint test's link: at the test) in the Workshop Manual tab
     OpenProcedure { link: ford::doc::ProcLink, title: String },
+    /// Print the Labor Times tray (with its one-time use parts), or a parts list, in the app's Print window
+    Print(labor::LaborPrint),
     /// Open a bulletin (`kind`: "TSB", "GSB", "SSM") in the TSBs tab
     OpenBulletin {
         kind: String,

@@ -29,6 +29,8 @@ pub struct SavedVehicle {
     pub ymm: String,
     pub tab: Tab,
     pub manual: ManualTab,
+    /// Labor Times: the tray and the last search (in the Electron app's Labor Times tab's state when it has one)
+    pub labor: ford::labor::Saved,
 }
 
 impl SavedVehicle {
@@ -132,7 +134,18 @@ fn read_entry(e: &Value) -> Option<SavedVehicle> {
         ymm: s(&e["ymm"]),
         tab,
         manual,
+        labor: read_labor(e),
     })
+}
+
+/// The Electron app's Labor Times tab's state (both apps keep it there), else this app's own
+fn read_labor(e: &Value) -> ford::labor::Saved {
+    let tab = e["tabs"]
+        .as_array()
+        .and_then(|t| t.iter().find(|t| t["kind"].as_str() == Some("labor")))
+        .map(|t| t["state"].clone());
+    let state = tab.unwrap_or_else(|| e["rs"]["labor"].clone());
+    serde_json::from_value(state).unwrap_or_default()
 }
 
 /// What was open last time (nothing when there's no file, or it can't be read)
@@ -185,6 +198,16 @@ fn update(mut root: Value, open: &[&Workspace], selected: Option<&str>) -> Value
                 e["ymm"] = json!(ymm);
             }
             e["rs"] = json!({ "tab": tab_kind(ws.tab), "manual": manual_kind(ws.manual) });
+            // Labor Times: in the Electron app's tab when it has one (so it's the same both ways), else here
+            let labor = serde_json::to_value(&ws.labor.saved).unwrap_or(Value::Null);
+            let electron = e["tabs"]
+                .as_array_mut()
+                .and_then(|t| t.iter_mut().find(|t| t["kind"].as_str() == Some("labor")))
+                .filter(|t| t.is_object());
+            match electron {
+                Some(t) => t["state"] = labor,
+                None => e["rs"]["labor"] = labor,
+            }
             e
         })
         .collect();
@@ -221,12 +244,13 @@ pub fn snapshot(open: &[Workspace], selected: Option<&str>) -> String {
     let mut s = selected.unwrap_or("").to_string();
     for ws in open {
         s.push_str(&format!(
-            "|{}:{}:{}:{}:{}",
+            "|{}:{}:{}:{}:{}:{}",
             ws.ro.ro,
             ws.ro.vin,
             ws.vehicle(),
             tab_kind(ws.tab),
-            manual_kind(ws.manual)
+            manual_kind(ws.manual),
+            serde_json::to_string(&ws.labor.saved).unwrap_or_default()
         ));
     }
     s

@@ -20,6 +20,7 @@ pub mod diagnostics;
 pub mod doc;
 pub mod fsa;
 pub mod html;
+pub mod labor;
 pub mod manual;
 pub mod oasis;
 pub mod tsb;
@@ -205,6 +206,8 @@ pub struct Ford {
     cache: Option<std::path::PathBuf>,
     /// Each VIN's side of the diagnostics search, and when it was read (see diagnostics.rs)
     diag: Arc<Mutex<HashMap<String, (Instant, diagnostics::DiagContext)>>>,
+    /// Each VIN's SLTS model code ("A8"), once SLTS has said (see labor.rs)
+    slts_codes: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl Ford {
@@ -220,6 +223,7 @@ impl Ford {
             log: Log::default(),
             cache: None,
             diag: Arc::default(),
+            slts_codes: Arc::default(),
         })
     }
 

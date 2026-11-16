@@ -3,11 +3,13 @@
 //!
 //!   mod.rs      the page: text and lines, measuring and wrapping text, money; the printers, preview and printing
 //!   spiff.rs    the spiff sheet
+//!   labor.rs    Labor Times' operations and one-time use parts
 //!   windows.rs  Windows: the printers, measuring text, drawing the pages on the printer
 //!   pdf.rs      elsewhere (Linux, while developing): the page as a small PDF, printed with `lp`
 //!
 //! The Print window itself is the app's own (ui/print.rs): a preview of every page, the printer and copies.
 
+pub mod labor;
 #[cfg(not(windows))]
 mod pdf;
 pub mod spiff;

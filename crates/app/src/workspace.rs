@@ -19,6 +19,8 @@ pub struct Workspace {
     pub wsm: ford_ui::ManualView,
     /// The Diagnostics tab (Ford's search for DTCs and symptoms)
     pub diag: ford_ui::DiagView,
+    /// The Labor Times tab (Ford's SLTS), with its tray
+    pub labor: ford_ui::LaborView,
     /// Tabs of their own for Ford's documents (an FSA opened from OASIS…), and the next one's number
     pub docs: Vec<ford_ui::DocTab>,
     pub next_doc: u32,
@@ -31,6 +33,13 @@ impl Workspace {
         let tsb = ford_ui::TsbView::new(ro.vin.clone());
         let wsm = ford_ui::ManualView::new(ro.vin.clone());
         let diag = ford_ui::DiagView::new(ro.vin.clone());
+        // (for its printouts: "2023 Ford F-150 · VIN · RO 820367")
+        let line = [vehicle_name(&ro), ro.vin.clone(), format!("RO {}", ro.ro)]
+            .into_iter()
+            .filter(|s| !s.is_empty() && s != "RO ")
+            .collect::<Vec<_>>()
+            .join(" · ");
+        let labor = ford_ui::LaborView::new(ro.vin.clone(), line);
         Self {
             ro,
             tab: Tab::XtimeView, // a vehicle opens on its RO
@@ -40,6 +49,7 @@ impl Workspace {
             tsb,
             wsm,
             diag,
+            labor,
             docs: Vec::new(),
             next_doc: 1,
         }

@@ -280,6 +280,8 @@ pub enum Message {
     Wsm(String, ford_ui::ManualMsg),
     /// Something in an RO's Diagnostics tab
     Diag(String, ford_ui::DiagMsg),
+    /// Something in an RO's Labor Times tab
+    Labor(String, ford_ui::LaborMsg),
     /// One of an open vehicle's document tabs (its RO number, the tab's number): its own messages
     Doc(String, u32, ford_ui::DocTabMsg),
     /// Close a document tab of the vehicle showing (the tab's number)
@@ -406,6 +408,7 @@ impl App {
                 let mut ws = Workspace::new(v.assigned());
                 ws.tab = v.tab;
                 ws.manual = v.manual;
+                ws.labor.saved = v.labor.clone();
                 ws
             })
             .collect();
@@ -626,6 +629,10 @@ impl App {
                 let ro = ws.ro.ro.clone();
                 ws.wsm.restore().map(move |m| Message::Wsm(ro.clone(), m))
             }
+            (InnerKey::Vehicle(Tab::ServiceManual, ManualTab::Labor), Some(ws)) => {
+                let ro = ws.ro.ro.clone();
+                ws.labor.restore().map(move |m| Message::Labor(ro.clone(), m))
+            }
             _ => Task::none(),
         }
     }
@@ -761,6 +768,21 @@ impl App {
                 let mut tasks = vec![{
                     let ro = ro.clone();
                     task.map(move |m| Message::Wsm(ro.clone(), m))
+                }];
+                for out in outs {
+                    tasks.push(self.ford_out(&ro, out));
+                }
+                return Task::batch(tasks);
+            }
+            Message::Labor(ro, msg) => {
+                let env = self.ford_env_for(&ro);
+                let Some(ws) = self.open.iter_mut().find(|w| w.ro.ro == ro) else {
+                    return Task::none();
+                };
+                let (task, outs) = ws.labor.update(msg, &env);
+                let mut tasks = vec![{
+                    let ro = ro.clone();
+                    task.map(move |m| Message::Labor(ro.clone(), m))
                 }];
                 for out in outs {
                     tasks.push(self.ford_out(&ro, out));
@@ -1517,6 +1539,8 @@ impl App {
             ManualTab::Workshop => ws.wsm.load(&env, false).map(move |m| Message::Wsm(ro.clone(), m)),
             // ready to type in (nothing to read until something's searched)
             ManualTab::Diagnostics if ws.diag.search.is_none() => ws.diag.focus().map(move |m| Message::Diag(ro.clone(), m)),
+            // SLTS opened (the first time)
+            ManualTab::Labor => ws.labor.load(&env).map(move |m| Message::Labor(ro.clone(), m)),
             _ => Task::none(),
         }
     }
@@ -1531,12 +1555,14 @@ impl App {
         let Some(ws) = self.open.iter_mut().find(|w| w.ro.ro == ro) else {
             return Task::none();
         };
-        let (r1, r2, r3) = (ro.to_string(), ro.to_string(), ro.to_string());
+        let (r1, r2, r3, r4) = (ro.to_string(), ro.to_string(), ro.to_string(), ro.to_string());
         Task::batch([
             ws.oasis.load(&env, false).map(move |m| Message::Oasis(r1.clone(), m)),
             ws.tsb.load(&env, false).map(move |m| Message::Tsb(r2.clone(), m)),
             // the manual's contents (kept on disk a week, so usually quick)
             ws.wsm.load(&env, false).map(move |m| Message::Wsm(r3.clone(), m)),
+            // SLTS opened, so Labor Times is ready (as the Electron app does)
+            ws.labor.load(&env).map(move |m| Message::Labor(r4.clone(), m)),
         ])
     }
 
@@ -1582,6 +1608,13 @@ impl App {
                 ])
             }
             // …and a bulletin in the TSBs tab
+            // Labor Times' printout, in the app's Print window
+            ford_ui::Out::Print(job) => {
+                let what = job.title.clone();
+                let printed = format!("Printed {}", chrono::Local::now().format("%b %-d, %Y, %-I:%M %p"));
+                let build: crate::print::Build = std::sync::Arc::new(move |m| crate::print::labor::sheet(m, &job, &printed));
+                self.open_print(what, build)
+            }
             ford_ui::Out::OpenBulletin { kind, id, title, url } => {
                 let env = self.ford_env_for(ro);
                 let Some(ws) = self.open.iter_mut().find(|w| w.ro.ro == ro) else {

@@ -20,3 +20,4 @@
 - **Spiff tracking:** The app automatically tracks total sold ASR values and, if the total is over $150, gives you a nice printable view to be turned in to your beloved service manager.
 - **Cloud Sync** has been re-implemented. It is now stable enough to be implemented by default. Can be turned off in Settings > Sync
 - **Hour tracking** has been improved and re-implemented, just the same as Electron was.
+- **Labor Times** has been improved and re-implemented, just the same as Electron.

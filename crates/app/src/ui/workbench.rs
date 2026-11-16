@@ -182,6 +182,7 @@ fn manual<'a>(app: &'a App, ws: &'a Workspace, tab: ManualTab) -> Element<'a, Me
         ManualTab::Tsbs => ford_ui::tsb::view(&ws.tsb, ws.is_sample()).map(move |m| Message::Tsb(ro.clone(), m)),
         ManualTab::Workshop => ford_ui::manual::view(&ws.wsm, ws.is_sample()).map(move |m| Message::Wsm(ro.clone(), m)),
         ManualTab::Diagnostics => ford_ui::diagnostics::view(&ws.diag, ws.is_sample()).map(move |m| Message::Diag(ro.clone(), m)),
+        ManualTab::Labor => ford_ui::labor::view(&ws.labor, ws.is_sample()).map(move |m| Message::Labor(ro.clone(), m)),
         ManualTab::Doc(key) => match ws.docs.iter().find(|d| d.key == key) {
             Some(d) => ford_ui::doc_tab::view(d).map(move |m| Message::Doc(ro.clone(), key, m)),
             None => text("This tab was closed.").into(),
