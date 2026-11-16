@@ -48,7 +48,7 @@ fn main() {
     }
     let url = std::env::var("PDFIUM_URL").unwrap_or_else(|_| format!("{RELEASES}/{package}.tgz"));
     match fetch(&url, inside, &dest) {
-        Ok(()) => println!("cargo:warning=PDFium put beside the app ({})", dest.display()),
+        Ok(()) => println!("cargo:info=PDFium put beside the app ({})", dest.display()),
         Err(e) => println!("cargo:warning=Couldn't get PDFium ({e}): PDFs will open in the PDF viewer until it's beside the app"),
     }
 }
