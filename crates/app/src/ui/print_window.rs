@@ -4,8 +4,10 @@
 
 use iced::mouse;
 use iced::widget::canvas::{self, Canvas, Frame, Geometry, Program};
-use iced::widget::{Column, Space, button, checkbox, column, container, horizontal_space, pick_list, row, scrollable, text};
+use iced::widget::{Column, Space, button, checkbox, column, container, horizontal_space, pick_list, row, text};
+// scrolling that glides (crates/ui-kit)
 use iced::{Alignment, Color, Element, Font, Length, Pixels, Point, Rectangle, Renderer, Shadow, Size, Theme, Vector, font};
+use ui_kit::scroll::scrollable;
 
 use super::style;
 use crate::app::{App, Message};

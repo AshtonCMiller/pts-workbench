@@ -9,7 +9,9 @@ use std::io::{BufRead, BufReader};
 use std::process::{Command, ExitCode, Stdio};
 use std::time::Duration;
 
-use launcher::{Choice, ENV_VERSION, READY_LINE, RESTART_CODE, choose, has_started, set_aside, updates_dir};
+use launcher::{
+    Choice, ENV_HOME, ENV_INSTALLED, ENV_VERSION, INSTALLED_VERSION, READY_LINE, RESTART_CODE, choose, has_started, set_aside, updates_dir,
+};
 use splash::Splash;
 
 /// The loading window closes by itself after this, whatever the app's doing
@@ -29,6 +31,8 @@ fn main() -> ExitCode {
         let child = Command::new(choice.exe())
             .args(&args)
             .env(ENV_VERSION, choice.version())
+            .env(ENV_INSTALLED, INSTALLED_VERSION)
+            .env(ENV_HOME, &here)
             .stdout(Stdio::piped())
             .spawn();
         let status = match child {

@@ -1,8 +1,9 @@
 //! Starting PTS Workbench, the Rust version of the Electron app's `boot.js`.
 //!
 //! The installer puts two programs side by side: the launcher (`pts-workbench`, what people start) and the app
-//! (`pts-workbench-app`). Updates are new app versions downloaded into the app's folder, under `app-updates\<version>\`,
-//! with `app-updates\current.json` naming the one to use. No installer and no admin rights are needed for them.
+//! (`pts-workbench-app`). Updates are new app versions downloaded into the app's folder, under `versions\<version>\`,
+//! with `versions\current.json` naming the one to use (not the Electron app's `app-updates`, which it tidies). No
+//! installer and no admin rights are needed for them.
 //! The launcher itself only changes with a full install, so it stays small and careful.
 //!
 //! What the launcher does each time:
@@ -30,6 +31,10 @@ pub const LAUNCHER_LEVEL: u32 = 1;
 /// Set by the launcher for the app: the version it started
 pub const ENV_VERSION: &str = "PTS_WORKBENCH_VERSION";
 
+/// Set by the launcher for the app: the version installed (the launcher's own), and the folder it's installed in
+pub const ENV_INSTALLED: &str = "PTS_WORKBENCH_INSTALLED";
+pub const ENV_HOME: &str = "PTS_WORKBENCH_HOME";
+
 /// The installed version: the launcher and the app it's installed with share the workspace version
 pub const INSTALLED_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -56,17 +61,17 @@ pub fn app_dir() -> PathBuf {
     PathBuf::from(".pts-workbench")
 }
 
-/// Where downloaded versions go
+/// Where downloaded versions go (the Electron app keeps its own in `app-updates`, and clears out what it doesn't know)
 pub fn updates_dir() -> PathBuf {
-    app_dir().join("app-updates")
+    app_dir().join("versions")
 }
 
-/// `app-updates/current.json`: the downloaded version to use, and how it's been doing
+/// `versions/current.json`: the downloaded version to use, and how it's been doing
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Current {
     pub version: String,
-    /// Its folder in `app-updates` (holding the app's program)
+    /// Its folder in `versions` (holding the app's program)
     pub folder: String,
     /// The launcher level it needs
     pub launcher: u32,
@@ -170,7 +175,7 @@ pub fn choose(installed_dir: &Path, updates: &Path) -> Choice {
     }
     let wanted = compare_versions(&cur.version, INSTALLED_VERSION) == Ordering::Greater
         || (cur.downgrade && cur.installed.as_deref() == Some(INSTALLED_VERSION));
-    // only a plain folder name inside app-updates
+    // only a plain folder name inside versions
     let folder = Path::new(&cur.folder).file_name().map(|f| updates.join(f));
     let exe = match folder {
         Some(f) if wanted => f.join(APP_EXE),
@@ -320,7 +325,7 @@ mod tests {
             },
         );
         assert_eq!(choose(&installed, &updates), installed_choice);
-        // a folder name that tries to leave app-updates stays inside it
+        // a folder name that tries to leave versions stays inside it
         write_current(
             &updates,
             &Current {

@@ -19,11 +19,17 @@ path = "src/bin/pts-try.rs"
 
 [dependencies]
 workbench-net.workspace = true
+# updates: each downloaded file checked agsint its release's checksum
+sha2.workspace = true
 xtime.workspace = true
 ford.workspace = true
 launcher.workspace = true
 feedback.workspace = true
 hours.workspace = true
+ui-kit.workspace = true
+xtime-ui.workspace = true
+hours-ui.workspace = true
+ford-ui.workspace = true
 keyring.workspace = true
 iced.workspace = true
 tokio.workspace = true
@@ -31,6 +37,15 @@ serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
 
+# build.rs: puts PDFium beside the app, downloaded once.
+[build-dependencies]
+ureq = "2"
+flate2 = "1"
+tar = "0.4"
+
+# build.rs: the icon in the .exe (Windows only)
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
 
 [target.'cfg(windows)'.dependencies]
 # Windows' light/dark setting for the Auto appearance (system_theme.rs), and printing (print/windows.rs: the Print

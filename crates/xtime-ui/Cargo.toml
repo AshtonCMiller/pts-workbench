@@ -1,0 +1,19 @@
+[package]
+name = "xtime-ui"
+description = "Xtime Interface"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+# For XTime Data interfacing
+xtime.workspace = true
+# For shared UI libraries (animations, smooth transitions, etc.)
+ui-kit.workspace = true
+# For UI Drawing
+iced.workspace = true
+tokio.workspace = true
+# For data parsing
+serde_json.workspace = true
+chrono.workspace = true

@@ -11,3 +11,7 @@ workbench-net.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+# OASIS warranty dates (oasis.rs
+chrono.workspace = true
+# waiting a moment before asking Ford again (tsb.rs)
+tokio.workspace = true

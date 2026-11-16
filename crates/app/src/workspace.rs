@@ -1,12 +1,8 @@
 //! The vehicles open in the Workbench, and the tabs each one has (as in the Electron app).
 
-use std::collections::{HashMap, HashSet};
-use std::time::Instant;
-
 use xtime::dashboard::AssignedRo;
-use xtime::ro::RoView;
-
-use crate::ros::LoadError;
+// the vehicle's name and the RO's stage (crates/xtime-ui), under their usual names here
+pub use xtime_ui::my_ros::{STAGES, mode_label, stage, vehicle_name};
 
 /// One open vehicle (RO)
 #[derive(Debug, Clone)]
@@ -14,33 +10,34 @@ pub struct Workspace {
     pub ro: AssignedRo,
     pub tab: Tab,
     pub manual: ManualTab,
-    /// The Xtime View tab: the RO as Xtime has it
-    pub xv: XtimeView,
-}
-
-/// The Xtime View tab's RO and what's open on it
-#[derive(Debug, Clone, Default)]
-pub struct XtimeView {
-    pub view: Option<RoView>,
-    pub loading: bool,
-    /// Why the last read didn't work (the last good RO stays shown)
-    pub error: Option<LoadError>,
-    /// When it was last read (seconds since 1970)
-    pub at: Option<i64>,
-    /// Lines shown opened (by line ID), and when each was opened (for its slide in)
-    pub open: HashMap<String, Instant>,
-    pub show_inspection: bool,
-    /// Lines whose Done is being sent to Xtime
-    pub busy: HashSet<String>,
+    /// The Xtime View tab: the RO as Xtime has it (crates/xtime-ui)
+    pub xv: xtime_ui::XtimeView,
+    /// The Service Manual's OASIS and TSBs tabs (crates/ford-ui)
+    pub oasis: ford_ui::OasisView,
+    pub tsb: ford_ui::TsbView,
+    /// The Workshop Manual tab
+    pub wsm: ford_ui::ManualView,
+    /// Tabs of their own for Ford's documents (an FSA opened from OASIS…), and the next one's number
+    pub docs: Vec<ford_ui::DocTab>,
+    pub next_doc: u32,
 }
 
 impl Workspace {
     pub fn new(ro: AssignedRo) -> Self {
+        let xv = xtime_ui::XtimeView::new(ro.ro.clone());
+        let oasis = ford_ui::OasisView::new(ro.vin.clone());
+        let tsb = ford_ui::TsbView::new(ro.vin.clone());
+        let wsm = ford_ui::ManualView::new(ro.vin.clone());
         Self {
             ro,
             tab: Tab::XtimeView, // a vehicle opens on its RO
             manual: ManualTab::Oasis,
-            xv: XtimeView::default(),
+            xv,
+            oasis,
+            tsb,
+            wsm,
+            docs: Vec::new(),
+            next_doc: 1,
         }
     }
 
@@ -48,15 +45,6 @@ impl Workspace {
     pub fn vehicle(&self) -> String {
         vehicle_name(&self.ro)
     }
-}
-
-pub fn vehicle_name(ro: &AssignedRo) -> String {
-    [ro.year.as_str(), ro.make.as_str(), ro.model.as_str()]
-        .iter()
-        .filter(|s| !s.is_empty())
-        .copied()
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 /// A vehicle's main tabs
@@ -88,6 +76,8 @@ pub enum ManualTab {
     Workshop,
     Wiring,
     Labor,
+    /// One of Ford's documents in a tab of its own (its number among the vehicle's [`Workspace::docs`])
+    Doc(u32),
 }
 
 impl ManualTab {
@@ -110,6 +100,7 @@ impl ManualTab {
             ManualTab::Workshop => "Workshop Manual",
             ManualTab::Wiring => "Wiring",
             ManualTab::Labor => "Labor Times",
+            ManualTab::Doc(_) => "Document",
         }
     }
 
@@ -125,33 +116,7 @@ impl ManualTab {
             ManualTab::Workshop => "The Workshop Manual and PC/ED for this VIN: contents, search and procedures.",
             ManualTab::Wiring => "Wiring diagrams for this VIN: contents, pages and connector views.",
             ManualTab::Labor => "SLTS labor times for this VIN, with parts and a tray for the RO.",
+            ManualTab::Doc(_) => "One of Ford's documents.",
         }
-    }
-}
-
-/// My ROs' groups in the sidebar, in order
-pub const STAGES: [&str; 5] = ["Inspection", "Approval", "Repair", "Review", "Done"];
-
-/// Which of [`STAGES`] an RO is in by its Xtime mode: not started yet (Pre-RO, Dispatch) counts as Inspection; closed,
-/// or a stage the app doesn't know, as Done
-pub fn stage(mode: Option<f64>) -> usize {
-    match mode.map(|m| m as i64) {
-        Some(2 | 3 | 9) | None => 0,
-        Some(4 | 5) => 1,
-        Some(6) => 2,
-        Some(7) => 3,
-        _ => 4,
-    }
-}
-
-/// Xtime's mode numbers, as the dashboard shows them
-pub fn mode_label(mode: Option<f64>) -> (&'static str, [u8; 3]) {
-    match mode.map(|m| m as i64) {
-        Some(3) => ("In Inspection", [0x7a, 0x5a, 0xf5]),
-        Some(4) => ("Pending Approval", [0xd9, 0x77, 0x06]),
-        Some(5) => ("Pending Approval (parts?)", [0xd9, 0x77, 0x06]),
-        Some(6) => ("In Repair", [0x15, 0x80, 0x3d]),
-        Some(7) => ("Pending Review", [0x0e, 0x74, 0x90]),
-        _ => ("", [0x5d, 0x66, 0x70]),
     }
 }

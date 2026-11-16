@@ -24,10 +24,24 @@ pub fn view(app: &App) -> Element<'_, Message> {
         vec![mode("Xtime".into(), Mode::Xtime).into(), mode(workbench, Mode::Workbench).into()],
     );
     let mut bar = row![modes, horizontal_space()].spacing(6).align_y(Alignment::Center);
-    let toggle = |label: &'static str, on: bool, msg: Message| button(text(label)).padding([5, 10]).style(style::toggle(on)).on_press(msg);
+    let toggle = |label: String, on: bool, msg: Message| button(text(label)).padding([5, 10]).style(style::toggle(on)).on_press(msg);
+    // Chat, with how many conversations have something new
+    let chat = match app.chat_panel.unread() {
+        0 => "Chat".to_string(),
+        n => format!("Chat  {n}"),
+    };
+    // an update downloaded: one click starts it
+    if matches!(app.updates.state, crate::updates::State::Ready(_)) {
+        bar = bar.push(
+            button(text("Restart to update").font(style::BOLD))
+                .padding([5, 12])
+                .style(button::primary)
+                .on_press(Message::RestartToUpdate),
+        );
+    }
     bar = bar
-        .push(toggle("Chat", app.chat, Message::ToggleChat))
-        .push(toggle("My ROs", app.sidebar, Message::ToggleSidebar))
+        .push(toggle(chat, app.chat, Message::ToggleChat))
+        .push(toggle("My ROs".into(), app.sidebar, Message::ToggleSidebar))
         .push(
             button(text("Settings"))
                 .padding([5, 10])

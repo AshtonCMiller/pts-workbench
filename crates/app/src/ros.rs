@@ -3,7 +3,7 @@
 
 use xtime::dashboard::AssignedRo;
 use xtime::employee::Employee;
-use xtime::{Error, Xtime, paths};
+use xtime::{Xtime, paths};
 
 /// How often your ROs are loaded again (the Electron app's pollSeconds)
 pub const EVERY: std::time::Duration = std::time::Duration::from_secs(60);
@@ -18,42 +18,8 @@ pub struct Loaded {
     pub tech_name: String,
 }
 
-/// Why a load didn't work (kept short: it's shown in the bottom bar)
-#[derive(Debug, Clone, PartialEq)]
-pub enum LoadError {
-    /// The sign-in has run out: sign in again
-    SignedOut,
-    /// No employee number or technician ID in Settings
-    NoEmployee,
-    /// The employee number isn't in the store's list
-    NotFound(String),
-    /// Xtime is down or answering oddly, or the network is
-    Problem(String),
-}
-
-impl LoadError {
-    pub fn text(&self) -> String {
-        match self {
-            LoadError::SignedOut => "Xtime: signed out".into(),
-            LoadError::NoEmployee => "Xtime: add your employee number in Settings".into(),
-            LoadError::NotFound(m) => format!("Xtime: {m}"),
-            LoadError::Problem(m) => format!("Xtime: {m}"),
-        }
-    }
-}
-
-impl From<Error> for LoadError {
-    fn from(e: Error) -> Self {
-        match e {
-            Error::SessionExpired => LoadError::SignedOut,
-            Error::NotFound(m) => LoadError::NotFound(m),
-            Error::Status(code @ 500..=599) => LoadError::Problem(format!("having issues (HTTP {code})")),
-            Error::Status(code) => LoadError::Problem(format!("answered HTTP {code}")),
-            Error::Net(_) => LoadError::Problem("can't be reached".into()),
-            Error::Format(m) => LoadError::Problem(m),
-        }
-    }
-}
+/// Why reading Xtime didn't work, and "2 min ago" (they're shared with the Xtime View: crates/xtime-ui)
+pub use xtime_ui::{LoadError, ago};
 
 /// Loads your ROs. `tech_id`: from Settings; when it's empty, it's looked up from `employee_number` first.
 pub async fn load(x: Xtime, tech_id: String, employee_number: String, store: String) -> Result<Loaded, LoadError> {
@@ -72,32 +38,4 @@ pub async fn load(x: Xtime, tech_id: String, employee_number: String, store: Str
         found,
         tech_name: dash.tech_name,
     })
-}
-
-/// "just now", "3 min ago", "2 h ago"
-pub fn ago(secs: i64) -> String {
-    match secs.max(0) {
-        0..60 => "just now".into(),
-        s @ 60..3600 => format!("{} min ago", s / 60),
-        s => format!("{} h ago", s / 3600),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn says_how_long_ago() {
-        assert_eq!(ago(5), "just now");
-        assert_eq!(ago(-5), "just now");
-        assert_eq!(ago(130), "2 min ago");
-        assert_eq!(ago(7300), "2 h ago");
-    }
-
-    #[test]
-    fn says_what_went_wrong() {
-        assert_eq!(LoadError::from(Error::SessionExpired), LoadError::SignedOut);
-        assert_eq!(LoadError::from(Error::Status(503)).text(), "Xtime: having issues (HTTP 503)");
-    }
 }

@@ -1,0 +1,16 @@
+[package]
+name = "hours-ui"
+description = "Workbench display of hours with per-pay-period reports (flags, confirmed hours, clocked hours, efficiency, and spiffs)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+# For data interfacing (talking to database)
+hours.workspace = true
+# For shared UI styles
+ui-kit.workspace = true
+# For our UI
+iced.workspace = true
+chrono.workspace = true

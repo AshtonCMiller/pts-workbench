@@ -1,12 +1,13 @@
-//! The sidebar: the vehicles you have open, then your ROs (click one to open it).
+//! The sidebar: the vehicles you have open, then your ROs (crates/xtime-ui's My ROs; click one to open it).
 
-use iced::widget::{Space, button, column, container, row, scrollable, text};
+use iced::widget::{Space, button, column, container, row, text};
+// scrolling that glides (crates/ui-kit)
 use iced::{Alignment, Element, Length};
-use xtime::dashboard::AssignedRo;
+use ui_kit::scroll::scrollable;
 
-use super::{pill, style};
+use super::style;
 use crate::app::{App, Message};
-use crate::workspace::{STAGES, Workspace, stage, vehicle_name};
+use crate::workspace::Workspace;
 
 /// How wide My ROs is
 pub const WIDTH: f32 = 320.0;
@@ -23,17 +24,9 @@ pub fn view(app: &App) -> Element<'_, Message> {
     list = list
         .push(Space::with_height(12))
         .push(head(format!("MY ROS  {}", app.my_ros.len())));
-    // grouped by where they are: Inspection, Approval, Repair, Review, Done (empty groups left out)
-    for (i, name) in STAGES.iter().enumerate() {
-        let ros: Vec<&AssignedRo> = app.my_ros.iter().filter(|r| stage(r.mode) == i).collect();
-        if ros.is_empty() {
-            continue;
-        }
-        list = list.push(separator(name, ros.len()));
-        for ro in ros {
-            list = list.push(ro_item(app, ro));
-        }
-    }
+    // grouped by where they are: Inspection, Approval, Repair, Review, Done (crates/xtime-ui)
+    let spiffs = app.spiff_badges();
+    list = list.push(xtime_ui::my_ros::list(&app.my_ros, app.selected.as_deref(), &spiffs).map(Message::from));
     container(scrollable(list.padding(10)).height(Length::Fill))
         .width(WIDTH)
         .height(Length::Fill)
@@ -56,55 +49,4 @@ fn open_item<'a>(app: &'a App, ws: &'a Workspace) -> Element<'a, Message> {
     ]
     .align_y(Alignment::Center)
     .into()
-}
-
-/// A group's name and count, with a thin line after it
-fn separator<'a>(name: &'a str, count: usize) -> Element<'a, Message> {
-    let line = container(Space::with_height(1))
-        .width(Length::Fill)
-        .style(|theme: &iced::Theme| container::Style {
-            background: Some(style::colors(theme).line.into()),
-            ..Default::default()
-        });
-    row![
-        text(name).size(12).font(style::BOLD).style(style::muted),
-        text(count.to_string()).size(12).style(style::muted),
-        line,
-    ]
-    .spacing(6)
-    .padding([6, 2])
-    .align_y(Alignment::Center)
-    .into()
-}
-
-fn ro_item<'a>(app: &'a App, ro: &'a AssignedRo) -> Element<'a, Message> {
-    let selected = app.selected.as_deref() == Some(ro.ro.as_str());
-    // the group says where it is; only what it's waiting on shows here
-    let mut tags = row![].spacing(4);
-    for (on, label, color) in [
-        (ro.waiting_parts, "Waiting on Parts", [0xdc, 0x26, 0x26]),
-        (ro.waiting_customer, "Waiting on Customer", [0xb4, 0x53, 0x09]),
-        (ro.waiting_warranty, "Waiting on Warranty", [0x7c, 0x3a, 0xed]),
-    ] {
-        if on {
-            tags = tags.push(pill(label, color));
-        }
-    }
-    // the spiff: turned in already, or there to be turned in (approved recommendations over $150)
-    if app.hours.spiffed(&ro.ro).is_some() {
-        tags = tags.push(pill("Spiffed", [0x15, 0x80, 0x3d]));
-    } else if let Some(total) = app.spiff_totals.get(&ro.ro).copied().filter(|t| xtime::ro::spiff_over(*t)) {
-        tags = tags.push(pill(format!("Spiff {}", crate::print::money(total)), [0x0e, 0x74, 0x90]));
-    }
-    let title = row![
-        text(format!("RO {}", ro.ro)).font(style::BOLD),
-        text(format!("Tag {}", ro.tag)).style(style::muted)
-    ]
-    .spacing(8);
-    button(column![title, text(vehicle_name(ro)).size(13), tags].spacing(4))
-        .width(Length::Fill)
-        .padding(8)
-        .style(style::list_item(selected))
-        .on_press(Message::OpenRo(ro.ro.clone()))
-        .into()
 }

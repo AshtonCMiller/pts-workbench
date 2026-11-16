@@ -7,6 +7,9 @@
 //!
 //! * [`side`]: a side panel (My ROs, Chat) that slides in and out of its edge, taking its space with it.
 //! * [`modal`]: a card over everything (Settings, Feedback) on a frosted wash, sliding up in and down out.
+//! * [`push`]: a page that slides in from the right over another (a chat conversation over the list), which drifts a
+//!   little to the left under it; going back, it slides off to the right again. The page under it stays as it was
+//!   (where it was scrolled to), since it's never taken away.
 //!
 //! They run themselves: while moving they ask iced for the next frame; when still, they cost nothing.
 
@@ -20,7 +23,7 @@ use iced::advanced::{Clipboard, Renderer as _, Shell, mouse, overlay};
 use iced::event::{self, Event};
 use iced::{Alignment, Background, Border, Color, Element, Length, Padding, Rectangle, Renderer, Size, Theme, Vector, window};
 
-use super::style;
+use crate::style;
 
 /// How long the tab highlight takes to slide
 pub const SLIDE: Duration = Duration::from_millis(340);
@@ -563,10 +566,12 @@ impl<'a, Message> Widget<Message, Theme, Renderer> for Side<'a, Message> {
         if bounds.width < 0.5 {
             return;
         }
-        renderer.with_layer(bounds, |r| {
+        // nested layers (a scrollable's) aren't clipped by this one: they clip to the viewport, so it's narrowed too
+        let Some(clip) = bounds.intersection(viewport) else { return };
+        renderer.with_layer(clip, |r| {
             self.content
                 .as_widget()
-                .draw(&tree.children[0], r, theme, style, child, cursor, viewport);
+                .draw(&tree.children[0], r, theme, style, child, cursor, &clip);
         });
     }
 
@@ -638,6 +643,240 @@ impl<'a, Message> Widget<Message, Theme, Renderer> for Side<'a, Message> {
 impl<'a, Message: 'a> From<Side<'a, Message>> for Element<'a, Message> {
     fn from(s: Side<'a, Message>) -> Self {
         Element::new(s)
+    }
+}
+
+// =====================================================================================================================
+// A page pushed over another (a chat conversation over the list)
+// =====================================================================================================================
+
+/// How long a pushed page takes to slide in or out
+pub const PUSH: Duration = Duration::from_millis(300);
+/// How far the page underneath drifts left while it's covered (a share of the width)
+const PUSH_DRIFT: f32 = 0.25;
+
+pub struct Push<'a, Message> {
+    base: Element<'a, Message>,
+    top: Element<'a, Message>,
+    shown: bool,
+}
+
+/// `top` slid in over `base` while `shown`. Both fill the space. Keep passing the last `top` while it slides back out
+/// (`shown` false): it's only drawn while it's in or moving. Only the page in front gets the mouse and keys; the one
+/// underneath keeps its state (its scrolling) the whole time.
+pub fn push<'a, Message>(base: impl Into<Element<'a, Message>>, top: impl Into<Element<'a, Message>>, shown: bool) -> Push<'a, Message> {
+    Push {
+        base: base.into(),
+        top: top.into(),
+        shown,
+    }
+}
+
+struct PushState {
+    shown: bool,
+    start: Option<Instant>,
+}
+
+impl PushState {
+    /// How far in the top page is: 0 (gone) to 1 (all the way)
+    fn amount(&self) -> f32 {
+        match self.start {
+            Some(s) => {
+                let t = progress(s, PUSH);
+                if self.shown { ease_out(t) } else { 1.0 - ease_out(t) }
+            }
+            None if self.shown => 1.0,
+            None => 0.0,
+        }
+    }
+
+    fn moving(&self) -> bool {
+        self.start.is_some_and(|s| s.elapsed() < PUSH)
+    }
+}
+
+impl<'a, Message> Push<'a, Message> {
+    /// Which child has the mouse and keys: the top page while it's in (or coming or going), else the base
+    fn front(&self, tree: &Tree) -> usize {
+        if tree.state.downcast_ref::<PushState>().amount() > 0.0 {
+            1
+        } else {
+            0
+        }
+    }
+}
+
+impl<'a, Message> Widget<Message, Theme, Renderer> for Push<'a, Message> {
+    fn size(&self) -> Size<Length> {
+        Size::new(Length::Fill, Length::Fill)
+    }
+
+    fn tag(&self) -> tree::Tag {
+        tree::Tag::of::<PushState>()
+    }
+
+    fn state(&self) -> tree::State {
+        tree::State::new(PushState {
+            shown: self.shown,
+            start: None,
+        })
+    }
+
+    fn children(&self) -> Vec<Tree> {
+        vec![Tree::new(&self.base), Tree::new(&self.top)]
+    }
+
+    fn diff(&self, tree: &mut Tree) {
+        tree.diff_children(&[&self.base, &self.top]);
+        let state = tree.state.downcast_mut::<PushState>();
+        if state.shown != self.shown {
+            state.shown = self.shown;
+            state.start = Some(Instant::now());
+        }
+    }
+
+    fn layout(&self, tree: &mut Tree, renderer: &Renderer, limits: &layout::Limits) -> layout::Node {
+        let size = limits.max();
+        let amount = tree.state.downcast_ref::<PushState>().amount();
+        let whole = layout::Limits::new(Size::ZERO, size).width(size.width).height(size.height);
+        let base = self.base.as_widget().layout(&mut tree.children[0], renderer, &whole);
+        let top = self.top.as_widget().layout(&mut tree.children[1], renderer, &whole);
+        // the top page comes in from the right edge; the base drifts a little to the left under it
+        let base = base.move_to(iced::Point::new(-size.width * PUSH_DRIFT * amount, 0.0));
+        let top = top.move_to(iced::Point::new(size.width * (1.0 - amount), 0.0));
+        layout::Node::with_children(size, vec![base, top])
+    }
+
+    fn draw(
+        &self,
+        tree: &Tree,
+        renderer: &mut Renderer,
+        theme: &Theme,
+        style: &renderer::Style,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        viewport: &Rectangle,
+    ) {
+        let bounds = layout.bounds();
+        let amount = tree.state.downcast_ref::<PushState>().amount();
+        let mut kids = layout.children();
+        let (Some(base), Some(top)) = (kids.next(), kids.next()) else {
+            return;
+        };
+        // Each page gets its own layer, the top one after the base, so the top page covers all of the base (in one layer,
+        // the base's text would be drawn over the top page's background). Nested layers (scrollables) clip only to the
+        // viewport they're given, so it's narrowed to this frame: nothing shows past its edges.
+        let Some(clip) = bounds.intersection(viewport) else { return };
+        let moving = amount > 0.0 && amount < 1.0;
+        if amount < 1.0 {
+            let c = if amount > 0.0 { mouse::Cursor::Unavailable } else { cursor };
+            renderer.with_layer(clip, |r| {
+                self.base.as_widget().draw(&tree.children[0], r, theme, style, base, c, &clip);
+            });
+        }
+        if amount > 0.0 {
+            let c = if moving { mouse::Cursor::Unavailable } else { cursor };
+            renderer.with_layer(clip, |r| {
+                // the page underneath darkens a touch as it's covered
+                r.fill_quad(
+                    Quad {
+                        bounds: clip,
+                        ..Quad::default()
+                    },
+                    Background::Color(Color {
+                        a: 0.12 * amount,
+                        ..Color::BLACK
+                    }),
+                );
+            });
+            // the top page in a layer of its own (over the darkening), clipped to where it is
+            // (with room on its left for its shadow)
+            let t = top.bounds();
+            let room = Rectangle {
+                x: t.x - 16.0,
+                width: t.width + 16.0,
+                ..t
+            };
+            if let Some(top_clip) = room.intersection(&clip) {
+                renderer.with_layer(top_clip, |r| {
+                    self.top.as_widget().draw(&tree.children[1], r, theme, style, top, c, &top_clip);
+                });
+            }
+        }
+    }
+
+    fn on_event(
+        &mut self,
+        tree: &mut Tree,
+        event: Event,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        renderer: &Renderer,
+        clipboard: &mut dyn Clipboard,
+        shell: &mut Shell<'_, Message>,
+        viewport: &Rectangle,
+    ) -> event::Status {
+        let moving = tree.state.downcast_ref::<PushState>().moving();
+        if moving {
+            // the pages move every frame: lay them out again, and draw the next frame
+            shell.invalidate_layout();
+            shell.request_redraw(window::RedrawRequest::NextFrame);
+        }
+        let i = self.front(tree);
+        let Some(child) = layout.children().nth(i) else {
+            return event::Status::Ignored;
+        };
+        // no clicks on a page while it slides
+        let cursor = if moving { mouse::Cursor::Unavailable } else { cursor };
+        let widget = if i == 0 { &mut self.base } else { &mut self.top };
+        widget
+            .as_widget_mut()
+            .on_event(&mut tree.children[i], event, child, cursor, renderer, clipboard, shell, viewport)
+    }
+
+    fn mouse_interaction(
+        &self,
+        tree: &Tree,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        viewport: &Rectangle,
+        renderer: &Renderer,
+    ) -> mouse::Interaction {
+        let i = self.front(tree);
+        let widget = if i == 0 { &self.base } else { &self.top };
+        match layout.children().nth(i) {
+            Some(child) => widget
+                .as_widget()
+                .mouse_interaction(&tree.children[i], child, cursor, viewport, renderer),
+            None => mouse::Interaction::default(),
+        }
+    }
+
+    fn operate(&self, tree: &mut Tree, layout: Layout<'_>, renderer: &Renderer, operation: &mut dyn widget::Operation) {
+        let mut kids = layout.children();
+        if let (Some(base), Some(top)) = (kids.next(), kids.next()) {
+            self.base.as_widget().operate(&mut tree.children[0], base, renderer, operation);
+            self.top.as_widget().operate(&mut tree.children[1], top, renderer, operation);
+        }
+    }
+
+    fn overlay<'b>(
+        &'b mut self,
+        tree: &'b mut Tree,
+        layout: Layout<'_>,
+        renderer: &Renderer,
+        translation: Vector,
+    ) -> Option<overlay::Element<'b, Message, Theme, Renderer>> {
+        let i = self.front(tree);
+        let child = layout.children().nth(i)?;
+        let widget = if i == 0 { &mut self.base } else { &mut self.top };
+        widget.as_widget_mut().overlay(&mut tree.children[i], child, renderer, translation)
+    }
+}
+
+impl<'a, Message: 'a> From<Push<'a, Message>> for Element<'a, Message> {
+    fn from(p: Push<'a, Message>) -> Self {
+        Element::new(p)
     }
 }
 

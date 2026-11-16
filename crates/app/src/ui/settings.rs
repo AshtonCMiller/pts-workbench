@@ -1,13 +1,16 @@
 //! First setup (the store ID and dealer code, before anything else) and Settings.
 
 use iced::Task;
-use iced::widget::{button, column, container, horizontal_space, pick_list, row, scrollable, text, text_input};
+use iced::widget::{button, checkbox, column, container, horizontal_space, pick_list, row, text, text_input};
+// scrolling that glides (crates/ui-kit)
 use iced::{Alignment, Element, Length};
+use ui_kit::scroll::scrollable;
 
 use super::style;
 use crate::app::{App, Field, Message};
 use crate::settings::ThemeChoice;
 use crate::signin::Site;
+use crate::updates::State;
 
 /// Each field's name, for moving to it
 fn field_id(f: Field) -> text_input::Id {
@@ -74,6 +77,40 @@ fn notice(app: &App) -> Element<'_, Message> {
         Some(n) => text(n.as_str()).size(13).into(),
         None => text("").into(),
     }
+}
+
+/// The version running, how updates are going, Beta updates, and Restart to update when one's ready
+fn version(app: &App) -> Element<'_, Message> {
+    let u = &app.updates;
+    let mut actions = row![
+        checkbox("Beta updates: new features first (less tested)", u.beta)
+            .text_size(13)
+            .on_toggle_maybe(u.on().then_some(Message::SetBetaUpdates)),
+        horizontal_space(),
+        button(text("Check now").size(13))
+            .padding([5, 12])
+            .style(style::ghost)
+            .on_press_maybe((u.on() && !u.busy()).then_some(Message::CheckUpdates)),
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center);
+    if matches!(u.state, State::Ready(_)) {
+        actions = actions.push(
+            button(text("Restart to update").size(13))
+                .padding([5, 12])
+                .style(button::primary)
+                .on_press(Message::RestartToUpdate),
+        );
+    }
+    column![
+        text("Version & updates").font(style::BOLD),
+        text(format!("PTS Workbench v{} · {}", u.running, u.describe()))
+            .size(13)
+            .style(style::muted),
+        actions,
+    ]
+    .spacing(6)
+    .into()
 }
 
 /// Xtime and Ford PTS: signed in or not, and a button to sign in (again)
@@ -162,6 +199,7 @@ pub fn card(app: &App) -> Element<'_, Message> {
                     pick_list(&ThemeChoice::ALL[..], Some(app.draft.theme), Message::SetTheme).padding(6),
                 ]
                 .spacing(4),
+                version(app),
                 row![
                     notice(app),
                     horizontal_space(),

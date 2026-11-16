@@ -1,6 +1,13 @@
-
 # PTS Workbench, the Rust version. One workspace, a crate per part:
-#   crates/app    the app itself (the binary): windows, settings, and wiring the parts together
+#   crates/launcher  what people start (`pts-workbench`): picks the newest working app version, like boot.js
+#   crates/app    the app itself (`pts-workbench-app`): its windows (iced), settings, wiring the parts together
+#   crates/signin the sign-in windows (`pts-signin`): Cox's or Ford's own sign-in page in a web view; hands over the cookies
+#   crates/feedback  bug reports and ideas: sent to the sync server, their replies, the admin's list
+#   crates/hours  your hours: the shift clock, flagged lines, spiffs, the pay-period report (only on this computer)
+#   crates/ui-kit the shared look and motion: colours, styles, the animated widgets (every screen uses it)
+#   crates/xtime-ui  what you see of Xtime: the Xtime View, its inspection form, the Add / Edit Service window,
+#                 the dashboard and My ROs
+#   crates/hours-ui  what you see of your hours: the pay-period report
 #   crates/net    web requests with the sign-in cookies, shared by the parts below (and saving those sign-ins)
 #   crates/xtime  Xtime: your ROs, the RO view and line changes, the Dealership chat
 #   crates/ford   Ford PTS: the Service Manual and the rest of Ford's pages (PC/ED, wiring, TSBs, OASIS…)
@@ -19,15 +26,28 @@ publish = false
 
 [workspace.dependencies]
 # Our own crates
-workbench-net = { path = "crates/net" }
-xtime = { path = "crates/xtime" }
-ford = { path = "crates/ford" }
+# Launcher: Handles actually launching the application without modifying core .exe
 launcher = { path = "crates/launcher" }
+# net: Handles all network traffic to PTS & XTime
+workbench-net = { path = "crates/net" }
+# Handles data-side of XTime
+xtime = { path = "crates/xtime" }
+# Handles data-side of PTS
+ford = { path = "crates/ford" }
+# basic application UI add-ins
 feedback = { path = "crates/feedback" }
 hours = { path = "crates/hours" }
+# common UI patterns (animations, transitions, etc.)
+ui-kit = { path = "crates/ui-kit" }
+# UI implementation of data coming from crates/xtime
+xtime-ui = { path = "crates/xtime-ui" }
+# UI Implementation for the Hours / Flag Sheet Interface.
+hours-ui = { path = "crates/hours-ui" }
+# UI implementation of data coming from crates/ford
+ford-ui = { path = "crates/ford-ui" }
 
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "cookies", "rustls-tls", "gzip"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "cookies", "rustls-tls", "gzip", "brotli", "deflate", "http2"] }
 reqwest_cookie_store = "0.8"
 cookie_store = "0.21"
 serde = { version = "1", features = ["derive"] }
@@ -37,11 +57,24 @@ thiserror = "2"
 url = "2"
 regex = "1"
 # Native Rust UI
-iced = { version = "0.13", features = ["tokio", "advanced", "canvas"] }
+iced = { version = "0.13", features = ["tokio", "advanced", "canvas", "image"] }
 # local dates and times (the printed spiff sheet; pay periods for the hours report)
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 # passwords kept by the system (Windows Credential Manager, the Secret Service on Linux): the feedback admin's
 keyring = { version = "3", features = ["windows-native", "sync-secret-service", "crypto-rust"] }
+# sign-in (SCRAM: crates/xtime/xmpp.rs)
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+webpki-roots = "0.26"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+# PDFs shown in the app (crates/ford-ui/pdf.rs): binds to PDFium (pdfium.dll beside the app), no admin install
+pdfium-render = { version = "0.8", default-features = false, features = ["pdfium_latest", "thread_safe"] }
+sha1 = "0.10"
+sha2 = "0.10"
+hmac = "0.12"
+pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+getrandom = "0.2"
 # Web view for sign in windows
 tao = "0.30"
 wry = "0.47"

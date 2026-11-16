@@ -3,8 +3,6 @@
 use iced::widget::{button, container, text};
 use iced::{Background, Border, Color, Font, Shadow, Theme, font, theme::Palette};
 
-use crate::settings::ThemeChoice;
-
 /// 0x1a5fb4 → the color
 const fn rgb(hex: u32) -> Color {
     Color {
@@ -42,10 +40,10 @@ const DARK: Colors = Colors {
     accent: rgb(0x4a8fe0),
 };
 
-/// The iced theme for Light or Dark (Auto is resolved first: [`ThemeChoice::resolve`])
-pub fn theme(choice: ThemeChoice) -> Theme {
-    match choice {
-        ThemeChoice::Light => Theme::custom(
+/// The iced theme: light or dark (the app works out which, for its Auto setting)
+pub fn theme(dark: bool) -> Theme {
+    match dark {
+        false => Theme::custom(
             "PTS Workbench Light".into(),
             Palette {
                 background: rgb(0xf4f5f7),
@@ -55,7 +53,7 @@ pub fn theme(choice: ThemeChoice) -> Theme {
                 danger: rgb(0xb42318),
             },
         ),
-        ThemeChoice::Dark | ThemeChoice::Auto => Theme::custom(
+        true => Theme::custom(
             "PTS Workbench Dark".into(),
             Palette {
                 background: rgb(0x15181c),

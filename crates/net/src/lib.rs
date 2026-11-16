@@ -6,6 +6,9 @@
 //!
 //! Signing in itself happens in Xtime's / Ford's own sign-in pages (a small sign-in window); the cookies those pages
 //! set are handed over with [`Http::add_cookie`].
+//!
+//! [`WebSocket`] (ws.rs) is a secure WebSocket connection for Xtime's chat server, through the same proxy as the
+//! requests ([`proxy`]).
 
 use std::fs;
 use std::io::{BufReader, BufWriter, Write};
@@ -13,9 +16,13 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+pub mod proxy;
+mod ws;
+
 pub use reqwest::{Method, StatusCode};
 use reqwest_cookie_store::{CookieStore, CookieStoreMutex};
 pub use url::Url;
+pub use ws::WebSocket;
 
 #[derive(Debug, thiserror::Error)]
 pub enum NetError {
@@ -27,6 +34,9 @@ pub enum NetError {
     Io(#[from] std::io::Error),
     #[error("the saved sign-ins couldn't be read: {0}")]
     Cookies(String),
+    /// A WebSocket connection (Xtime's chat server) didn't work: what went wrong
+    #[error("{0}")]
+    WebSocket(String),
 }
 
 pub type Result<T> = std::result::Result<T, NetError>;
@@ -55,6 +65,15 @@ impl Response {
     pub fn json<T: serde::de::DeserializeOwned>(&self) -> serde_json::Result<T> {
         serde_json::from_str(&self.body)
     }
+}
+
+/// What came back from [`Http::send_bytes`]
+#[derive(Debug, Clone)]
+pub struct Bytes {
+    pub status: StatusCode,
+    pub url: Url,
+    pub content_type: String,
+    pub bytes: Vec<u8>,
 }
 
 /// A cookie as the sign-in window hands it over (`pts-signin` prints a list of these as JSON). Only kept in the
@@ -198,6 +217,41 @@ impl Http {
             .count()
     }
 
+    /// The cookies sent to an address: each one's name and size (name and value, in characters). Never their values.
+    pub fn cookie_sizes(&self, url: &Url) -> Vec<(String, usize)> {
+        let store = self.jar.lock().expect("cookie store lock");
+        store
+            .matches(url)
+            .into_iter()
+            .map(|c| (c.name().to_string(), c.name().len() + c.value().len() + 2))
+            .collect()
+    }
+
+    /// Throws away the cookies sent to an address whose names pass `pick`; the names thrown away
+    pub fn remove_cookies(&self, url: &Url, pick: impl Fn(&str) -> bool) -> Vec<String> {
+        let mut store = self.jar.lock().expect("cookie store lock");
+        let host = url.host_str().unwrap_or_default().to_string();
+        let gone: Vec<(String, String, String)> = store
+            .matches(url)
+            .into_iter()
+            .filter(|c| pick(c.name()))
+            .map(|c| {
+                let domain = c
+                    .domain()
+                    .map(|d| d.trim_start_matches('.').to_string())
+                    .unwrap_or_else(|| host.clone());
+                (c.name().to_string(), domain, c.path().unwrap_or("/").to_string())
+            })
+            .collect();
+        for (name, domain, path) in &gone {
+            // removed by its key; for one kept under a slightly different key, an expired copy replaces it
+            if store.remove(domain, path, name).is_none() {
+                let _ = store.parse(&format!("{name}=; Max-Age=0; Domain={domain}; Path={path}"), url);
+            }
+        }
+        gone.into_iter().map(|(n, _, _)| n).collect()
+    }
+
     /// Whether there are any cookies for an address (a sign-in, as far as the app can tell without asking)
     pub fn has_cookies(&self, url: &Url) -> bool {
         let store = self.jar.lock().expect("cookie store lock");
@@ -240,6 +294,33 @@ impl Http {
             redirected,
             content_type,
             body,
+        })
+    }
+
+    /// Sends a request and reads the answer as bytes (pictures, PDFs)
+    pub async fn send_bytes(&self, req: Request) -> Result<Bytes> {
+        let mut b = self.client.request(req.method, req.url);
+        for (k, v) in &req.headers {
+            b = b.header(k.as_str(), v.as_str());
+        }
+        if let Some(body) = req.body {
+            b = b.body(body);
+        }
+        let res = b.send().await?;
+        let status = res.status();
+        let url = res.url().clone();
+        let content_type = res
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        let bytes = res.bytes().await?.to_vec();
+        Ok(Bytes {
+            status,
+            url,
+            content_type,
+            bytes,
         })
     }
 

@@ -11,6 +11,10 @@ publish.workspace = true
 name = "pts-workbench"
 path = "src/main.rs"
 
+# build.rs: the icon in the .exe (Windows only)
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true

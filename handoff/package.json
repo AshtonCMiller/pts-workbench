@@ -1,0 +1,11 @@
+{
+  "name": "pts-workbench",
+  "productName": "PTS Workbench",
+  "version": "0.0.0",
+  "description": "Moves the Electron app over to the new PTS Workbench (see src/main.js). Its version is set by the release build.",
+  "main": "src/main.js",
+  "private": true,
+  "ptsWorkbench": {
+    "shell": 1
+  }
+}

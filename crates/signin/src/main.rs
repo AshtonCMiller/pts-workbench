@@ -3,11 +3,18 @@
 //!
 //!   pts-signin --title <window title> --start <address> --done-host <host> --domains <a,b> --data-dir <folder>
 //!              [--then <address> --then-from <host>] [--done-cookie]
+//!              [--hidden --timeout <seconds>] [--settle <seconds>] [--wait-cookie <name>]
 //!
 //! Done once the window is back on `--done-host` (and still there a moment later). For sites that land you somewhere
 //! else after signing in: `--then-from` — when a page on that host (or under it) loads, go on to `--then` (`{DOMAIN}`
 //! there: that page's host without its first part). `--done-cookie` — also done once `--done-host` has set a new
 //! cookie (for a site shown inside another page, so the window itself never goes there).
+//!
+//! To set a site up rather than sign in (Ford PTS: opening a vehicle in PTS once, so its pages have what they need):
+//! `--hidden` — the window stays out of sight unless a sign-in page comes up (then it shows, to sign in), and gives up
+//! after `--timeout` seconds while it's still hidden. `--settle` — done only once a page on `--done-host` (other than
+//! its /transport hand-over) has been loaded this long. `--wait-cookie` — done only once the site has set a cookie
+//! by this name.
 //!
 //! The hosts and paths it went through (never the rest of the address, nor any cookie) are written to
 //! `signin-log.txt` in `--data-dir`, to see where a sign-in got stuck.
@@ -26,7 +33,7 @@ use serde::Serialize;
 use tao::dpi::LogicalSize;
 use tao::event::{Event, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
-use tao::window::WindowBuilder;
+use tao::window::{Icon, WindowBuilder};
 use wry::{PageLoadEvent, WebContext, WebViewBuilder};
 
 /// Must match `workbench_net::SiteCookie` (the app reads these)
@@ -64,6 +71,10 @@ struct Args {
     then: Option<String>,
     then_from: Option<String>,
     done_cookie: bool,
+    hidden: bool,
+    timeout: Option<Duration>,
+    settle: Option<Duration>,
+    wait_cookie: Option<String>,
 }
 
 fn args() -> Option<Args> {
@@ -82,6 +93,10 @@ fn args() -> Option<Args> {
         then: get("--then"),
         then_from: get("--then-from").map(|h| h.trim_start_matches('.').to_ascii_lowercase()),
         done_cookie: list.iter().any(|a| a == "--done-cookie"),
+        hidden: list.iter().any(|a| a == "--hidden"),
+        timeout: get("--timeout").and_then(|s| s.parse().ok()).map(Duration::from_secs),
+        settle: get("--settle").and_then(|s| s.parse().ok()).map(Duration::from_secs),
+        wait_cookie: get("--wait-cookie"),
     })
 }
 
@@ -221,6 +236,9 @@ fn main() {
     let window = match WindowBuilder::new()
         .with_title(&a.title)
         .with_inner_size(LogicalSize::new(560.0, 760.0))
+        .with_visible(!a.hidden)
+        // the app's icon (assets/icon.svg at 64 px, as plain RGBA so nothing has to read a PNG)
+        .with_window_icon(Icon::from_rgba(include_bytes!("../../../assets/icon-64.rgba").to_vec(), 64, 64).ok())
         .build(&event_loop)
     {
         Ok(w) => w,
@@ -287,12 +305,27 @@ fn main() {
     });
     let mut ready_checks = 0;
     let mut went_on: Option<Instant> = None;
+    let started = Instant::now();
+    let mut hidden = a.hidden;
+    // when a page on the site (not its /transport hand-over) last finished loading
+    let mut site_loaded: Option<Instant> = None;
+    let mut waiting_said = false;
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
         let _keep = (&window, &context); // the window and the web view's profile live as long as the web view
         match event {
             Event::UserEvent(UserEvent::Loaded(url)) => {
                 log.page("loaded", &url);
+                if host_of(&url) == a.done_host && !path_of(&url).starts_with("/transport") {
+                    site_loaded = Some(Instant::now());
+                }
+                // hidden, and sent off the site (to its sign-in) or to a sign-in page: show the window, to sign in
+                if hidden && !url.starts_with("about:") && (host_of(&url) != a.done_host || on_signin_page(&url)) {
+                    hidden = false;
+                    log.page("showing the window to sign in at", &url);
+                    window.set_visible(true);
+                    window.set_focus();
+                }
                 // Landed somewhere else after signing in (Xtime: Scheduling): go on (not more than every 20 s)
                 let go_on = match (&a.then, &a.then_from) {
                     (Some(then), Some(from)) if go_on_from(&url, from) => Some(then_address(then, &url)),
@@ -306,10 +339,34 @@ fn main() {
             }
             Event::UserEvent(UserEvent::Check) => {
                 let here = webview.url().unwrap_or_default();
-                let ready = signed_in(&here, &a.done_host)
+                // still hidden past its time: give up
+                if hidden && a.timeout.is_some_and(|t| started.elapsed() > t) {
+                    log.page("timed out at", &here);
+                    answer(&Answer {
+                        ok: false,
+                        cancelled: false,
+                        error: Some("PTS didn't finish opening the vehicle".into()),
+                        cookies: vec![],
+                    });
+                    *control_flow = ControlFlow::ExitWithCode(2);
+                    return;
+                }
+                let settled = a.settle.is_none_or(|s| site_loaded.is_some_and(|t| t.elapsed() >= s));
+                let has_cookie = a.wait_cookie.as_ref().is_none_or(|name| {
+                    webview.cookies().is_ok_and(|list| {
+                        list.iter()
+                            .any(|c| c.name() == name && c.domain().is_some_and(|d| wanted(d, &a.domains)))
+                    })
+                });
+                let ready = (settled && has_cookie && signed_in(&here, &a.done_host))
                     || (a.done_cookie
                         && !on_signin_page(&here)
                         && done_host_cookies(&webview, &a.done_host).difference(&before).next().is_some());
+                // on the site, but its cookie isn't there yet: say so once (names only)
+                if settled && !has_cookie && signed_in(&here, &a.done_host) && !waiting_said {
+                    waiting_said = true;
+                    log.line(&format!("waiting for the {} cookie", a.wait_cookie.as_deref().unwrap_or("")));
+                }
                 ready_checks = if ready { ready_checks + 1 } else { 0 };
                 if ready_checks < 2 {
                     return;
@@ -332,7 +389,11 @@ fn main() {
                                 })
                             })
                             .collect();
-                        log.line(&format!("handing over {} cookies", cookies.len()));
+                        log.line(&format!(
+                            "handing over {} cookies: {}",
+                            cookies.len(),
+                            cookies.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join(",")
+                        ));
                         answer(&Answer {
                             ok: true,
                             cancelled: false,

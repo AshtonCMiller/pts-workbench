@@ -3,6 +3,7 @@
 //!
 //!   app.rs        state, messages, what each message changes
 //!   clock.rs      the time, for what the app shows
+//!   updates.rs    the app updating itself from GitHub releases (Beta updates too), for the launcher to start
 //!   timecard.rs   your hours (crates/hours) in the app: the file, bringing over the old app's, an RO's lines
 //!   settings.rs   saved settings (first setup asks for the store ID and dealer code)
 //!   signin.rs     signing in to Xtime and Ford PTS (the sign-in window, crates/signin)
@@ -26,12 +27,23 @@ mod signin;
 mod system_theme;
 mod timecard;
 mod ui;
+mod updates;
 mod workspace;
 
 fn main() -> iced::Result {
-    iced::application(app::App::title, app::App::update, app::App::view)
+    let ran = iced::application(app::App::title, app::App::update, app::App::view)
         .theme(app::App::theme)
         .subscription(app::App::subscription)
-        .window_size((1400.0, 900.0))
-        .run_with(app::App::new)
+        .window(iced::window::Settings {
+            size: iced::Size::new(1400.0, 900.0),
+            // the title bar and taskbar (assets/icon.svg drawn at 256 px)
+            icon: iced::window::icon::from_file_data(include_bytes!("../../../assets/icon-256.png"), None).ok(),
+            ..Default::default()
+        })
+        .run_with(app::App::new);
+    // "Restart to update": the launcher starts the new version when the app exits with this
+    match updates::exit_code() {
+        0 => ran,
+        code => std::process::exit(code),
+    }
 }

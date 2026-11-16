@@ -106,18 +106,55 @@ fn encode(s: &str) -> String {
 /// Opens the sign-in window for a site and waits for it. `web_dir`: the web view's own profile folder (keeps
 /// "remember me" and saved passwords between sign-ins). `store`: the Xtime store ID from settings.
 pub async fn run(site: Site, web_dir: PathBuf, store: String) -> Outcome {
+    let mut args = vec![
+        "--title".to_string(),
+        format!("Sign in to {}", site.name()),
+        "--start".into(),
+        site.start().to_string(),
+        "--done-host".into(),
+        site.done_host().to_string(),
+        "--domains".into(),
+        site.cookie_domains().join(","),
+        "--data-dir".into(),
+        web_dir.to_string_lossy().into_owned(),
+    ];
+    args.extend(site.extra_args(&store));
+    window(args).await
+}
+
+/// PTS's vehicle page for a VIN (PTS's own address for opening a vehicle)
+const PTS_VEHICLE: &str = "https://www.fordtechservice.dealerconnection.com/transport?link=704&params={VIN}";
+
+/// Opens a vehicle in PTS once, unseen, so PTS's book pages have what its vehicle page sets up (as the Electron app
+/// did). Done a few seconds after the vehicle page has loaded and set its PTSSession cookie; the window only shows
+/// when PTS asks to sign in first. Its cookies come back as a sign-in's do.
+pub async fn set_up_pts(vin: String, web_dir: PathBuf) -> Outcome {
+    let args = vec![
+        "--title".to_string(),
+        "Opening the vehicle in PTS".into(),
+        "--start".into(),
+        PTS_VEHICLE.replace("{VIN}", &encode(vin.trim())),
+        "--done-host".into(),
+        Site::Ford.done_host().to_string(),
+        "--domains".into(),
+        Site::Ford.cookie_domains().join(","),
+        "--data-dir".into(),
+        web_dir.to_string_lossy().into_owned(),
+        "--hidden".into(),
+        "--timeout".into(),
+        "40".into(),
+        "--settle".into(),
+        "1".into(),
+        "--wait-cookie".into(),
+        "PTSSession".into(),
+    ];
+    window(args).await
+}
+
+/// Runs the sign-in window's program with these arguments and reads its answer
+async fn window(args: Vec<String>) -> Outcome {
     let out = tokio::process::Command::new(program())
-        .arg("--title")
-        .arg(format!("Sign in to {}", site.name()))
-        .arg("--start")
-        .arg(site.start())
-        .arg("--done-host")
-        .arg(site.done_host())
-        .arg("--domains")
-        .arg(site.cookie_domains().join(","))
-        .arg("--data-dir")
-        .arg(&web_dir)
-        .args(site.extra_args(&store))
+        .args(&args)
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .output()

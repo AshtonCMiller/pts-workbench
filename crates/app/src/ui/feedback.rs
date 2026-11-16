@@ -2,8 +2,10 @@
 //! (set status, reply, delete). Its tabs slide like the rest of the app, and their content moves between tabs.
 
 use feedback::{Kind, Report, Status};
-use iced::widget::{Column, button, column, container, horizontal_space, pick_list, row, scrollable, text, text_editor, text_input};
+use iced::widget::{Column, button, column, container, horizontal_space, pick_list, row, text, text_editor, text_input};
+// scrolling that glides (crates/ui-kit)
 use iced::{Alignment, Element, Length};
+use ui_kit::scroll::scrollable;
 
 use super::{anim, pill, style};
 use crate::app::{App, Message};

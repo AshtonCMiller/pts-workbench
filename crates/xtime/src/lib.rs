@@ -5,15 +5,25 @@
 //! |---------------|----------------|---------------------------------------------------------------|
 //! | [`employee`]  | `employee.js`  | your Xtime technician ID from your employee number            |
 //! | [`dashboard`] | `dashboard.js` | your ROs from Xtime's dashboard                               |
-//! | (next)        | `vehicle.js`, `details.js`, `ro.js`, `inspect.js`, `chat.js` |                     |
+//! | [`ro`]        | `ro.js`        | one RO for the Xtime View; marking lines done                 |
+//! | [`inspect`]   | `inspect.js`   | the RO's inspection form: Green / Yellow / Red, values, forms |
+//! | [`service`]   | `inspect.js`   | Add / Edit / Delete Service: the store's services, op codes   |
+//! | [`chat`]      | `chat.js`      | Dealership chat: conversations, messages, unread count        |
+//! | [`xml`]       | `xml.js`       | reading chat's messages (XMPP)                                |
+//! | [`xmpp`]      | `chat.js`      | chat's server: sending messages, marking them read            |
 //!
 //! Each module has a pure part that reads Xtime's answer (tested without Xtime) and a method on [`Xtime`] that asks.
 //! Customer information isn't kept beyond what the app shows, and only on this computer.
 
+pub mod chat;
 pub mod dashboard;
 pub mod employee;
+pub mod inspect;
 mod json;
 pub mod ro;
+pub mod service;
+pub mod xml;
+pub mod xmpp;
 
 use std::sync::{Arc, Mutex};
 
@@ -76,6 +86,10 @@ pub struct Xtime {
     base: Url,
     /// The store's staff list (names for advisor numbers), loaded once; cleared with [`Xtime::reset`]
     staff: Arc<Mutex<Option<Arc<Vec<Value>>>>>,
+    /// What Xtime's scripts hold (the store's data, its forms…), by their address; cleared with [`Xtime::reset`]
+    scripts: Arc<Mutex<std::collections::HashMap<String, Value>>>,
+    /// Chat's token and settings (in memory only); the token is cleared with [`Xtime::reset`]
+    chat: Arc<Mutex<chat::ChatMem>>,
 }
 
 impl Xtime {
@@ -86,6 +100,8 @@ impl Xtime {
             http,
             base,
             staff: Arc::default(),
+            scripts: Arc::default(),
+            chat: Arc::default(),
         })
     }
 
@@ -96,6 +112,8 @@ impl Xtime {
     /// Forget what's remembered (another store, or signed in as someone else)
     pub fn reset(&self) {
         *self.staff.lock().expect("staff lock") = None;
+        self.scripts.lock().expect("scripts lock").clear();
+        self.chat.lock().expect("chat lock").token = None;
     }
 
     /// Xtime's anti-forgery token, sent with every change as X-XSRF-TOKEN (Xtime's page does the same)

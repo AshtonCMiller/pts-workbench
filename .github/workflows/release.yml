@@ -1,19 +1,25 @@
-# Builds PTS Workbench on Windows and publishes it as a GitHub release.
+# Builds PTS Workbench (the Rust app) on Windows and publishes it as a GitHub release.
 #
-#   main branch  → a regular release, whenever package.json has a new version number
+#   main branch  → a regular release, whenever Cargo.toml's [workspace.package] version is new
 #                  (pushes that keep the same version just skip the build). Everyone gets it.
-#   other branch → a BETA release on every push: version like 0.4.1-beta.57, marked "Pre-release"
-#                  on GitHub. Only computers with ⚙ Settings → "Beta updates" turned on install it.
+#   other branch → a BETA release on every push: version like 0.5.1-beta.57, marked "Pre-release" on GitHub.
+#                  Only computers with Settings → "Beta updates" turned on install it.
+#
+# Each release has:
+#   pts-workbench.exe, pts-workbench-app.exe,   the program files, which the new app updates itself with
+#   pts-signin.exe, pdfium.dll, workbench.json  (workbench.json: each one's size and SHA-256; crates/app/src/updates.rs)
+#   PTS-Workbench-Setup-<version>.exe           the installer: per-user, no admin (installer/pts-workbench.nsi)
+#   app-bundle.asar, app-bundle.json,           for computers still on the Electron app: its usual update files, so
+#   latest.yml, beta.yml                        it moves itself over to the new app (handoff/, scripts/release-files.js)
 name: Build and release
 
 on:
   push:
-    branches-ignore:
-      - 'rust-rewrite'
+    branches: ['**']
   workflow_dispatch: # "Run workflow" button on GitHub, for a manual retry
 
 permissions:
-  contents: write # create releases and upload the installers
+  contents: write # create releases and upload the files
 
 concurrency:
   group: release-${{ github.ref }}
@@ -22,13 +28,8 @@ concurrency:
 jobs:
   release:
     runs-on: windows-latest
-    # Code signing (Microsoft Artifact Signing — see README "Code signing"). Until the secrets / variables below are
-    # set up, builds are made unsigned exactly as before. The three AZURE_* values are read by Microsoft's signing tool.
     env:
-      SIGNING: ${{ secrets.AZURE_CLIENT_SECRET != '' && vars.AZURE_SIGN_ACCOUNT != '' }}
-      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-      AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+      CARGO_TERM_COLOR: always
     steps:
       - uses: actions/checkout@v4
 
@@ -38,209 +39,153 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          BASE="$(node -p "require('./package.json').version")"
+          BASE="$(sed -n '/^\[workspace.package\]/,/^\[/ s/^version *= *"\([^"]*\)".*/\1/p' Cargo.toml | head -n 1)"
+          BASE="${BASE%%-*}"
+          if [ -z "$BASE" ]; then echo "::error::No version in Cargo.toml's [workspace.package]"; exit 1; fi
           if [ "${{ github.ref_name }}" = "main" ]; then
-            echo "number=$BASE" >> "$GITHUB_OUTPUT"
+            NUMBER="$BASE"
             echo "beta=false" >> "$GITHUB_OUTPUT"
             if gh release view "v$BASE" > /dev/null 2>&1; then
               echo "exists=true" >> "$GITHUB_OUTPUT"
-              echo "::notice::v$BASE is already released. Raise the version in package.json to publish a new one."
+              echo "::notice::v$BASE is already released. Raise the version in Cargo.toml to publish a new one."
             else
               echo "exists=false" >> "$GITHUB_OUTPUT"
             fi
           else
             # A beta must count as newer than the regular version it's based on:
-            # if v$BASE is already out, the beta is for the next patch (0.4.0 out → 0.4.1-beta.N)
+            # if v$BASE is already out, the beta is for the next patch (0.5.0 out → 0.5.1-beta.N)
             if gh release view "v$BASE" > /dev/null 2>&1; then
-              BASE="$(node -p "const [a,b,c]=require('./package.json').version.split('-')[0].split('.').map(Number); [a,b,c+1].join('.')")"
+              IFS=. read -r MAJ MIN PAT <<< "$BASE"
+              BASE="$MAJ.$MIN.$((PAT + 1))"
             fi
             NUMBER="$BASE-beta.${{ github.run_number }}"
-            echo "number=$NUMBER" >> "$GITHUB_OUTPUT"
             echo "beta=true" >> "$GITHUB_OUTPUT"
             echo "exists=false" >> "$GITHUB_OUTPUT"
             echo "::notice::Beta build v$NUMBER from branch ${{ github.ref_name }}"
           fi
+          echo "number=$NUMBER" >> "$GITHUB_OUTPUT"
+          echo "numeric=$BASE" >> "$GITHUB_OUTPUT"
+
+      # Only for this build (not committed): the version every crate (and so the launcher and the app) is built with
+      - name: Set the version v${{ steps.version.outputs.number }}
+        if: steps.version.outputs.exists == 'false'
+        shell: bash
+        run: |
+          sed -i '/^\[workspace.package\]/,/^\[/ s/^version *= *"[^"]*"/version = "${{ steps.version.outputs.number }}"/' Cargo.toml
+          grep -A3 '^\[workspace.package\]' Cargo.toml
+
+      - name: Set up Rust
+        if: steps.version.outputs.exists == 'false'
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustc --version
+
+      # Compiled crates (and PDFium's download, beside the app) kept between builds: much quicker
+      - uses: Swatinem/rust-cache@v2
+        if: steps.version.outputs.exists == 'false'
+
+      - name: Build
+        if: steps.version.outputs.exists == 'false'
+        shell: bash
+        run: cargo build --workspace --release
+
+      # A failing test is reported, but doesn't hold the build back
+      - name: Test
+        if: steps.version.outputs.exists == 'false'
+        continue-on-error: true
+        shell: bash
+        run: cargo test --workspace --release
+
+      - name: Gather the program files
+        if: steps.version.outputs.exists == 'false'
+        shell: bash
+        run: |
+          mkdir -p dist/app
+          for f in pts-workbench.exe pts-workbench-app.exe pts-signin.exe pdfium.dll; do
+            if [ ! -f "target/release/$f" ]; then echo "::error::target/release/$f wasn't built"; exit 1; fi
+            cp "target/release/$f" dist/app/
+          done
+          ls -la dist/app
+
+      - name: Make the installer
+        if: steps.version.outputs.exists == 'false'
+        shell: bash
+        run: |
+          MAKENSIS="/c/Program Files (x86)/NSIS/makensis.exe"
+          if [ ! -f "$MAKENSIS" ]; then
+            choco install nsis -y --no-progress
+          fi
+          "$MAKENSIS" -V3 \
+            "-DVERSION=${{ steps.version.outputs.number }}" \
+            "-DNUMVER=${{ steps.version.outputs.numeric }}" \
+            "-DSRC=$(cygpath -w "$PWD/dist/app")" \
+            "-DICON=$(cygpath -w "$PWD/assets/icon.ico")" \
+            "-DOUT=$(cygpath -w "$PWD/dist/PTS-Workbench-Setup-${{ steps.version.outputs.number }}.exe")" \
+            installer/pts-workbench.nsi
 
       - uses: actions/setup-node@v4
         if: steps.version.outputs.exists == 'false'
         with:
           node-version: 20
 
-      # Electron and electron-builder's helper tools are downloaded from GitHub on every build;
-      # keeping them between builds avoids failures when those downloads time out (e.g. HTTP 504)
-      - name: Reuse downloaded build tools
-        if: steps.version.outputs.exists == 'false'
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~\AppData\Local\electron\Cache
-            ~\AppData\Local\electron-builder\Cache
-          key: build-tools-${{ runner.os }}-${{ hashFiles('package.json') }}
-          restore-keys: build-tools-${{ runner.os }}-
-
-      - name: Install
+      - name: Make the update files
         if: steps.version.outputs.exists == 'false'
         shell: bash
         env:
-          # The electron package would download Electron here just to run it locally; the build gets its own copy
-          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
-        run: |
-          for try in 1 2 3; do
-            npm install --no-audit --no-fund && exit 0
-            echo "::warning::Install attempt $try failed (often a download timeout); trying again in 30 s"
-            rm -rf node_modules
-            sleep 30
-          done
-          exit 1
+          VERSION: ${{ steps.version.outputs.number }}
+          TAG: v${{ steps.version.outputs.number }}
+          REPO: ${{ github.repository }}
+        run: node scripts/release-files.js
 
-      # Signing set up: tell electron-builder to sign the app and installers with Artifact Signing.
-      # (Only for this build — not committed. Updates then check that each new version is signed by the same publisher.)
-      - name: Turn on code signing
-        if: steps.version.outputs.exists == 'false' && env.SIGNING == 'true'
-        shell: bash
-        env:
-          SIGN_ENDPOINT: ${{ vars.AZURE_SIGN_ENDPOINT }}
-          SIGN_ACCOUNT: ${{ vars.AZURE_SIGN_ACCOUNT }}
-          SIGN_PROFILE: ${{ vars.AZURE_SIGN_PROFILE }}
-          SIGN_PUBLISHER: ${{ vars.AZURE_SIGN_PUBLISHER }}
-        run: |
-          node -e "
-            const fs = require('fs');
-            const p = JSON.parse(fs.readFileSync('package.json', 'utf8'));
-            p.build.win.signAndEditExecutable = true;
-            p.build.win.azureSignOptions = {
-              publisherName: process.env.SIGN_PUBLISHER,
-              endpoint: process.env.SIGN_ENDPOINT,
-              codeSigningAccountName: process.env.SIGN_ACCOUNT,
-              certificateProfileName: process.env.SIGN_PROFILE,
-            };
-            fs.writeFileSync('package.json', JSON.stringify(p, null, 2));"
-          echo "::notice::Signing as \"$SIGN_PUBLISHER\" with Artifact Signing account $SIGN_ACCOUNT"
-
-      - name: Building unsigned
-        if: steps.version.outputs.exists == 'false' && env.SIGNING != 'true'
-        shell: bash
-        run: echo "::warning::Code signing isn't set up yet, so this build is unsigned (Windows may warn about it). See README → Code signing."
-
-      # ---------- regular release (main) ----------
-      - name: Build and publish release v${{ steps.version.outputs.number }}
-        if: steps.version.outputs.exists == 'false' && steps.version.outputs.beta == 'false'
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        # Owner, repository and "publish as a real release, not a draft" all come from package.json.
-        # (Overriding them here on the command line can replace the whole setting and make a draft.)
-        run: |
-          for try in 1 2 3; do
-            # From the 2nd try on, download build tools from a mirror if GitHub isn't serving them
-            if [ "$try" -gt 1 ]; then
-              export ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-binaries/
-              export ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/
-            fi
-            npx electron-builder --win nsis portable --publish always && exit 0
-            echo "::warning::Build attempt $try failed (often a download timeout); trying again in 60 s"
-            sleep 60
-          done
-          exit 1
-
-      # Quick updates: the app's own files as one download, so installed apps update without running an installer
-      - name: Upload the app files (quick update)
-        if: steps.version.outputs.exists == 'false' && steps.version.outputs.beta == 'false'
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          node scripts/make-bundle.js
-          gh release upload "v${{ steps.version.outputs.number }}" dist/app-bundle.asar dist/app-bundle.json --clobber
-
-      # ---------- beta release (any other branch) ----------
-      - name: Set the beta version
-        if: steps.version.outputs.beta == 'true'
-        shell: bash
-        # Only for this build (not committed): the beta version number, and upload into the draft made below
-        run: |
-          node -e "
-            const fs = require('fs');
-            const p = JSON.parse(fs.readFileSync('package.json', 'utf8'));
-            p.version = '${{ steps.version.outputs.number }}';
-            p.build.publish.releaseType = 'draft';
-            p.build.publish.channel = 'beta';
-            fs.writeFileSync('package.json', JSON.stringify(p, null, 2));"
-
-      - name: Create the beta release (draft until the installer is uploaded)
-        if: steps.version.outputs.beta == 'true'
+      # A draft until every file is up, so nothing finds a release that's half there
+      - name: Create the release (a draft for now)
+        if: steps.version.outputs.exists == 'false'
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         # (a re-run of a failed build reuses the draft it already made)
         run: |
-          gh release view "v${{ steps.version.outputs.number }}" > /dev/null 2>&1 && exit 0
-          gh release create "v${{ steps.version.outputs.number }}" --draft --prerelease \
-            --target "${{ github.sha }}" \
-            --title "v${{ steps.version.outputs.number }} (beta)" \
-            --notes "Beta build from branch \`${{ github.ref_name }}\` (${{ github.sha }}). Installed only by computers with **Beta updates** turned on in Settings."
+          TAG="v${{ steps.version.outputs.number }}"
+          gh release view "$TAG" > /dev/null 2>&1 && exit 0
+          if [ "${{ steps.version.outputs.beta }}" = "true" ]; then
+            gh release create "$TAG" --draft --prerelease --target "${{ github.sha }}" \
+              --title "$TAG (beta)" \
+              --notes "Beta build from branch \`${{ github.ref_name }}\` (${{ github.sha }}). Installed only by computers with **Beta updates** turned on in Settings. New computers: download **PTS-Workbench-Setup-${{ steps.version.outputs.number }}.exe** and run it (no admin needed)."
+          else
+            gh release create "$TAG" --draft --target "${{ github.sha }}" \
+              --title "$TAG" \
+              --notes "New computers: download **PTS-Workbench-Setup-${{ steps.version.outputs.number }}.exe** and run it (no admin needed). Computers with PTS Workbench already update by themselves."
+          fi
 
-      - name: Build and upload beta v${{ steps.version.outputs.number }}
-        if: steps.version.outputs.beta == 'true'
+      - name: Upload the files
+        if: steps.version.outputs.exists == 'false'
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          for try in 1 2 3; do
-            # From the 2nd try on, download build tools from a mirror if GitHub isn't serving them
-            if [ "$try" -gt 1 ]; then
-              export ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-binaries/
-              export ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/
-            fi
-            npx electron-builder --win nsis --publish always && exit 0
-            echo "::warning::Build attempt $try failed (often a download timeout); trying again in 60 s"
-            sleep 60
-          done
-          exit 1
-
-      - name: Make sure the beta has both update files
-        if: steps.version.outputs.beta == 'true'
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        # Beta computers read beta.yml; latest.yml is a harmless spare (regular computers never look at pre-releases)
         run: |
           cd dist
-          [ -f beta.yml ] || cp latest.yml beta.yml
-          [ -f latest.yml ] || cp beta.yml latest.yml
-          gh release upload "v${{ steps.version.outputs.number }}" beta.yml latest.yml --clobber
+          gh release upload "v${{ steps.version.outputs.number }}" --clobber \
+            app/pts-workbench.exe app/pts-workbench-app.exe app/pts-signin.exe app/pdfium.dll \
+            "PTS-Workbench-Setup-${{ steps.version.outputs.number }}.exe" \
+            app-bundle.asar app-bundle.json latest.yml beta.yml workbench.json
 
-      - name: Upload the beta's app files (quick update)
-        if: steps.version.outputs.beta == 'true'
+      - name: Publish the release
+        if: steps.version.outputs.exists == 'false'
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          node scripts/make-bundle.js
-          gh release upload "v${{ steps.version.outputs.number }}" dist/app-bundle.asar dist/app-bundle.json --clobber
+          if [ "${{ steps.version.outputs.beta }}" = "true" ]; then
+            gh release edit "v${{ steps.version.outputs.number }}" --draft=false --prerelease
+          else
+            gh release edit "v${{ steps.version.outputs.number }}" --draft=false --latest
+          fi
 
-      - name: Check the signatures
-        if: steps.version.outputs.exists == 'false' && env.SIGNING == 'true'
-        shell: pwsh
-        run: |
-          $bad = 0
-          Get-ChildItem dist -Filter *.exe | ForEach-Object {
-            $sig = Get-AuthenticodeSignature $_.FullName
-            Write-Host "$($_.Name): $($sig.Status) — $($sig.SignerCertificate.Subject)"
-            if ($sig.Status -ne 'Valid') { $bad++ }
-          }
-          if ($bad) { Write-Host "::error::$bad installer(s) aren't signed"; exit 1 }
-
-      - name: Publish the beta release
-        if: steps.version.outputs.beta == 'true'
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release edit "v${{ steps.version.outputs.number }}" --draft=false --prerelease
-
-      # A beta that couldn't be built: remove its empty draft so it doesn't pile up (nothing installs drafts)
-      - name: Clean up a failed beta
-        if: failure() && steps.version.outputs.beta == 'true'
+      # A release that couldn't be finished: its draft goes, so drafts don't pile up (nothing installs drafts)
+      - name: Clean up a failed release
+        if: failure() && steps.version.outputs.exists == 'false'
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

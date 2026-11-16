@@ -81,6 +81,15 @@ pub struct Line {
     pub group_id: Option<Value>,
     /// The line letter ("A", "B"…)
     pub dms: String,
+    /// For editing it (Xtime's Add Service window starts from these): its service, Xtime's name for it, the details
+    /// ("Front brakes"), the labor type's ID, the CDK op code, its colour
+    pub sgcid: Option<Value>,
+    pub sgid: Option<Value>,
+    pub service_name: String,
+    pub details: String,
+    pub pay_type_id: Option<Value>,
+    pub op_code_dms: String,
+    pub color: String,
     pub name: String,
     pub op_code: String,
     /// A customer concern (no approve / decline: only recommendations have those)
@@ -411,6 +420,17 @@ fn line_of(l: &Value) -> Line {
         parent_id: opt("ParentLineId"),
         group_id: get(l, "GroupID").filter(|v| truthy(Some(v))).cloned(),
         dms: field(l, "DMSNumber"),
+        sgcid: opt("SGCID"),
+        sgid: opt("SGID"),
+        service_name: service.clone(),
+        details: field(l, "ServiceGuideSpecialItemName"),
+        pay_type_id: get(l, "PayTypeCode")
+            .filter(|p| p.is_object())
+            .and_then(|p| get(p, "ID"))
+            .filter(|v| !v.is_null())
+            .cloned(),
+        op_code_dms: op_dms.clone(),
+        color: field(l, "Color"),
         name,
         op_code: if op_dms.is_empty() { field(l, "OpCode") } else { op_dms },
         primary: yes(l, "IsPrimary"),
@@ -558,7 +578,9 @@ pub fn parse_view(data: &Value, staff: &[Value]) -> Result<RoView> {
 // ---------- asking Xtime ----------
 
 impl Xtime {
-    async fn ro_call(&self, method: Method, path: &str, body: Option<Value>) -> Result<Value> {
+    /// A call to one of Xtime's addresses, as its RO page makes it (JSON both ways). A refusal comes back with
+    /// Xtime's own reason when it gives one (ExceptionMessage / Message).
+    pub(crate) async fn ro_call(&self, method: Method, path: &str, body: Option<Value>) -> Result<Value> {
         let mut req = self.request(method, path)?.header("Accept", "application/json, text/plain, */*");
         if let Some(b) = body {
             req = req.header("Content-Type", "application/json;charset=UTF-8").body(b.to_string());
@@ -568,7 +590,15 @@ impl Xtime {
             return Err(Error::SessionExpired);
         }
         if !res.ok() {
-            return Err(Error::Status(res.status.as_u16()));
+            let why = serde_json::from_str::<Value>(&res.body).ok().and_then(|b| {
+                ["ExceptionMessage", "Message", "message"]
+                    .iter()
+                    .find_map(|k| b.get(*k).and_then(Value::as_str).map(str::to_string))
+            });
+            return Err(match why {
+                Some(w) if !w.trim().is_empty() => Error::Format(w),
+                _ => Error::Status(res.status.as_u16()),
+            });
         }
         Ok(if res.is_json() {
             res.json().unwrap_or(Value::Null)

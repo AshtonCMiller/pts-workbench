@@ -11,11 +11,23 @@ use iced::widget::{Column, Row, Space, button, checkbox, column, container, hori
 use iced::{Alignment, Color, Element, Length};
 use xtime::ro::{self, Line, RoView, Sections};
 
-use super::{anim, pill, style};
-use crate::app::{App, Message};
-use crate::ros::{self, LoadError};
-use crate::timecard;
-use crate::workspace::{Workspace, XtimeView};
+use ui_kit::{anim, pill, style};
+
+use crate::{Ask, LoadError, Msg, XtimeView};
+
+/// What the Xtime View shows from the rest of the app
+pub struct Shown {
+    /// The time (seconds since 1970), for "Updated 2 min ago"
+    pub now: i64,
+    /// By Xtime's line ID: the lines that count toward your hours, and the hours flagged when they're flagged
+    pub flags: HashMap<String, Option<f64>>,
+    /// The RO's spiff, when it's been turned in: what it came to
+    pub spiffed: Option<f64>,
+    /// Nothing's printing (Print Spiff can be pressed)
+    pub can_print: bool,
+    /// No Add / Edit Service window is up
+    pub can_add_service: bool,
+}
 
 fn money(n: Option<f64>) -> String {
     n.map(|n| format!("${n:.2}")).unwrap_or_default()
@@ -42,25 +54,25 @@ fn color(c: [u8; 3]) -> Color {
 }
 
 /// What a line card needs besides the line: the tab's state, and the line's flag (your hours)
-struct Ctx<'a> {
+struct Ctx<'a, 'b> {
     xv: &'a XtimeView,
-    /// By Xtime's line ID: lines that count toward your hours, and the hours flagged when they're flagged
-    flags: HashMap<String, Option<f64>>,
+    flags: &'b HashMap<String, Option<f64>>,
 }
 
-pub fn view<'a>(app: &'a App, ws: &'a Workspace) -> Element<'a, Message> {
-    let xv = &ws.xv;
+pub fn view<'a>(xv: &'a XtimeView, shown: &Shown) -> Element<'a, Msg> {
     let Some(v) = &xv.view else {
-        return first_read(ws, xv);
+        return first_read(xv);
     };
-    let flags = timecard::lines_of(v)
-        .into_iter()
-        .filter(|(_, l)| l.counts())
-        .map(|(id, l)| (id, app.hours.flag_for(&v.ro, &l.key).map(|f| f.hours)))
-        .collect();
-    let cx = Ctx { xv, flags };
+    let cx = Ctx { xv, flags: &shown.flags };
     let sections = v.sections();
-    let mut page = column![header(app, ws, v), top_cards(v)].spacing(12);
+    // Add Service: Xtime's Add Service window
+    let toolbar = row![
+        button(text("Add Service").size(13).font(style::BOLD))
+            .padding([6, 14])
+            .style(button::primary)
+            .on_press_maybe(shown.can_add_service.then_some(Msg::Ask(Ask::AddService(None)))),
+    ];
+    let mut page = column![header(xv, shown, v), top_cards(v), toolbar].spacing(12);
     if let Some(e) = &xv.error {
         page = page.push(
             text(format!("Couldn't refresh: {}", e.text().trim_start_matches("Xtime: ")))
@@ -84,13 +96,13 @@ pub fn view<'a>(app: &'a App, ws: &'a Workspace) -> Element<'a, Message> {
         page = page.push(empty_card("No lines on this RO yet."));
     }
     page = page.push(inspection(&cx, v, &sections));
+    page = page.push(crate::inspection::section(xv));
     page.into()
 }
 
 /// Before the RO has been read: reading, or why it couldn't be
-fn first_read<'a>(ws: &'a Workspace, xv: &'a XtimeView) -> Element<'a, Message> {
-    let ro = ws.ro.ro.clone();
-    let body: Element<'a, Message> = match &xv.error {
+fn first_read(xv: &XtimeView) -> Element<'_, Msg> {
+    let body: Element<'_, Msg> = match &xv.error {
         None => text("Reading this RO from Xtime…").style(style::muted).into(),
         Some(e) => {
             let (title, about) = match e {
@@ -106,7 +118,7 @@ fn first_read<'a>(ws: &'a Workspace, xv: &'a XtimeView) -> Element<'a, Message> 
                 button(text("Try again").font(style::BOLD))
                     .padding([6, 14])
                     .style(button::primary)
-                    .on_press_maybe((!xv.loading).then(|| Message::LoadView(ro, true))),
+                    .on_press_maybe((!xv.loading).then_some(Msg::Load(true))),
             ]
             .spacing(8)
             .into()
@@ -115,8 +127,7 @@ fn first_read<'a>(ws: &'a Workspace, xv: &'a XtimeView) -> Element<'a, Message> 
     container(body).padding(16).width(Length::Fill).style(style::card).into()
 }
 
-fn header<'a>(app: &'a App, ws: &'a Workspace, v: &'a RoView) -> Element<'a, Message> {
-    let xv = &ws.xv;
+fn header<'a>(xv: &'a XtimeView, shown: &Shown, v: &'a RoView) -> Element<'a, Msg> {
     let title = if v.tag.is_empty() {
         format!("RO {}", v.ro)
     } else {
@@ -152,23 +163,23 @@ fn header<'a>(app: &'a App, ws: &'a Workspace, v: &'a RoView) -> Element<'a, Mes
     }
     let updated = match (xv.loading, xv.at) {
         (true, _) => "Reading…".to_string(),
-        (false, Some(at)) => format!("Updated {}", ros::ago(app.now - at)),
+        (false, Some(at)) => format!("Updated {}", crate::ago(shown.now - at)),
         (false, None) => String::new(),
     };
     // the spiff: approved recommendations over $150 can be printed and turned in
     let total = v.spiff_total();
-    let spiff: Element<'a, Message> = if let Some(done) = app.hours.spiffed(&v.ro) {
+    let spiff: Element<'a, Msg> = if let Some(done) = shown.spiffed {
         // turned in already: say so (with what it came to then); it can be printed again, or unmarked
         row![
-            pill(format!("Spiffed · {}", money(Some(done.total))), GREEN),
+            pill(format!("Spiffed · {}", money(Some(done))), GREEN),
             button(text("Print again").size(13))
                 .padding([5, 10])
                 .style(style::ghost)
-                .on_press_maybe((v.spiff_earned() && app.print_job.is_none()).then_some(Message::PrintSpiff)),
+                .on_press_maybe((v.spiff_earned() && shown.can_print).then_some(Msg::Ask(Ask::PrintSpiff))),
             button(text("Unmark").size(13))
                 .padding([5, 10])
                 .style(style::ghost)
-                .on_press(Message::MarkSpiffed(v.ro.clone(), false)),
+                .on_press(Msg::Ask(Ask::MarkSpiffed(false))),
         ]
         .spacing(6)
         .align_y(Alignment::Center)
@@ -182,11 +193,11 @@ fn header<'a>(app: &'a App, ws: &'a Workspace, v: &'a RoView) -> Element<'a, Mes
             button(text("Print Spiff").size(13).font(style::BOLD))
                 .padding([5, 12])
                 .style(button::success)
-                .on_press_maybe((app.print_job.is_none()).then_some(Message::PrintSpiff)),
+                .on_press_maybe(shown.can_print.then_some(Msg::Ask(Ask::PrintSpiff))),
             button(text("Mark spiffed").size(13))
                 .padding([5, 10])
                 .style(style::ghost)
-                .on_press(Message::MarkSpiffed(v.ro.clone(), true)),
+                .on_press(Msg::Ask(Ask::MarkSpiffed(true))),
         ]
         .spacing(8)
         .align_y(Alignment::Center)
@@ -212,7 +223,7 @@ fn header<'a>(app: &'a App, ws: &'a Workspace, v: &'a RoView) -> Element<'a, Mes
             button(text("Refresh").size(13))
                 .padding([5, 12])
                 .style(style::ghost)
-                .on_press_maybe((!xv.loading).then(|| Message::LoadView(ws.ro.ro.clone(), true))),
+                .on_press_maybe((!xv.loading).then_some(Msg::Load(true))),
         ]
         .spacing(10)
         .align_y(Alignment::Center),
@@ -224,12 +235,12 @@ fn header<'a>(app: &'a App, ws: &'a Workspace, v: &'a RoView) -> Element<'a, Mes
 }
 
 /// One label / value line of a card; `copy`: click the value to copy it (named for the notice)
-fn fact<'a>(label: &'a str, value: String, copy: Option<&'a str>) -> Element<'a, Message> {
-    let shown: Element<'a, Message> = match copy {
+fn fact<'a>(label: &'a str, value: String, copy: Option<&'a str>) -> Element<'a, Msg> {
+    let shown: Element<'a, Msg> = match copy {
         Some(what) if !value.is_empty() => button(text(value.clone()).font(style::MONO).size(13))
             .padding([1, 6])
             .style(style::ghost)
-            .on_press(Message::Copy(value, what.to_string()))
+            .on_press(Msg::Ask(Ask::Copy(value, what.to_string())))
             .into(),
         _ if value.is_empty() => text("—").style(style::muted).into(),
         _ => text(value).into(),
@@ -240,7 +251,7 @@ fn fact<'a>(label: &'a str, value: String, copy: Option<&'a str>) -> Element<'a,
         .into()
 }
 
-fn card_of<'a>(title: &'a str, rows: Vec<Element<'a, Message>>) -> Element<'a, Message> {
+fn card_of<'a>(title: &'a str, rows: Vec<Element<'a, Msg>>) -> Element<'a, Msg> {
     container(column![text(title).size(16).font(style::BOLD), Column::with_children(rows).spacing(6)].spacing(10))
         .padding(14)
         .width(Length::Fill)
@@ -249,7 +260,7 @@ fn card_of<'a>(title: &'a str, rows: Vec<Element<'a, Message>>) -> Element<'a, M
 }
 
 /// Service Details and Vehicle Info, side by side
-fn top_cards(v: &RoView) -> Element<'_, Message> {
+fn top_cards(v: &RoView) -> Element<'_, Msg> {
     let (p_date, p_time) = ro::promised(&v.promised_date, &v.promised_time);
     let mut flags = Row::new().spacing(4);
     let mut any = false;
@@ -268,7 +279,7 @@ fn top_cards(v: &RoView) -> Element<'_, Message> {
         flags = flags.push(pill(f.as_str(), GREY));
         any = true;
     }
-    let flags_row: Element<'_, Message> = row![
+    let flags_row: Element<'_, Msg> = row![
         text("Flags").width(130).style(style::muted),
         if any {
             flags.into()
@@ -326,7 +337,7 @@ fn thousands(n: f64) -> String {
     format!("{sign}{out}")
 }
 
-fn empty_card<'a>(msg: &'a str) -> Element<'a, Message> {
+fn empty_card<'a>(msg: &'a str) -> Element<'a, Msg> {
     container(text(msg).style(style::muted))
         .padding(14)
         .width(Length::Fill)
@@ -335,7 +346,7 @@ fn empty_card<'a>(msg: &'a str) -> Element<'a, Message> {
 }
 
 /// A section's title, its count, and what's approved in it (recommendations only)
-fn section_head<'a>(title: &'a str, count: usize, approved: &[&Line]) -> Row<'a, Message> {
+fn section_head<'a>(title: &'a str, count: usize, approved: &[&Line]) -> Row<'a, Msg> {
     let mut h = row![text(title).size(16).font(style::BOLD), pill(count.to_string(), GREY)]
         .spacing(8)
         .align_y(Alignment::Center);
@@ -357,7 +368,7 @@ fn section_head<'a>(title: &'a str, count: usize, approved: &[&Line]) -> Row<'a,
 }
 
 /// Lines with the recommendations under each (indexes into the RO's lines)
-fn section<'a>(cx: &Ctx<'a>, title: &'a str, groups: Vec<(usize, Vec<usize>)>, v: &'a RoView) -> Element<'a, Message> {
+fn section<'a>(cx: &Ctx<'a, '_>, title: &'a str, groups: Vec<(usize, Vec<usize>)>, v: &'a RoView) -> Element<'a, Msg> {
     if groups.is_empty() {
         return Space::with_height(0).into();
     }
@@ -374,7 +385,7 @@ fn section<'a>(cx: &Ctx<'a>, title: &'a str, groups: Vec<(usize, Vec<usize>)>, v
     list.into()
 }
 
-fn inspection<'a>(cx: &Ctx<'a>, v: &'a RoView, s: &Sections) -> Element<'a, Message> {
+fn inspection<'a>(cx: &Ctx<'a, '_>, v: &'a RoView, s: &Sections) -> Element<'a, Msg> {
     let xv = cx.xv;
     if s.inspection.is_empty() {
         return Space::with_height(0).into();
@@ -385,7 +396,7 @@ fn inspection<'a>(cx: &Ctx<'a>, v: &'a RoView, s: &Sections) -> Element<'a, Mess
             button(text(if xv.show_inspection { "Hide" } else { "Show" }).size(13))
                 .padding([4, 12])
                 .style(style::ghost)
-                .on_press(Message::ToggleInspection),
+                .on_press(Msg::ToggleInspection),
         );
     let mut list = column![head].spacing(8);
     if xv.show_inspection {
@@ -403,7 +414,7 @@ fn inspection<'a>(cx: &Ctx<'a>, v: &'a RoView, s: &Sections) -> Element<'a, Mess
 }
 
 /// A line: its head (click to open), what's under it when open, and the recommendations added under it
-fn line_card<'a>(cx: &Ctx<'a>, l: &'a Line, children: Vec<&'a Line>) -> Element<'a, Message> {
+fn line_card<'a>(cx: &Ctx<'a, '_>, l: &'a Line, children: Vec<&'a Line>) -> Element<'a, Msg> {
     let xv = cx.xv;
     let key = l.key();
     let opened = xv.open.get(&key).copied();
@@ -450,31 +461,31 @@ fn line_card<'a>(cx: &Ctx<'a>, l: &'a Line, children: Vec<&'a Line>) -> Element<
         .width(Length::Fill)
         .padding([8, 10])
         .style(style::list_item(false))
-        .on_press(Message::ToggleLine(key.clone()));
+        .on_press(Msg::ToggleLine(key.clone()));
     // Done: changes the line in Xtime. Only for work that can be done (not declined, not waiting on approval); the
     // space stays so the prices still line up. Not while the last change is on its way.
     let done_key = key.clone();
-    let done: Element<'a, Message> = if l.can_be_done() {
+    let done: Element<'a, Msg> = if l.can_be_done() {
         checkbox("Done", l.completed)
             .size(16)
             .text_size(13)
-            .on_toggle_maybe((!busy).then(|| move |on| Message::SetDone(done_key.clone(), on)))
+            .on_toggle_maybe((!busy).then(|| move |on| Msg::SetDone(done_key.clone(), on)))
             .into()
     } else {
         Space::with_width(DONE_WIDTH).into()
     };
     let done = container(done).width(DONE_WIDTH);
     // Flag: the line's hours go on your hours report (only lines that count: approved, a concern, or done)
-    let flag: Element<'a, Message> = match cx.flags.get(&key) {
+    let flag: Element<'a, Msg> = match cx.flags.get(&key) {
         Some(Some(h)) => button(text(format!("Flagged {}", hours(Some(*h)))).size(12).font(style::BOLD))
             .padding([4, 10])
             .style(button::success)
-            .on_press(Message::FlagLine(key.clone(), false))
+            .on_press(Msg::Ask(Ask::Flag(key.clone(), false)))
             .into(),
         Some(None) => button(text("Flag").size(12))
             .padding([4, 10])
             .style(style::ghost)
-            .on_press(Message::FlagLine(key.clone(), true))
+            .on_press(Msg::Ask(Ask::Flag(key.clone(), true)))
             .into(),
         None => Space::with_width(0).into(),
     };
@@ -488,7 +499,38 @@ fn line_card<'a>(cx: &Ctx<'a>, l: &'a Line, children: Vec<&'a Line>) -> Element<
     .spacing(0);
 
     if let Some(at) = opened {
-        card = card.push(anim::page(line_body(l), anim::Phase::Entering(at)).on_card());
+        // Edit (Xtime's Add Service window, filled in from the line); Delete for recommendations (press twice)
+        let mut actions = row![
+            horizontal_space(),
+            button(text("Edit service").size(12))
+                .padding([4, 10])
+                .style(style::ghost)
+                .on_press_maybe((!busy).then(|| Msg::Ask(Ask::EditService(key.clone())))),
+        ]
+        .spacing(8);
+        if !l.primary {
+            let asking = xv.deleting.as_deref() == Some(key.as_str());
+            actions = actions.push(
+                button(text(if asking { "Delete? Press again" } else { "Delete service" }).size(12))
+                    .padding([4, 10])
+                    .style(if asking {
+                        button::danger as fn(&iced::Theme, button::Status) -> button::Style
+                    } else {
+                        style::ghost
+                    })
+                    .on_press_maybe((!busy).then(|| Msg::DeleteLine(key.clone()))),
+            );
+        }
+        let body = column![
+            line_body(l),
+            container(actions).padding(iced::Padding {
+                top: 0.0,
+                right: 14.0,
+                bottom: 10.0,
+                left: 48.0,
+            })
+        ];
+        card = card.push(anim::page(body, anim::Phase::Entering(at)).on_card());
     }
     if !children.is_empty() {
         let label = if l.dms.is_empty() {
@@ -520,7 +562,7 @@ fn line_card<'a>(cx: &Ctx<'a>, l: &'a Line, children: Vec<&'a Line>) -> Element<
 }
 
 /// A label over its text (Concern, Cause…)
-fn labeled<'a>(k: &'a str, v: String) -> Element<'a, Message> {
+fn labeled<'a>(k: &'a str, v: String) -> Element<'a, Msg> {
     column![text(k).size(12).font(style::BOLD).style(style::muted), text(v)]
         .spacing(2)
         .into()
@@ -529,7 +571,7 @@ fn labeled<'a>(k: &'a str, v: String) -> Element<'a, Message> {
 /// The parts table's column widths (0: the rest)
 const PART_COLS: [f32; 5] = [150.0, 0.0, 50.0, 160.0, 80.0];
 
-fn cell(e: Element<'_, Message>, i: usize) -> Element<'_, Message> {
+fn cell(e: Element<'_, Msg>, i: usize) -> Element<'_, Msg> {
     let width = if PART_COLS[i] == 0.0 {
         Length::Fill
     } else {
@@ -539,7 +581,7 @@ fn cell(e: Element<'_, Message>, i: usize) -> Element<'_, Message> {
 }
 
 /// What's under a line when it's open: concern, cause, correction, notes, parts, and the rest in one line
-fn line_body(l: &Line) -> Element<'_, Message> {
+fn line_body(l: &Line) -> Element<'_, Msg> {
     let mut body = column![].spacing(8);
     for (k, v) in [
         ("Concern", &l.concern),
@@ -565,13 +607,13 @@ fn line_body(l: &Line) -> Element<'_, Message> {
         .spacing(8);
         let mut table = column![head].spacing(4);
         for p in &l.part_list {
-            let number: Element<'_, Message> = if p.number.is_empty() {
+            let number: Element<'_, Msg> = if p.number.is_empty() {
                 text("—").into()
             } else {
                 button(text(p.number.as_str()).font(style::MONO).size(13))
                     .padding([1, 4])
                     .style(style::ghost)
-                    .on_press(Message::Copy(p.number.clone(), "Part number".into()))
+                    .on_press(Msg::Ask(Ask::Copy(p.number.clone(), "Part number".into())))
                     .into()
             };
             let status = [p.status.as_str(), if p.picked_up { "picked up" } else { "" }]

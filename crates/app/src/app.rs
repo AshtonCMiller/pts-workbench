@@ -41,19 +41,8 @@ pub enum Overlay {
     Print,
     /// Your hours: the pay-period report
     Hours,
-}
-
-/// The hours report's state
-#[derive(Debug, Clone, Default)]
-pub struct HoursView {
-    /// Which pay period: 0 this one, -1 the one before…
-    pub offset: i32,
-    /// A flag whose hours are being changed, and what's typed
-    pub editing: Option<(u64, String)>,
-    /// A flag asked to be taken off (pressed once)
-    pub removing: Option<u64>,
-    /// When the pay period changed (it slides in)
-    pub changed: Option<std::time::Instant>,
+    /// Add Service / Edit Service (Xtime's Add Service window)
+    Service,
 }
 
 pub struct App {
@@ -67,6 +56,8 @@ pub struct App {
     pub sample_data: bool,
     /// Xtime's data, asked with the profile's sign-in
     pub xtime: Xtime,
+    /// Ford PTS (the Service Manual's tabs), asked with the profile's PTS sign-in
+    pub ford: ford::Ford,
     /// Your ROs are being loaded
     pub ros_loading: bool,
     /// When they last loaded (seconds since 1970)
@@ -80,6 +71,10 @@ pub struct App {
     pub selected: Option<String>,
     pub sidebar: bool,
     pub chat: bool,
+    /// The Dealership chat panel (crates/xtime-ui): your conversations, read from Xtime
+    pub chat_panel: xtime_ui::chat::ChatPanel,
+    /// Chat's settings as last kept in xtime-chat.json (written again only when Xtime says otherwise)
+    pub chat_saved: Option<xtime::chat::ChatConfig>,
     /// A short message in the top bar ("Settings saved", an error…)
     pub notice: Option<String>,
     /// The profile's web requests and sign-ins (its cookies, saved in the app's folder)
@@ -89,9 +84,13 @@ pub struct App {
     /// Your hours (for now: the spiffs you've turned in)
     pub hours: hours::Hours,
     /// The hours report (a card over everything): which pay period, what's being changed
-    pub hours_view: HoursView,
+    pub hours_view: hours_ui::HoursView,
     /// What's in the app's Print window (its preview, printer, copies), while it's up
     pub print_job: Option<crate::print::Job>,
+    /// The Add / Edit Service window, while it's up
+    pub service: Option<xtime_ui::service::ServiceEditor>,
+    /// The store's services etc. for the Add Service window, read once per RO
+    pub catalogs: std::collections::HashMap<String, xtime::service::Catalog>,
     /// Your ROs' approved recommendation totals (for "spiff available" in My ROs), and when each was last read
     pub spiff_totals: std::collections::HashMap<String, f64>,
     pub spiff_checked: std::collections::HashMap<String, i64>,
@@ -108,6 +107,18 @@ pub struct App {
     pub system_dark: bool,
     /// Within a vehicle: the tab whose content is shown (the tab strip itself stays; only its content moves)
     pub inner: Transition<InnerKey>,
+    /// The app updating itself: what's going on, Beta updates
+    pub updates: crate::updates::Updates,
+}
+
+/// The dashboard's and My ROs' messages (crates/xtime-ui) are the app's own
+impl From<xtime_ui::my_ros::RosMsg> for Message {
+    fn from(m: xtime_ui::my_ros::RosMsg) -> Self {
+        match m {
+            xtime_ui::my_ros::RosMsg::Search(s) => Message::Search(s),
+            xtime_ui::my_ros::RosMsg::Open(ro) => Message::OpenRo(ro),
+        }
+    }
 }
 
 /// Which page: the screen, Xtime or the Workbench, and the vehicle
@@ -150,6 +161,23 @@ fn cookie_file() -> std::path::PathBuf {
     crate::settings::app_dir().join("cookies.json")
 }
 
+/// Chat's settings (your dealer code and Xtime username: no customer data), as the Electron app kept them
+fn chat_config_file() -> std::path::PathBuf {
+    crate::settings::app_dir().join("xtime-chat.json")
+}
+
+fn load_chat_config() -> Option<xtime::chat::ChatConfig> {
+    let text = std::fs::read_to_string(chat_config_file()).ok()?;
+    serde_json::from_str::<xtime::chat::ChatConfig>(&text)
+        .ok()
+        .filter(|c| !c.dealer_code.is_empty() && !c.user_name.is_empty())
+}
+
+fn save_chat_config(c: &xtime::chat::ChatConfig) -> std::io::Result<()> {
+    let text = serde_json::to_string_pretty(c).map_err(std::io::Error::other)?;
+    std::fs::write(chat_config_file(), text)
+}
+
 /// The sign-in windows' web profile ("remember me", saved passwords)
 fn web_dir() -> std::path::PathBuf {
     crate::settings::app_dir().join("web")
@@ -157,6 +185,12 @@ fn web_dir() -> std::path::PathBuf {
 
 #[derive(Debug, Clone)]
 pub enum Message {
+    /// Updates: look now; what was found; the download done; Beta updates on or off; start the new version
+    CheckUpdates,
+    UpdateFound(Result<Option<crate::updates::Found>, String>),
+    UpdateDownloaded(Result<crate::updates::Ready, String>),
+    SetBetaUpdates(bool),
+    RestartToUpdate,
     SetMode(Mode),
     Search(String),
     /// Open (or show) a vehicle by RO number
@@ -166,14 +200,29 @@ pub enum Message {
     SetManualTab(ManualTab),
     ToggleSidebar,
     ToggleChat,
+    /// The chat panel's own messages (crates/xtime-ui)
+    Chat(xtime_ui::chat::ChatMsg),
+    /// Read the chat again (with your ROs; every 30 s while the panel is open)
+    RefreshChat,
     CopyVin,
     /// Copy something shown (a tag, a part number…): the text, and what it is ("Part number")
     Copy(String, String),
-    /// Xtime View: read the RO from Xtime (its RO number); `true` even if it was read moments ago
-    LoadView(String, bool),
-    ViewLoaded(String, Result<xtime::ro::RoView, LoadError>),
     /// Every minute: the Xtime View showing reads its RO again
     RefreshView,
+    /// The Xtime View of an open vehicle (its RO number): its own messages (crates/xtime-ui)
+    Xv(String, xtime_ui::Msg),
+    /// An open vehicle's OASIS tab (its RO number): its own messages (crates/ford-ui)
+    Oasis(String, ford_ui::OasisMsg),
+    /// An open vehicle's TSBs tab (its RO number): its own messages (crates/ford-ui)
+    Tsb(String, ford_ui::TsbMsg),
+    /// Something in an RO's Workshop Manual tab
+    Wsm(String, ford_ui::ManualMsg),
+    /// One of an open vehicle's document tabs (its RO number, the tab's number): its own messages
+    Doc(String, u32, ford_ui::DocTabMsg),
+    /// Close a document tab of the vehicle showing (the tab's number)
+    CloseDoc(u32),
+    /// The vehicle of an RO was opened in PTS (to set PTS up for it): how it went
+    PtsSetUp(String, Outcome),
     /// Print the spiff sheet for the RO showing (the app's Print window)
     PrintSpiff,
     /// Print the spiff sheet for an RO by its number (from the hours report: read from Xtime first if need be)
@@ -199,26 +248,15 @@ pub enum Message {
     FlagLine(String, bool),
     /// The hours report: open, close, which pay period (0 this one, -1 the one before…)
     OpenHours,
-    CloseHours,
-    HoursPeriod(i32),
-    /// Tick flags confirmed (on your time sheet), or not
-    ConfirmFlags(Vec<u64>, bool),
-    /// Change a flag's hours: start, what's typed, keep it; or stop changing anything
-    EditFlagHours(u64),
-    FlagHoursInput(String),
-    SaveFlagHours,
-    CancelEdit,
-    /// Take a flag off (asks first: press twice)
-    RemoveFlag(u64),
+    /// The hours report's own messages (crates/hours-ui)
+    Hr(hours_ui::HoursMsg),
     /// Mark the RO showing as spiffed (turned in), or not
     MarkSpiffed(String, bool),
-    /// Open or close a line of the RO showing (by line ID)
-    ToggleLine(String),
-    ToggleInspection,
-    /// Mark a line of the RO showing done or not (by line ID), as Xtime's Done button does
-    SetDone(String, bool),
-    /// Xtime's answer: RO number, line ID, done or not
-    DoneSaved(String, String, bool, Result<(), LoadError>),
+    /// Add Service on the RO showing (for an inspection item: its ID), or edit one of its lines (Xtime's line ID)
+    OpenAddService(Option<String>),
+    OpenEditService(String),
+    /// The Add / Edit Service window's own messages
+    Svc(xtime_ui::service::SvcMsg),
     OpenSettings,
     CloseSettings,
     Edit(Field, String),
@@ -285,6 +323,17 @@ impl App {
             .or_else(|_| Http::new(USER_AGENT)) // saved sign-ins unreadable: start signed out
             .expect("the app's web requests");
         let xtime = Xtime::new(http.clone(), xtime::paths::DATA_HOST).expect("Xtime's address");
+        // (its requests are recorded in manual.log, as the Electron app's: addresses and cookie names, never values)
+        let ford = ford::Ford::new(http.clone(), settings.dealer_code.clone())
+            .expect("PTS's address")
+            .with_log(crate::settings::app_dir().join("manual.log"))
+            // the Workshop Manual's contents, kept a week (they're large, and the same for every RO of a vehicle)
+            .with_cache(crate::settings::app_dir().join("manual-cache"));
+        // chat's settings, kept from before (the Electron app's file has the same name and fields)
+        let chat_saved = load_chat_config();
+        if let Some(c) = &chat_saved {
+            xtime.set_chat_config(c.clone());
+        }
         let reports = Reports::new(
             ::feedback::Client::new(http.clone()),
             ::feedback::reporter_id(&crate::settings::app_dir()),
@@ -297,6 +346,7 @@ impl App {
             my_ros: sample::my_ros(),
             sample_data: true,
             xtime,
+            ford,
             ros_loading: false,
             ros_loaded_at: None,
             ros_error: None,
@@ -305,13 +355,17 @@ impl App {
             selected: None,
             sidebar: true,
             chat: false,
+            chat_panel: xtime_ui::chat::ChatPanel::new(),
+            chat_saved,
             notice,
             http,
             reports,
             signing_in: None,
             hours: opened.hours,
-            hours_view: HoursView::default(),
+            hours_view: hours_ui::HoursView::new(),
             print_job: None,
+            service: None,
+            catalogs: Default::default(),
             spiff_totals: Default::default(),
             spiff_checked: Default::default(),
             checking_spiffs: false,
@@ -320,6 +374,7 @@ impl App {
             overlay: None,
             system_dark: crate::system_theme::is_dark(),
             inner: Transition::new(InnerKey::None),
+            updates: crate::updates::Updates::new(),
         };
         // first setup: straight into its first field
         let focus = if app.screen == Screen::Setup {
@@ -342,7 +397,7 @@ impl App {
     }
 
     pub fn theme(&self) -> Theme {
-        ui::style::theme(self.settings.theme.resolve(self.system_dark))
+        ui::style::theme(self.settings.theme.resolve(self.system_dark) == ThemeChoice::Dark)
     }
 
     /// Whether there's a sign-in for a site (as far as the app can tell without asking it)
@@ -423,7 +478,7 @@ impl App {
         let task = match message {
             Message::Arrive(level) => {
                 self.arrive(level);
-                Task::none()
+                self.restore_scroll()
             }
             other => self.apply(other),
         };
@@ -451,6 +506,30 @@ impl App {
         Task::none()
     }
 
+    /// Looks for a newer version (unless updates are off here, or it's already looking or downloading)
+    fn check_updates(&mut self) -> Task<Message> {
+        if !self.updates.on() || self.updates.busy() {
+            return Task::none();
+        }
+        self.updates.state = crate::updates::State::Checking;
+        self.updates.checked_at = Some(self.now);
+        Task::perform(
+            crate::updates::check(self.http.clone(), self.updates.beta, self.updates.running.clone()),
+            Message::UpdateFound,
+        )
+    }
+
+    /// A page just shown is drawn anew (at its top): the Workshop Manual goes back where it was
+    fn restore_scroll(&self) -> Task<Message> {
+        match (&self.inner.shown, self.workspace()) {
+            (InnerKey::Vehicle(Tab::ServiceManual, ManualTab::Workshop), Some(ws)) => {
+                let ro = ws.ro.ro.clone();
+                ws.wsm.restore().map(move |m| Message::Wsm(ro.clone(), m))
+            }
+            _ => Task::none(),
+        }
+    }
+
     fn arrive(&mut self, level: Level) {
         let now = std::time::Instant::now();
         match level {
@@ -475,17 +554,20 @@ impl App {
             Message::SetMode(m) => self.mode = m,
             Message::Search(s) => self.search = s,
             Message::OpenRo(ro) => {
+                let mut ahead = Task::none();
                 if !self.open.iter().any(|w| w.ro.ro == ro) {
                     if let Some(r) = self.my_ros.iter().find(|r| r.ro == ro) {
                         self.open.push(Workspace::new(r.clone()));
+                        ahead = self.load_ahead(&ro);
                     }
                 }
                 if self.open.iter().any(|w| w.ro.ro == ro) {
                     self.selected = Some(ro.clone());
                     self.mode = Mode::Workbench;
                     if self.workspace().is_some_and(|w| w.tab == Tab::XtimeView) {
-                        return self.load_view(&ro, false);
+                        return Task::batch([self.load_view(&ro, false), ahead]);
                     }
+                    return Task::batch([self.load_manual(), ahead]);
                 }
             }
             Message::CloseRo(ro) => {
@@ -507,56 +589,168 @@ impl App {
                         return self.load_view(&ro, false);
                     }
                 }
+                return self.load_manual();
             }
             Message::SetManualTab(t) => {
                 if let Some(ws) = self.workspace_mut() {
                     ws.tab = Tab::ServiceManual;
                     ws.manual = t;
                 }
+                return self.load_manual();
+            }
+            Message::Oasis(ro, msg) => {
+                let env = self.ford_env();
+                let Some(ws) = self.open.iter_mut().find(|w| w.ro.ro == ro) else {
+                    return Task::none();
+                };
+                let (task, outs) = ws.oasis.update(msg, &env);
+                let mut tasks = vec![{
+                    let ro = ro.clone();
+                    task.map(move |m| Message::Oasis(ro.clone(), m))
+                }];
+                for out in outs {
+                    tasks.push(self.ford_out(&ro, out));
+                }
+                return Task::batch(tasks);
+            }
+            Message::Tsb(ro, msg) => {
+                let env = self.ford_env();
+                let Some(ws) = self.open.iter_mut().find(|w| w.ro.ro == ro) else {
+                    return Task::none();
+                };
+                let (task, outs) = ws.tsb.update(msg, &env);
+                let mut tasks = vec![{
+                    let ro = ro.clone();
+                    task.map(move |m| Message::Tsb(ro.clone(), m))
+                }];
+                for out in outs {
+                    tasks.push(self.ford_out(&ro, out));
+                }
+                return Task::batch(tasks);
+            }
+            Message::Wsm(ro, msg) => {
+                let env = self.ford_env();
+                let Some(ws) = self.open.iter_mut().find(|w| w.ro.ro == ro) else {
+                    return Task::none();
+                };
+                let (task, outs) = ws.wsm.update(msg, &env);
+                let mut tasks = vec![{
+                    let ro = ro.clone();
+                    task.map(move |m| Message::Wsm(ro.clone(), m))
+                }];
+                for out in outs {
+                    tasks.push(self.ford_out(&ro, out));
+                }
+                return Task::batch(tasks);
+            }
+            Message::Doc(ro, key, msg) => {
+                let env = self.ford_env();
+                let Some(d) = self
+                    .open
+                    .iter_mut()
+                    .find(|w| w.ro.ro == ro)
+                    .and_then(|w| w.docs.iter_mut().find(|d| d.key == key))
+                else {
+                    return Task::none();
+                };
+                let (task, outs) = d.update(msg, &env);
+                let mut tasks = vec![{
+                    let ro = ro.clone();
+                    task.map(move |m| Message::Doc(ro.clone(), key, m))
+                }];
+                for out in outs {
+                    tasks.push(self.ford_out(&ro, out));
+                }
+                return Task::batch(tasks);
+            }
+            Message::CloseDoc(key) => {
+                if let Some(ws) = self.workspace_mut() {
+                    ws.docs.retain(|d| d.key != key);
+                    if ws.manual == ManualTab::Doc(key) {
+                        ws.manual = ManualTab::Oasis;
+                    }
+                }
+            }
+            Message::PtsSetUp(ro, outcome) => {
+                self.signing_in = None;
+                let r = match outcome {
+                    Outcome::SignedIn(cookies) => {
+                        self.http.add_site_cookies(&cookies);
+                        let _ = self.http.save_cookies(&cookie_file());
+                        self.ford.reset();
+                        Ok(())
+                    }
+                    Outcome::Cancelled => Err("the window was closed".to_string()),
+                    Outcome::Failed(e) => Err(e),
+                };
+                // the TSBs tab, when it was waiting on PTS too
+                let ok = r.is_ok();
+                let env = self.ford_env();
+                let tsb = match self.open.iter_mut().find(|w| w.ro.ro == ro) {
+                    Some(ws) if ok && ws.tsb.error == Some(ford_ui::FordError::NotSetUp) => {
+                        let ro = ro.clone();
+                        ws.tsb.load(&env, true).map(move |m| Message::Tsb(ro.clone(), m))
+                    }
+                    _ => Task::none(),
+                };
+                // and the Workshop Manuals waiting on it (this RO's, and any other's that asked meanwhile)
+                let wsm = Task::batch(
+                    self.open
+                        .iter()
+                        .filter(|w| w.ro.ro == ro || w.wsm.setting_up)
+                        .map(|w| Task::done(Message::Wsm(w.ro.ro.clone(), ford_ui::ManualMsg::SetUp(r.clone()))))
+                        .collect::<Vec<_>>(),
+                );
+                return Task::batch([Task::done(Message::Oasis(ro, ford_ui::OasisMsg::SetUp(r))), tsb, wsm]);
             }
             Message::ToggleSidebar => self.sidebar = !self.sidebar,
-            Message::ToggleChat => self.chat = !self.chat,
+            Message::ToggleChat => {
+                self.chat = !self.chat;
+                // opened: read it again unless it was just read
+                let stale = self.chat_panel.loaded_at.is_none_or(|at| clock::now() - at >= 30);
+                if self.chat && stale {
+                    return self.refresh_chat();
+                }
+            }
+            Message::RefreshChat => return self.refresh_chat(),
+            Message::Chat(msg) => {
+                let env = self.xtime_env();
+                let ros = self.my_ros.iter().map(|r| r.ro.clone()).collect();
+                let (task, outs) = self.chat_panel.update(msg, &env, ros);
+                let mut tasks = vec![task.map(Message::Chat)];
+                for out in outs {
+                    match out {
+                        xtime_ui::chat::ChatOut::SignedOut => self.ros_error = Some(LoadError::SignedOut),
+                        xtime_ui::chat::ChatOut::OpenRo(ro) => tasks.push(Task::done(Message::OpenRo(ro))),
+                        xtime_ui::chat::ChatOut::Learned(c) => {
+                            if self.chat_saved.as_ref() != Some(&c) && save_chat_config(&c).is_ok() {
+                                self.chat_saved = Some(c);
+                            }
+                        }
+                    }
+                }
+                return Task::batch(tasks);
+            }
             Message::Copy(value, what) => {
                 self.notice = Some(format!("Copied {}: {value}", what.to_lowercase()));
                 return iced::clipboard::write(value);
             }
-            Message::LoadView(ro, force) => return self.load_view(&ro, force),
+            Message::Xv(ro, msg) => {
+                let env = self.xtime_env();
+                let Some(ws) = self.open.iter_mut().find(|w| w.ro.ro == ro) else {
+                    return Task::none();
+                };
+                let (task, outs) = ws.xv.update(msg, &env);
+                let task = {
+                    let ro = ro.clone();
+                    task.map(move |m| Message::Xv(ro.clone(), m))
+                };
+                return Task::batch([task, self.xtime_outs(&ro, outs)]);
+            }
             Message::RefreshView => {
                 let showing = self.workspace().filter(|w| self.mode == Mode::Workbench && w.tab == Tab::XtimeView);
                 if let Some(ro) = showing.map(|w| w.ro.ro.clone()) {
                     return self.load_view(&ro, true);
-                }
-            }
-            Message::ViewLoaded(ro, result) => {
-                if let Some(ws) = self.open.iter_mut().find(|w| w.ro.ro == ro) {
-                    ws.xv.loading = false;
-                    match result {
-                        Ok(view) => {
-                            let lines = timecard::lines_of(&view).into_iter().map(|(_, l)| l).collect();
-                            self.hours.update_lines(&ro, lines, &timecard::ymm(&view), timecard::now_ms());
-                            self.spiff_totals.insert(ro.clone(), view.spiff_total());
-                            self.hours.set_spiff_total(&ro, view.spiff_total());
-                            let _ = timecard::save(&self.hours);
-                            self.spiff_checked.insert(ro.clone(), clock::now());
-                            ws.xv.view = Some(view);
-                            ws.xv.error = None;
-                            ws.xv.at = Some(clock::now());
-                        }
-                        Err(e) => {
-                            if e == LoadError::SignedOut {
-                                self.ros_error = Some(LoadError::SignedOut); // the bottom bar offers to sign in
-                            }
-                            ws.xv.error = Some(e);
-                        }
-                    }
-                }
-                self.now = clock::now();
-            }
-            Message::ToggleLine(key) => {
-                if let Some(ws) = self.workspace_mut() {
-                    if ws.xv.open.remove(&key).is_none() {
-                        ws.xv.open.insert(key, std::time::Instant::now());
-                    }
                 }
             }
             Message::PrintSpiff => {
@@ -710,64 +904,27 @@ impl App {
                 }
             }
             Message::FlagLine(line_id, on) => return self.flag_line(&line_id, on),
-            Message::OpenHours => {
-                self.hours_view = HoursView::default();
-                self.show_overlay(Overlay::Hours);
-            }
-            Message::CloseHours => {
-                if matches!(self.overlay, Some((Overlay::Hours, _))) {
-                    return self.close_overlay();
-                }
-            }
-            Message::HoursPeriod(offset) => {
-                self.hours_view = HoursView {
-                    offset: offset.min(0),
-                    changed: Some(std::time::Instant::now()),
-                    ..HoursView::default()
-                };
-            }
-            Message::ConfirmFlags(ids, on) => {
-                for id in ids {
-                    self.hours.set_confirmed(id, on);
-                }
-                self.save_hours();
-            }
-            Message::EditFlagHours(id) => {
-                let now = self.hours.flags.iter().find(|f| f.id == id).map(|f| f.hours).unwrap_or(0.0);
-                self.hours_view.editing = Some((id, format!("{now}")));
-                self.hours_view.removing = None;
-                return iced::widget::text_input::focus(crate::ui::hours_report::edit_id());
-            }
-            Message::FlagHoursInput(text) => {
-                if let Some((_, t)) = &mut self.hours_view.editing {
-                    *t = text;
-                }
-            }
-            Message::SaveFlagHours => {
-                if let Some((id, text)) = self.hours_view.editing.take() {
-                    match text.trim().parse::<f64>() {
-                        Ok(h) if h.is_finite() && h >= 0.0 && h < 100.0 => {
-                            self.hours.set_flag_hours(id, h);
-                            self.save_hours();
+            Message::Hr(msg) => {
+                let (task, outs) = self.hours_view.update(&mut self.hours, msg);
+                let mut tasks = vec![task.map(Message::Hr)];
+                for out in outs {
+                    match out {
+                        hours_ui::HoursOut::Changed => self.save_hours(),
+                        hours_ui::HoursOut::Notice(n) => self.notice = Some(n),
+                        hours_ui::HoursOut::PrintSpiff(ro) => tasks.push(Task::done(Message::PrintSpiffFor(ro))),
+                        hours_ui::HoursOut::MarkSpiffed(ro) => tasks.push(Task::done(Message::MarkSpiffed(ro, true))),
+                        hours_ui::HoursOut::Close => {
+                            if matches!(self.overlay, Some((Overlay::Hours, _))) {
+                                tasks.push(self.close_overlay());
+                            }
                         }
-                        _ => self.notice = Some(format!("\"{}\" isn't a number of hours", text.trim())),
                     }
                 }
+                return Task::batch(tasks);
             }
-            Message::CancelEdit => {
-                self.hours_view.editing = None;
-                self.hours_view.removing = None;
-            }
-            Message::RemoveFlag(id) => {
-                // twice: the first press asks
-                if self.hours_view.removing == Some(id) {
-                    self.hours.delete_flag(id);
-                    self.hours_view.removing = None;
-                    self.save_hours();
-                } else {
-                    self.hours_view.removing = Some(id);
-                    self.hours_view.editing = None;
-                }
+            Message::OpenHours => {
+                self.hours_view = hours_ui::HoursView::new();
+                self.show_overlay(Overlay::Hours);
             }
             Message::MarkSpiffed(ro, on) => {
                 let spiff = on.then(|| self.spiff_record(&ro));
@@ -778,49 +935,61 @@ impl App {
                     Err(e) => format!("Couldn't save the spiff: {e}"),
                 });
             }
-            Message::ToggleInspection => {
-                if let Some(ws) = self.workspace_mut() {
-                    ws.xv.show_inspection = !ws.xv.show_inspection;
-                }
-            }
-            Message::SetDone(key, done) => return self.set_done(key, done),
-            Message::DoneSaved(ro, key, done, result) => {
-                let Some(ws) = self.open.iter_mut().find(|w| w.ro.ro == ro) else {
+            Message::OpenAddService(item) => {
+                let Some(ws) = self.workspace() else {
                     return Task::none();
                 };
-                ws.xv.busy.remove(&key);
-                let letter = ws
+                if self.sample_data || self.service.is_some() {
+                    return Task::none();
+                }
+                let ro = ws.ro.ro.clone();
+                // for an inspection item: its name and the services offered for it; a Yellow or Red item's colour
+                let item = item.and_then(|k| ws.xv.form.as_ref().and_then(|f| f.item(&k)).cloned());
+                let mut ed =
+                    xtime_ui::service::ServiceEditor::new(ro.clone(), None, item.as_ref().map(|i| (i.name.clone(), i.services.clone())));
+                ed.start_color = item.map(|i| i.color).filter(|c| c == "Yellow" || c == "Red");
+                return self.open_service(ed);
+            }
+            Message::OpenEditService(line_id) => {
+                let Some(ws) = self.workspace() else {
+                    return Task::none();
+                };
+                if self.service.is_some() {
+                    return Task::none();
+                }
+                let Some(line) = ws
                     .xv
                     .view
                     .as_ref()
-                    .and_then(|v| v.lines.iter().find(|l| l.key() == key))
-                    .map(|l| l.dms.clone())
-                    .unwrap_or_default();
-                match result {
-                    Ok(()) => {
-                        self.notice = Some(match (done, letter.is_empty()) {
-                            (true, false) => format!("Line {letter} marked done"),
-                            (false, false) => format!("Line {letter} not done"),
-                            (true, true) => "Line marked done".into(),
-                            (false, true) => "Line not done".into(),
-                        });
-                    }
-                    Err(e) => {
-                        // put the box back as Xtime has it
-                        if let Some(line) = ws.xv.view.as_mut().and_then(|v| v.lines.iter_mut().find(|l| l.key() == key)) {
-                            line.completed = !done;
-                        }
-                        if e == LoadError::SignedOut {
-                            self.ros_error = Some(LoadError::SignedOut);
-                        }
-                        self.notice = Some(format!(
-                            "Couldn't change the line in Xtime ({})",
-                            e.text().trim_start_matches("Xtime: ")
-                        ));
-                    }
+                    .and_then(|v| v.lines.iter().find(|l| l.key() == line_id))
+                    .cloned()
+                else {
+                    return Task::none();
+                };
+                let ed = xtime_ui::service::ServiceEditor::new(ws.ro.ro.clone(), Some(line), None);
+                return self.open_service(ed);
+            }
+            Message::Svc(xtime_ui::service::SvcMsg::Close) => {
+                if matches!(self.overlay, Some((Overlay::Service, _))) {
+                    return self.close_overlay();
                 }
-                // read it again: Xtime may have changed more (the RO's stage, who did it)
-                return self.load_view(&ro, true);
+            }
+            Message::Svc(msg) => {
+                if let xtime_ui::service::SvcMsg::CatalogLoaded(ro, Ok(c)) = &msg {
+                    self.catalogs.insert(ro.clone(), c.clone());
+                }
+                let (store, x) = (self.settings.store_id.clone(), self.xtime.clone());
+                let Some(ed) = &mut self.service else {
+                    return Task::none();
+                };
+                let (task, done) = ed.update(msg, &x, &store);
+                if done {
+                    // saved: say so, close the window, read the RO again
+                    let (ro, notice) = (ed.ro.clone(), ed.done_notice());
+                    self.notice = Some(notice);
+                    return Task::batch([self.close_overlay(), self.load_view(&ro, true)]);
+                }
+                return task.map(Message::Svc);
             }
             Message::CopyVin => {
                 if let Some(vin) = self.workspace().map(|w| w.ro.vin.clone()) {
@@ -874,6 +1043,7 @@ impl App {
                     != (&self.settings.store_id, &self.settings.employee_number, &self.settings.tech_id);
                 match next.save() {
                     Ok(()) => {
+                        self.ford.set_dealer_code(next.dealer_code.clone());
                         self.settings = next.clone();
                         self.draft = next;
                         self.notice = Some("Settings saved".into());
@@ -926,13 +1096,35 @@ impl App {
                     self.xtime.reset();
                     return Task::batch([Task::done(Message::LoadRos), Task::done(Message::RefreshView)]);
                 }
+                // signed in to PTS: the Service Manual tab showing tries again
+                if site == Site::Ford && self.signed_in(Site::Ford) {
+                    self.ford.reset();
+                    for ws in &mut self.open {
+                        if ws.oasis.error == Some(ford_ui::FordError::SignedOut) {
+                            ws.oasis.error = None;
+                        }
+                        if ws.tsb.error == Some(ford_ui::FordError::SignedOut) {
+                            ws.tsb.error = None;
+                        }
+                        if ws.wsm.error == Some(ford_ui::FordError::SignedOut) {
+                            ws.wsm.error = None;
+                        }
+                        for d in &mut ws.wsm.docs {
+                            if d.error == Some(ford_ui::FordError::SignedOut) {
+                                d.error = None;
+                            }
+                        }
+                    }
+                    return self.load_manual();
+                }
             }
             Message::LoadRos => return self.load_ros(),
             Message::RosLoaded(result) => {
                 let ok = result.is_ok();
                 self.ros_loaded(result);
                 if ok {
-                    return self.check_spiffs();
+                    // the chat's new messages (and the Chat button's count) with them, every minute
+                    return Task::batch([self.check_spiffs(), self.refresh_chat()]);
                 }
             }
             Message::ToggleClock => {
@@ -954,8 +1146,46 @@ impl App {
                     self.hours.heartbeat(now);
                     let _ = timecard::save(&self.hours);
                 }
+                // updates: shortly after starting, then every half hour
+                if self.updates.on() && self.updates.due(self.now) {
+                    return self.check_updates();
+                }
             }
             Message::Arrive(_) => {} // handled in update
+            Message::CheckUpdates => return self.check_updates(),
+            Message::UpdateFound(found) => {
+                use crate::updates::State;
+                match found {
+                    // (already downloaded and waiting for a restart)
+                    Ok(Some(f)) if matches!(&self.updates.state, State::Ready(r) if r.version == f.manifest.version) => {}
+                    Ok(Some(f)) => {
+                        self.updates.state = State::Downloading(f.manifest.version.clone());
+                        return Task::perform(crate::updates::download(self.http.clone(), f), Message::UpdateDownloaded);
+                    }
+                    Ok(None) => self.updates.state = State::Current(None),
+                    Err(e) => self.updates.state = State::Failed(e),
+                }
+            }
+            Message::UpdateDownloaded(r) => {
+                use crate::updates::State;
+                self.updates.state = match r {
+                    Ok(ready) => State::Ready(ready),
+                    Err(e) => State::Failed(e),
+                };
+            }
+            Message::SetBetaUpdates(on) => {
+                self.updates.set_beta(on);
+                return self.check_updates();
+            }
+            Message::RestartToUpdate => {
+                if let crate::updates::State::Ready(r) = self.updates.state.clone() {
+                    match crate::updates::restart(&r) {
+                        // (hours are kept as they change; the window closes and the launcher starts the new version)
+                        Ok(()) => return iced::exit(),
+                        Err(e) => self.updates.state = crate::updates::State::Failed(e),
+                    }
+                }
+            }
             Message::OpenFeedback => {
                 let task = self.reports.open(self.screen_name(), self.is_admin());
                 self.show_overlay(Overlay::Feedback);
@@ -966,8 +1196,11 @@ impl App {
             Message::OverlayGone => {
                 if let Some((which, Phase::Leaving(_))) = self.overlay {
                     self.overlay = None;
-                    if which == Overlay::Print {
-                        self.print_job = None; // kept until now: the card shows it while it goes
+                    // kept until now: the card shows it while it goes
+                    match which {
+                        Overlay::Print => self.print_job = None,
+                        Overlay::Service => self.service = None,
+                        _ => {}
                     }
                 }
             }
@@ -981,57 +1214,175 @@ impl App {
         Task::none()
     }
 
-    /// Reads an RO for its Xtime View, unless it's being read, or was read in the last 20 s (unless `force`)
-    fn load_view(&mut self, ro: &str, force: bool) -> Task<Message> {
-        let now = clock::now();
-        let (store, x) = (self.settings.store_id.clone(), self.xtime.clone());
-        if self.sample_data {
-            return Task::none(); // the samples aren't in Xtime
+    /// What the Service Manual's tabs ask Ford with
+    fn ford_env(&self) -> ford_ui::Env {
+        ford_ui::Env {
+            ford: self.ford.clone(),
+            sample: self.sample_data,
         }
+    }
+
+    /// Reads the Service Manual tab showing, when it hasn't been read yet
+    fn load_manual(&mut self) -> Task<Message> {
+        let env = self.ford_env();
+        let Some(ws) = self.workspace_mut().filter(|w| w.tab == Tab::ServiceManual) else {
+            return Task::none();
+        };
+        let ro = ws.ro.ro.clone();
+        match ws.manual {
+            ManualTab::Oasis => ws.oasis.load(&env, false).map(move |m| Message::Oasis(ro.clone(), m)),
+            ManualTab::Tsbs => ws.tsb.load(&env, false).map(move |m| Message::Tsb(ro.clone(), m)),
+            ManualTab::Workshop => ws.wsm.load(&env, false).map(move |m| Message::Wsm(ro.clone(), m)),
+            _ => Task::none(),
+        }
+    }
+
+    /// A vehicle just opened: its OASIS is read in the background (as the Electron app's "loading ahead"), so it's
+    /// there by the time its tab is opened. Only with a PTS sign-in (nothing asks to sign in from here).
+    fn load_ahead(&mut self, ro: &str) -> Task<Message> {
+        if self.sample_data || !self.signed_in(Site::Ford) {
+            return Task::none();
+        }
+        let env = self.ford_env();
         let Some(ws) = self.open.iter_mut().find(|w| w.ro.ro == ro) else {
             return Task::none();
         };
-        let fresh = ws.xv.at.is_some_and(|at| now - at < 20) && ws.xv.error.is_none();
-        if ws.xv.loading || (fresh && !force) {
-            return Task::none();
-        }
-        ws.xv.loading = true;
-        let ro = ro.to_string();
-        Task::perform(
-            async move {
-                let r = x.ro_view(&store, &ro).await.map_err(LoadError::from);
-                (ro, r)
-            },
-            |(ro, r)| Message::ViewLoaded(ro, r),
-        )
+        let (r1, r2, r3) = (ro.to_string(), ro.to_string(), ro.to_string());
+        Task::batch([
+            ws.oasis.load(&env, false).map(move |m| Message::Oasis(r1.clone(), m)),
+            ws.tsb.load(&env, false).map(move |m| Message::Tsb(r2.clone(), m)),
+            // the manual's contents (kept on disk a week, so usually quick)
+            ws.wsm.load(&env, false).map(move |m| Message::Wsm(r3.clone(), m)),
+        ])
     }
 
-    /// Marks a line of the RO showing done or not in Xtime (the box changes right away; it goes back if Xtime says no)
-    fn set_done(&mut self, key: String, done: bool) -> Task<Message> {
-        let (store, x) = (self.settings.store_id.clone(), self.xtime.clone());
-        let Some(ws) = self.workspace_mut() else {
+    /// What a Service Manual tab hands back: something to copy, or Ford's sign-in
+    fn ford_out(&mut self, ro: &str, out: ford_ui::Out) -> Task<Message> {
+        match out {
+            ford_ui::Out::Copy(text, what) => Task::done(Message::Copy(text, what)),
+            ford_ui::Out::SignIn => Task::done(Message::SignIn(Site::Ford)),
+            // one of Ford's documents: a Service Manual tab of its own (the one already open for it, if any)
+            ford_ui::Out::OpenDoc { kind, id, title, url } => {
+                let env = self.ford_env();
+                let Some(ws) = self.open.iter_mut().find(|w| w.ro.ro == ro) else {
+                    return Task::none();
+                };
+                ws.tab = Tab::ServiceManual;
+                if let Some(d) = ws.docs.iter().find(|d| d.url == url) {
+                    ws.manual = ManualTab::Doc(d.key);
+                    return Task::none();
+                }
+                let key = ws.next_doc;
+                ws.next_doc += 1;
+                let mut d = ford_ui::DocTab::new(key, &kind, &id, &title, &url);
+                let ro = ro.to_string();
+                let task = d.load(&env).map(move |m| Message::Doc(ro.clone(), key, m));
+                ws.docs.push(d);
+                ws.manual = ManualTab::Doc(key);
+                task
+            }
+            // opening the vehicle in PTS (unseen) to set it up: one window at a time
+            ford_ui::Out::SetUpPts(vin) => {
+                let ro = ro.to_string();
+                // already setting PTS up (OASIS asked too): its finishing reads this again
+                if self.signing_in == Some(Site::Ford) {
+                    return Task::none();
+                }
+                if self.signing_in.is_some() {
+                    let busy = Err("another PTS or Xtime window is open".to_string());
+                    return Task::done(Message::Oasis(ro, ford_ui::OasisMsg::SetUp(busy)));
+                }
+                self.signing_in = Some(Site::Ford);
+                Task::perform(signin::set_up_pts(vin, web_dir()), move |o| Message::PtsSetUp(ro.clone(), o))
+            }
+        }
+    }
+
+    /// What the Xtime View asks Xtime with
+    fn xtime_env(&self) -> xtime_ui::Env {
+        xtime_ui::Env {
+            xtime: self.xtime.clone(),
+            store: self.settings.store_id.clone(),
+            sample: self.sample_data,
+        }
+    }
+
+    /// Reads an RO for its Xtime View, unless it's being read, or was read in the last 20 s (unless `force`)
+    fn load_view(&mut self, ro: &str, force: bool) -> Task<Message> {
+        let env = self.xtime_env();
+        let Some(ws) = self.open.iter_mut().find(|w| w.ro.ro == ro) else {
             return Task::none();
         };
-        if ws.xv.busy.contains(&key) {
-            return Task::none();
+        let ro = ro.to_string();
+        ws.xv.load(&env, force).map(move |m| Message::Xv(ro.clone(), m))
+    }
+
+    /// What the Xtime View hands back: a notice, signed out, the RO just read (your hours keep its lines; its spiff
+    /// total), and its buttons meant for the app
+    fn xtime_outs(&mut self, ro: &str, outs: Vec<xtime_ui::Out>) -> Task<Message> {
+        let mut tasks = Vec::new();
+        for out in outs {
+            match out {
+                xtime_ui::Out::Notice(n) => self.notice = Some(n),
+                xtime_ui::Out::SignedOut => self.ros_error = Some(LoadError::SignedOut), // the bottom bar offers to sign in
+                xtime_ui::Out::Read(view) => {
+                    let lines = timecard::lines_of(&view).into_iter().map(|(_, l)| l).collect();
+                    self.hours.update_lines(ro, lines, &timecard::ymm(&view), timecard::now_ms());
+                    self.spiff_totals.insert(ro.to_string(), view.spiff_total());
+                    self.hours.set_spiff_total(ro, view.spiff_total());
+                    let _ = timecard::save(&self.hours);
+                    self.spiff_checked.insert(ro.to_string(), clock::now());
+                    self.now = clock::now();
+                }
+                xtime_ui::Out::Ask(a) => tasks.push(Task::done(match a {
+                    xtime_ui::Ask::AddService(item) => Message::OpenAddService(item),
+                    xtime_ui::Ask::EditService(line) => Message::OpenEditService(line),
+                    xtime_ui::Ask::Flag(line, on) => Message::FlagLine(line, on),
+                    xtime_ui::Ask::PrintSpiff => Message::PrintSpiff,
+                    xtime_ui::Ask::MarkSpiffed(on) => Message::MarkSpiffed(ro.to_string(), on),
+                    xtime_ui::Ask::Copy(text, what) => Message::Copy(text, what),
+                })),
+            }
         }
-        let ro = ws.ro.ro.clone();
-        let Some(line) = ws.xv.view.as_mut().and_then(|v| v.lines.iter_mut().find(|l| l.key() == key)) else {
-            return Task::none();
-        };
-        if !line.can_be_done() {
-            return Task::none(); // declined, or waiting on approval: the work can't be done
+        Task::batch(tasks)
+    }
+
+    /// Each RO's spiff for My ROs: turned in, or there to be turned in (approved recommendations over $150)
+    pub fn spiff_badges(&self) -> std::collections::HashMap<String, xtime_ui::my_ros::SpiffBadge> {
+        use xtime_ui::my_ros::SpiffBadge;
+        self.my_ros
+            .iter()
+            .filter_map(|r| {
+                if self.hours.spiffed(&r.ro).is_some() {
+                    return Some((r.ro.clone(), SpiffBadge::Spiffed));
+                }
+                let t = self.spiff_totals.get(&r.ro).copied().filter(|t| xtime::ro::spiff_over(*t))?;
+                Some((r.ro.clone(), SpiffBadge::Available(t)))
+            })
+            .collect()
+    }
+
+    /// What the Xtime View shows from the rest of the app: the time, your flags on the RO's lines, its spiff
+    pub fn xtime_shown(&self, ws: &Workspace) -> xtime_ui::view::Shown {
+        let flags = ws
+            .xv
+            .view
+            .as_ref()
+            .map(|v| {
+                timecard::lines_of(v)
+                    .into_iter()
+                    .filter(|(_, l)| l.counts())
+                    .map(|(id, l)| (id, self.hours.flag_for(&v.ro, &l.key).map(|f| f.hours)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        xtime_ui::view::Shown {
+            now: self.now,
+            flags,
+            spiffed: self.hours.spiffed(&ws.ro.ro).map(|s| s.total),
+            can_print: self.print_job.is_none(),
+            can_add_service: self.service.is_none(),
         }
-        line.completed = done;
-        let id = line.id.clone();
-        ws.xv.busy.insert(key.clone());
-        Task::perform(
-            async move {
-                let r = x.set_done(&store, &ro, &id, done).await.map_err(LoadError::from);
-                (ro, key, done, r)
-            },
-            |(ro, key, done, r)| Message::DoneSaved(ro, key, done, r),
-        )
     }
 
     /// Loads your ROs, unless they're loading already, setup isn't done, or there's no Xtime sign-in to ask with
@@ -1143,6 +1494,20 @@ impl App {
         task
     }
 
+    /// Brings up the Add / Edit Service window (with the store's services, read once per RO)
+    fn open_service(&mut self, mut ed: xtime_ui::service::ServiceEditor) -> Task<Message> {
+        let task = match self.catalogs.get(&ed.ro).cloned() {
+            Some(c) => {
+                ed.start_with(c);
+                Task::none()
+            }
+            None => xtime_ui::service::load_catalog(&self.xtime, &self.settings.store_id, &ed.ro).map(Message::Svc),
+        };
+        self.service = Some(ed);
+        self.show_overlay(Overlay::Service);
+        task
+    }
+
     /// Brings up the app's Print window for a document (and looks for the printers meanwhile)
     fn open_print(&mut self, what: String, build: crate::print::Build) -> Task<Message> {
         self.print_job = Some(crate::print::Job::new(what, build));
@@ -1151,6 +1516,17 @@ impl App {
             async { tokio::task::spawn_blocking(crate::print::printers).await.unwrap_or_default() },
             Message::PrintersFound,
         )
+    }
+
+    /// Reads the chat again, when there's an Xtime sign-in to ask with (and Xtime is connected)
+    fn refresh_chat(&mut self) -> Task<Message> {
+        let signed_out = self.ros_error == Some(LoadError::SignedOut);
+        if self.sample_data || signed_out || self.settings.needs_setup() || !self.signed_in(Site::Xtime) {
+            return Task::none();
+        }
+        let env = self.xtime_env();
+        let ros = self.my_ros.iter().map(|r| r.ro.clone()).collect();
+        self.chat_panel.load(&env, ros).map(Message::Chat)
     }
 
     /// Reads the ROs on your list that haven't been read in the last 5 minutes, one after another, for their spiff
@@ -1249,6 +1625,12 @@ impl App {
             },
             // your ROs, every minute (load_ros skips it when there's no sign-in)
             iced::time::every(ros::EVERY).map(|_| Message::LoadRos),
+            // the chat, every 30 s while it's open (otherwise with your ROs, every minute)
+            if self.chat {
+                iced::time::every(std::time::Duration::from_secs(30)).map(|_| Message::RefreshChat)
+            } else {
+                Subscription::none()
+            },
             // the Xtime View showing, every minute
             iced::time::every(ros::EVERY).map(|_| Message::RefreshView),
             // Auto: follow the system when it changes (checked every 2 s; only while Auto is chosen)
