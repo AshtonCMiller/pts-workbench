@@ -39,7 +39,13 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 .on_press(Message::RestartToUpdate),
         );
     }
+    // Notifications, with how many are new
+    let notes = match app.notes.unread() {
+        0 => "Notifications".to_string(),
+        n => format!("Notifications  {n}"),
+    };
     bar = bar
+        .push(toggle(notes, app.notes_open, Message::ToggleNotes))
         .push(toggle(chat, app.chat, Message::ToggleChat))
         .push(toggle("My ROs".into(), app.sidebar, Message::ToggleSidebar))
         .push(

@@ -118,6 +118,12 @@ pub struct App {
     pub selected: Option<String>,
     pub sidebar: bool,
     pub chat: bool,
+    /// Notifications: the list (kept on this computer), what was seen last (to notice what's changed), the list's
+    /// panel open, and the newest one popped up in the corner
+    pub notes: crate::notes::Notes,
+    pub watch: crate::notes::Watch,
+    pub notes_open: bool,
+    pub toast: Option<(u64, Phase)>,
     /// The Dealership chat panel (crates/xtime-ui): your conversations, read from Xtime
     pub chat_panel: xtime_ui::chat::ChatPanel,
     /// Chat's settings as last kept in xtime-chat.json (written again only when Xtime says otherwise)
@@ -338,6 +344,15 @@ pub enum Message {
     RosRead(Vec<(String, Option<xtime::ro::RoView>)>),
     /// ROs opened on another computer (not on your list) looked up in Xtime: opened here once their VIN is known
     WaitingRead(Vec<(String, Option<xtime::ro::RoView>)>),
+    /// Notifications: the list opened or closed, one clicked (goes to its RO), all marked read, the list emptied, the
+    /// pop-up's time up (or closed)
+    ToggleNotes,
+    OpenNote(u64),
+    NotesAllRead,
+    ClearNotes,
+    ToastGone(u64),
+    /// An RO just opened from a notification: its Xtime page shown
+    NoteShowXtime(String),
     /// Accept on an RO in Dispatch (asks to be sure first: None takes the question away), Yes, and how it went
     AskAccept(Option<String>),
     /// Unfolds the Dispatch list under My ROs, or folds it away
@@ -471,6 +486,10 @@ impl App {
             selected,
             sidebar: true,
             chat: false,
+            notes: crate::notes::Notes::load(crate::timecard::now_ms()),
+            watch: Default::default(),
+            notes_open: false,
+            toast: None,
             chat_panel: xtime_ui::chat::ChatPanel::new(),
             chat_saved,
             notice,
@@ -732,6 +751,9 @@ impl App {
             Message::SetMode(m) => self.mode = m,
             Message::Search(s) => self.search = s,
             Message::OpenRo(ro) => {
+                if self.notes.read_ro(&ro) {
+                    self.notes.save();
+                }
                 let mut ahead = Task::none();
                 if !self.open.iter().any(|w| w.ro.ro == ro) {
                     if let Some(r) = self.my_ros.iter().find(|r| r.ro == ro) {
@@ -914,6 +936,9 @@ impl App {
             Message::ToggleSidebar => self.sidebar = !self.sidebar,
             Message::ToggleChat => {
                 self.chat = !self.chat;
+                if self.chat {
+                    self.notes_open = false;
+                }
                 // opened: read it again unless it was just read
                 let stale = self.chat_panel.loaded_at.is_none_or(|at| clock::now() - at >= 30);
                 if self.chat && stale {
@@ -921,11 +946,64 @@ impl App {
                 }
             }
             Message::RefreshChat => return self.refresh_chat(),
+            Message::ToggleNotes => {
+                self.notes_open = !self.notes_open;
+                if self.notes_open {
+                    self.chat = false;
+                }
+            }
+            Message::OpenNote(id) => return self.open_note(id),
+            Message::NoteShowXtime(ro) => {
+                if let Some(ws) = self.open.iter_mut().find(|w| w.ro.ro == ro) {
+                    ws.tab = Tab::XtimeView;
+                }
+                if self.selected.as_deref() == Some(ro.as_str()) {
+                    return self.load_view(&ro, false);
+                }
+            }
+            Message::NotesAllRead => {
+                self.notes.mark_all_read();
+                self.notes.save();
+            }
+            Message::ClearNotes => {
+                self.notes.list.clear();
+                self.notes.save();
+                self.toast = None;
+            }
+            Message::ToastGone(id) => match self.toast {
+                // shown its time: it slides away, then it's gone
+                Some((t, Phase::Still | Phase::Entering(_))) if t == id => {
+                    self.toast = Some((t, Phase::Leaving(std::time::Instant::now())));
+                    return Task::perform(tokio::time::sleep(anim::MODAL_OUT), move |_| Message::ToastGone(id));
+                }
+                Some((t, Phase::Leaving(_))) if t == id => self.toast = None,
+                _ => {}
+            },
             Message::Chat(msg) => {
                 let env = self.xtime_env();
                 let ros = self.my_ros.iter().map(|r| r.ro.clone()).collect();
+                let listed_before = self.chat_panel.loaded_at;
                 let (task, outs) = self.chat_panel.update(msg, &env, ros);
                 let mut tasks = vec![task.map(Message::Chat)];
+                // the list read again: messages from others not seen before
+                if self.chat_panel.loaded_at != listed_before && self.chat_panel.error.is_none() {
+                    let list: Vec<crate::notes::ChatNow> = self
+                        .chat_panel
+                        .messages
+                        .iter()
+                        .map(|m| crate::notes::ChatNow {
+                            id: m.id.clone(),
+                            channel: m.channel_id.clone(),
+                            ro: m.ro.clone(),
+                            sender: m.sender.clone(),
+                            text: m.text.clone(),
+                            mine: m.mine,
+                            mentions: m.mentions.clone(),
+                        })
+                        .collect();
+                    let news = self.watch.chat(&list, &self.settings.name);
+                    tasks.push(self.notify(news));
+                }
                 for out in outs {
                     match out {
                         xtime_ui::chat::ChatOut::SignedOut => self.ros_error = Some(LoadError::SignedOut),
@@ -1094,9 +1172,9 @@ impl App {
             },
             Message::SpiffsChecked(found) => {
                 self.checking_spiffs = false;
-                self.took_views(found);
+                return self.took_views(found);
             }
-            Message::RosRead(found) => self.took_views(found),
+            Message::RosRead(found) => return self.took_views(found),
             Message::WaitingRead(found) => {
                 let mut tasks = Vec::new();
                 for (ro, v) in &found {
@@ -1109,7 +1187,7 @@ impl App {
                     self.open.push(Workspace::new(xtime_ui::my_ros::from_view(v)));
                     tasks.push(self.load_ahead(ro));
                 }
-                self.took_views(found);
+                tasks.push(self.took_views(found));
                 return Task::batch(tasks);
             }
             Message::AddRo(open) => {
@@ -1165,6 +1243,7 @@ impl App {
                 self.accepting = None;
                 match r {
                     Ok(()) => {
+                        self.watch.moved_here(&ro, 3, timecard::now_ms());
                         self.notice = Some(format!("RO {ro} is yours: it's in Inspection now."));
                         // yours now: on your list (until the dashboard's next load says so too), and opened
                         if let Some(i) = self.dispatch.iter().position(|d| d.ro == ro) {
@@ -1438,7 +1517,25 @@ impl App {
                     // ROs opened on another computer whose VIN is now known; the chat's new messages (and the Chat
                     // button's count) with them, every minute
                     let waiting = self.open_waiting();
-                    return Task::batch([self.check_spiffs(), self.refresh_chat(), waiting]);
+                    // what's changed on your list since the last look: notifications
+                    let list: Vec<crate::notes::RoNow> = self
+                        .my_ros
+                        .iter()
+                        .map(|r| crate::notes::RoNow {
+                            ro: r.ro.clone(),
+                            tag: r.tag.clone(),
+                            vehicle: xtime_ui::my_ros::vehicle_name(r),
+                            mode: r.mode.map(|m| m as i64),
+                            waiting_parts: r.waiting_parts,
+                            not_in_stock: r.dash.not_in_stock,
+                            waiting_customer: r.waiting_customer,
+                            waiting_warranty: r.waiting_warranty,
+                            parts_status: parts_status_number(r.dash.parts_status.as_ref()),
+                        })
+                        .collect();
+                    let news = self.watch.dashboard(&list, timecard::now_ms());
+                    let notify = self.notify(news);
+                    return Task::batch([self.check_spiffs(), self.refresh_chat(), waiting, notify]);
                 }
             }
             Message::ToggleClock => {
@@ -1826,7 +1923,10 @@ impl App {
             match out {
                 xtime_ui::Out::Notice(n) => self.notice = Some(n),
                 xtime_ui::Out::SignedOut => self.ros_error = Some(LoadError::SignedOut), // the bottom bar offers to sign in
+                xtime_ui::Out::Moved(mode) => self.watch.moved_here(ro, mode, timecard::now_ms()),
                 xtime_ui::Out::Read(view) => {
+                    let news = self.watch_lines(ro, &view);
+                    tasks.push(self.notify(news));
                     let lines = timecard::lines_of(&view).into_iter().map(|(_, l)| l).collect();
                     self.hours.update_lines(ro, lines, &timecard::ymm(&view), timecard::now_ms());
                     self.spiff_totals.insert(ro.to_string(), view.spiff_total());
@@ -2234,10 +2334,7 @@ impl App {
             self.open.push(Workspace::new(r));
         }
         let read = match view {
-            Some(v) => {
-                self.took_views(vec![(ro.clone(), Some(v))]);
-                Task::none()
-            }
+            Some(v) => self.took_views(vec![(ro.clone(), Some(v))]),
             // (the VIN typed: what Xtime has on it, if it can)
             None if !self.sample_data => {
                 let (x, store, r) = (self.xtime.clone(), self.settings.store_id.clone(), ro.clone());
@@ -2251,12 +2348,15 @@ impl App {
 
     /// ROs just read from Xtime: their spiff totals, their lines in your hours (to flag, approvals as they come in),
     /// and for open ROs that aren't on your list (added by hand, or gone from it) their stage, parts and flags
-    fn took_views(&mut self, found: Vec<(String, Option<xtime::ro::RoView>)>) {
+    fn took_views(&mut self, found: Vec<(String, Option<xtime::ro::RoView>)>) -> Task<Message> {
         let now = clock::now();
         let mut changed = false;
+        let mut notes = Vec::new();
         for (ro, view) in found {
             self.spiff_checked.insert(ro.clone(), now);
             let Some(v) = view else { continue };
+            let news = self.watch_lines(&ro, &v);
+            notes.extend(news);
             self.spiff_totals.insert(ro.clone(), v.spiff_total());
             self.hours.set_spiff_total(&ro, v.spiff_total());
             // the hours keep each RO's lines (to flag them, and their hours)
@@ -2284,6 +2384,86 @@ impl App {
         if changed {
             let _ = timecard::save(&self.hours);
         }
+        self.notify(notes)
+    }
+
+    /// An RO's lines, for the notifications (approved / declined since the last look)
+    fn watch_lines(&mut self, ro: &str, v: &xtime::ro::RoView) -> Vec<crate::notes::New> {
+        let lines: Vec<crate::notes::LineNow> = v
+            .lines
+            .iter()
+            .filter(|l| !l.is_inspection())
+            .map(|l| crate::notes::LineNow {
+                key: l.key(),
+                label: [l.dms.as_str(), l.name.as_str()]
+                    .iter()
+                    .filter(|s| !s.is_empty())
+                    .copied()
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                approved: l.approved,
+                declined: l.declined,
+            })
+            .collect();
+        self.watch.lines(ro, &lines)
+    }
+
+    /// New notifications: kept in the list, the newest popped up in the corner, the taskbar button flashed
+    fn notify(&mut self, news: Vec<crate::notes::New>) -> Task<Message> {
+        if news.is_empty() || self.sample_data {
+            return Task::none();
+        }
+        let ids = self.notes.add(news, timecard::now_ms());
+        self.notes.save();
+        let Some(&newest) = ids.last() else { return Task::none() };
+        self.toast = Some((newest, Phase::Entering(std::time::Instant::now())));
+        let gone = Task::perform(tokio::time::sleep(std::time::Duration::from_secs(7)), move |_| {
+            Message::ToastGone(newest)
+        });
+        // (Windows flashes the taskbar button until the app's looked at; nothing when it's in front already)
+        let flash = iced::window::get_oldest()
+            .and_then(|id| iced::window::request_user_attention(id, Some(iced::window::UserAttention::Informational)));
+        Task::batch([gone, flash])
+    }
+
+    /// A notification clicked: read, and to what it's about (its RO's Xtime page; a message: its conversation)
+    fn open_note(&mut self, id: u64) -> Task<Message> {
+        let Some(n) = self.notes.get(id).cloned() else {
+            return Task::none();
+        };
+        self.notes.mark_read(id);
+        self.notes.save();
+        self.notes_open = false;
+        if self.toast.is_some_and(|(t, _)| t == id) {
+            self.toast = None;
+        }
+        let mut tasks = Vec::new();
+        if !n.channel.is_empty() {
+            self.chat = true;
+            tasks.push(Task::done(Message::Chat(xtime_ui::chat::ChatMsg::Open(n.channel.clone()))));
+        }
+        if !n.ro.is_empty() {
+            let known = self.open.iter().any(|w| w.ro.ro == n.ro) || self.my_ros.iter().any(|r| r.ro == n.ro);
+            if known {
+                // RO news shows on its Xtime page (a message: the vehicle as it was, the chat beside it)
+                if n.kind != crate::notes::Kind::Message {
+                    if let Some(ws) = self.open.iter_mut().find(|w| w.ro.ro == n.ro) {
+                        ws.tab = Tab::XtimeView;
+                    } else {
+                        tasks.push(Task::done(Message::NoteShowXtime(n.ro.clone())));
+                    }
+                }
+                tasks.insert(0, self.update(Message::OpenRo(n.ro.clone())));
+            } else {
+                // not open and not yours (any more): looked up in Xtime, as Add an RO does
+                self.add_ro = Some(AddRo {
+                    ro: n.ro.clone(),
+                    ..Default::default()
+                });
+                tasks.push(self.submit_add_ro());
+            }
+        }
+        Task::batch(tasks)
     }
 
     /// Reads the ROs on your list that haven't been read in the last 5 minutes, one after another, for their spiff
@@ -2294,11 +2474,19 @@ impl App {
             return Task::none();
         }
         let now = clock::now();
+        // (ROs waiting on approval every minute, so approvals are noticed quickly; the rest every 5 minutes)
         let mut due: Vec<String> = self
             .my_ros
             .iter()
+            .filter(|r| {
+                let every = if matches!(r.mode.map(|m| m as i64), Some(4 | 5)) {
+                    50
+                } else {
+                    5 * 60
+                };
+                self.spiff_checked.get(&r.ro).is_none_or(|at| now - at >= every)
+            })
             .map(|r| r.ro.clone())
-            .filter(|ro| self.spiff_checked.get(ro).is_none_or(|at| now - at >= 5 * 60))
             .collect();
         due.extend(
             self.open
@@ -2418,5 +2606,15 @@ impl App {
 
     pub fn view(&self) -> Element<'_, Message> {
         ui::view(self)
+    }
+}
+
+/// Xtime's parts status as its number (2 waiting at parts, 3 working, 4 complete; 0 none): a number, or its words
+fn parts_status_number(v: Option<&serde_json::Value>) -> i64 {
+    match xtime_ui::my_ros::parts_label(v).map(|(label, _)| label) {
+        Some("Parts: waiting at parts") => 2,
+        Some("Parts: being worked on") => 3,
+        Some("Parts: complete") => 4,
+        _ => 0,
     }
 }

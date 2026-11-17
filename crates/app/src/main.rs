@@ -21,6 +21,7 @@
 
 mod app;
 mod clock;
+mod notes;
 mod print;
 mod reports;
 mod ros;

@@ -4,6 +4,7 @@
 //!   topbar.rs     Xtime / Workbench, Chat, My ROs, Settings
 //!   bottombar.rs  the shift clock, Xtime's state and the latest message, Feedback
 //!   sidebar.rs    open vehicles and your ROs
+//!   notes.rs      Notifications: the list, and the pop-up for a new one
 //!   workbench.rs  one vehicle: its tabs and the Service Manual's tabs
 //!   settings.rs   first setup and Settings
 //!   feedback.rs   Feedback: send a bug or an idea, your reports, everyone's (the admin)
@@ -19,6 +20,7 @@ pub use ui_kit::{anim, pill, style};
 mod bottombar;
 mod feedback;
 pub mod lines;
+mod notes;
 mod print_window;
 mod settings;
 mod sidebar;
@@ -50,15 +52,21 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 anim::side(sidebar::view(app), app.sidebar, anim::Edge::Left, sidebar::WIDTH),
                 main,
                 anim::side(chat(app), app.chat, anim::Edge::Right, CHAT_WIDTH),
+                anim::side(notes::panel(app), app.notes_open, anim::Edge::Right, notes::WIDTH),
             ]
             .height(Length::Fill)
             .into()
         }
     };
-    let base = container(column![topbar::view(app), body, bottombar::view(app)])
+    let page = container(column![topbar::view(app), body, bottombar::view(app)])
         .style(style::page)
         .width(Length::Fill)
         .height(Length::Fill);
+    // a new notification, popped up in the corner for a few seconds
+    let base: Element<'_, Message> = match notes::toast(app) {
+        Some(t) => iced::widget::stack![page, t].into(),
+        None => page.into(),
+    };
     // Settings, Feedback, Print, Hours or Service: a card over everything, the page frosted behind it
     match app.overlay {
         Some((which, phase)) => {

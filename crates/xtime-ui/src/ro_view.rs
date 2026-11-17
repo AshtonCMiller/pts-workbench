@@ -171,6 +171,8 @@ pub enum Out {
     SignedOut,
     /// The RO was just read (the app keeps its lines in your hours, and its spiff total)
     Read(RoView),
+    /// The RO was moved on to this stage here (the app doesn't notify you of your own move)
+    Moved(i64),
     Ask(Ask),
 }
 
@@ -498,7 +500,11 @@ impl XtimeView {
                             Some(7) => format!("RO {ro} sent to Review"),
                             _ => format!("RO {ro}: started working"),
                         };
-                        (self.load(env, true), vec![Out::Notice(said)])
+                        let mut outs = vec![Out::Notice(said)];
+                        if let Some(m) = mv.target() {
+                            outs.push(Out::Moved(m));
+                        }
+                        (self.load(env, true), outs)
                     }
                     Ok(Moved::NeedsRating(ask)) => {
                         self.rating = Some(RatingState {

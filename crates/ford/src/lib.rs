@@ -208,6 +208,9 @@ pub struct Ford {
     diag: Arc<Mutex<HashMap<String, (Instant, diagnostics::DiagContext)>>>,
     /// Each VIN's SLTS model code ("A8"), once SLTS has said (see labor.rs)
     slts_codes: Arc<Mutex<HashMap<String, String>>>,
+    /// Each VIN's copy of PTS's FeaturesAttributes cookie (its options, for the diagnostics search), and when it was
+    /// looked for (none: PTS had none)
+    features: Arc<Mutex<HashMap<String, (Instant, Option<String>)>>>,
 }
 
 impl Ford {
@@ -224,6 +227,7 @@ impl Ford {
             cache: None,
             diag: Arc::default(),
             slts_codes: Arc::default(),
+            features: Arc::default(),
         })
     }
 
@@ -257,6 +261,7 @@ impl Ford {
     pub fn reset(&self) {
         self.books.lock().expect("books lock").clear();
         self.diag.lock().expect("diag lock").clear();
+        self.features.lock().expect("features lock").clear();
     }
 
     pub(crate) fn url(&self, path: &str) -> Result<Url> {

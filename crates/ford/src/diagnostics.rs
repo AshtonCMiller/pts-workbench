@@ -29,7 +29,12 @@ pub struct DiagContext {
     pub build_date: String,
     pub vehicle_id: String,
     pub model_year: String,
+    /// The article language (TSB / GSB / SSM); the Workshop Manual's (pinpoint tests, procedures), wiring's and PC/ED's
+    /// (Ford's page sends each kind with its own)
     pub lang: String,
+    pub wsm_lang: String,
+    pub wiring_lang: String,
+    pub pced_lang: String,
     pub country: String,
     pub content_market: String,
     pub iso_lang: String,
@@ -383,6 +388,23 @@ pub fn read_page(json: &Value, ctx: &DiagContext) -> DiagPage {
     DiagPage { counts, dtc_info, results }
 }
 
+/// A date as its year, month and day, however it's written: "20230322", "2023-03-22", "3/22/2023"
+fn ymd(s: &str) -> Option<(u32, u32, u32)> {
+    let groups: Vec<&str> = s.split(|c: char| !c.is_ascii_digit()).filter(|g| !g.is_empty()).collect();
+    let n = |g: &str| g.parse::<u32>().ok();
+    match groups.as_slice() {
+        [one, ..] if one.len() == 8 => Some((n(&one[..4])?, n(&one[4..6])?, n(&one[6..])?)),
+        [y, m, d, ..] if y.len() == 4 => Some((n(y)?, n(m)?, n(d)?)),
+        [m, d, y, ..] if y.len() == 4 => Some((n(y)?, n(m)?, n(d)?)),
+        _ => None,
+    }
+}
+
+/// The same build date (written the same way, or not)
+fn same_day(a: &str, b: &str) -> bool {
+    a.trim() == b.trim() || matches!((ymd(a), ymd(b)), (Some(x), Some(y)) if x == y)
+}
+
 /// The vehicle's options from PTS's `FeaturesAttributes` cookie (only when it's this vehicle's: the same build date)
 fn feature_attributes(raw: &str, build_date: &str) -> Option<(Vec<String>, Option<String>, String)> {
     let raw = crate::doc::percent_decode(raw);
@@ -394,7 +416,7 @@ fn feature_attributes(raw: &str, build_date: &str) -> Option<(Vec<String>, Optio
         }
     }
     let bd = map.get("BuildDate")?.clone();
-    if bd != build_date {
+    if !same_day(&bd, build_date) {
         return None;
     }
     let list = |k: &str| -> Vec<String> {
@@ -413,7 +435,55 @@ fn feature_attributes(raw: &str, build_date: &str) -> Option<(Vec<String>, Optio
     Some((codes, line, bd))
 }
 
+/// Each kind's language, as Ford's page sends them (TSB / GSB / SSM: the article language; videos: always enusa)
+fn source_lang<'a>(ctx: &'a DiagContext, kind: &str) -> &'a str {
+    match kind {
+        "wsmppt" | "wsmproc" => &ctx.wsm_lang,
+        "wiring" => &ctx.wiring_lang,
+        "pced" => &ctx.pced_lang,
+        "tsv" => "enusa",
+        _ => &ctx.lang,
+    }
+}
+
 impl Ford {
+    /// This vehicle's options for the search (PTS's `FeaturesAttributes` cookie). PTS keeps the cookie for the
+    /// vehicle it identified last, and its own page keeps a copy for each VIN to put back when you switch vehicles:
+    /// so does this. The cookie as it is when it's this vehicle's; else this VIN's copy; else the VIN identified again
+    /// (as PTS does), and the cookie read then. Values are never logged.
+    async fn vehicle_options(&self, vin: &str, build_date: &str) -> Option<(Vec<String>, Option<String>, String)> {
+        let now = || self.http.cookie(&self.base, "FeaturesAttributes");
+        if let Some(raw) = now() {
+            if let Some(f) = feature_attributes(&raw, build_date) {
+                self.features
+                    .lock()
+                    .expect("features lock")
+                    .insert(vin.to_string(), (Instant::now(), Some(raw)));
+                return Some(f);
+            }
+        }
+        let kept = self.features.lock().expect("features lock").get(vin).cloned();
+        match kept {
+            Some((_, Some(raw))) => return feature_attributes(&raw, build_date),
+            // tried lately, and PTS had none for it
+            Some((at, None)) if at.elapsed() < KEEP => return None,
+            _ => {}
+        }
+        // identified again: PTS sets the cookie for this VIN
+        let _ = self.decode(vin).await;
+        let found = now().filter(|raw| feature_attributes(raw, build_date).is_some());
+        self.log(if found.is_some() {
+            "   diagnostics: the vehicle's options came with identifying it again"
+        } else {
+            "   diagnostics: no vehicle options from PTS for this VIN (searched without them)"
+        });
+        self.features
+            .lock()
+            .expect("features lock")
+            .insert(vin.to_string(), (Instant::now(), found.clone()));
+        feature_attributes(&found?, build_date)
+    }
+
     /// The vehicle's side of the search (its diagnostics page), kept half an hour
     pub async fn diag_context(&self, vin: &str) -> Result<DiagContext> {
         let book = self.book(vin).await?;
@@ -461,6 +531,9 @@ impl Ford {
             build_date: or(page_str(&html, "BuildDate"), &v.build_date),
             vehicle_id: or(page_number(&html, "VehicleID"), book.param("vehicleId")),
             model_year: or(page_str(&html, "ModelYear"), &year),
+            wsm_lang: or(page_str(&html, "WSMLanguage").to_lowercase(), &lang),
+            wiring_lang: or(page_str(&html, "WiringLanguage").to_lowercase(), &lang),
+            pced_lang: or(page_str(&html, "PCEDLanguage").to_lowercase(), &lang),
             lang,
             country: or(
                 page_str(&html, "Country"),
@@ -526,7 +599,7 @@ impl Ford {
             "searchTerm": req.text.trim(),
             "articleNumber": articles,
             "dtc": req.dtcs,
-            "source": wanted.iter().map(|t| json!({ "language": if *t == "tsv" { "enusa" } else { ctx.lang.as_str() }, "type": t })).collect::<Vec<_>>(),
+            "source": wanted.iter().map(|t| json!({ "language": source_lang(&ctx, t), "type": t })).collect::<Vec<_>>(),
             "start": req.start,
             "rows": req.rows.max(1),
             "descriptionFlag": true,
@@ -536,11 +609,7 @@ impl Ford {
         if req.exact {
             params["searchType"] = json!("exact");
         }
-        if let Some((codes, line, bd)) = self
-            .http
-            .cookie(&self.base, "FeaturesAttributes")
-            .and_then(|raw| feature_attributes(&raw, &ctx.build_date))
-        {
+        if let Some((codes, line, bd)) = self.vehicle_options(&book.vin, &ctx.build_date).await {
             params["featureCodes"] = json!(codes);
             if let Some(l) = line {
                 params["vehicleLine"] = json!([l]);
@@ -662,6 +731,15 @@ mod tests {
         // GSI books the other way round
         let w = p.results[2].proc.clone().unwrap();
         assert_eq!((w.proc_uid.as_str(), w.search_number.as_str()), ("S1", "P1"));
+    }
+
+    #[test]
+    fn build_dates_written_any_way() {
+        assert!(same_day("20230322", "2023-03-22"));
+        assert!(same_day("3/22/2023", "20230322"));
+        assert!(same_day("2023-03-22T00:00:00", "03/22/2023"));
+        assert!(!same_day("20230322", "20230323"));
+        assert!(!same_day("", "20230322"));
     }
 
     #[test]
