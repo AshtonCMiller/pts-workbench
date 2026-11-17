@@ -58,6 +58,8 @@ UninstPage instfiles
   Pop $0
   nsExec::Exec 'taskkill /F /IM pts-signin.exe'
   Pop $0
+  nsExec::Exec 'taskkill /F /IM pts-vci32.exe'
+  Pop $0
   Sleep 800
 !macroend
 
@@ -69,6 +71,7 @@ Section "PTS Workbench"
   File "${SRC}\pts-workbench-app.exe"
   File "${SRC}\pts-signin.exe"
   File "${SRC}\pdfium.dll"
+  File "${SRC}\pts-vci32.exe"
   WriteUninstaller "$INSTDIR\${UNINSTALLER}"
 
   ; (the same names as the Electron app's shortcuts: those now open this)
@@ -100,6 +103,7 @@ Section "Uninstall"
   Delete "$INSTDIR\pts-workbench-app.exe"
   Delete "$INSTDIR\pts-signin.exe"
   Delete "$INSTDIR\pdfium.dll"
+  Delete "$INSTDIR\pts-vci32.exe"
   Delete "$INSTDIR\${UNINSTALLER}"
   RMDir "$INSTDIR"
   Delete "$DESKTOP\${NAME}.lnk"

@@ -8,6 +8,7 @@
 # Each release has:
 #   pts-workbench.exe, pts-workbench-app.exe,   the program files, which the new app updates itself with
 #   pts-signin.exe, pdfium.dll, workbench.json  (workbench.json: each one's size and SHA-256; crates/app/src/updates.rs)
+#   pts-vci32.exe                               Diagnostics' helper: 32-bit, to load Ford's 32-bit VCI driver
 #   PTS-Workbench-Setup-<version>.exe           the installer: per-user, no admin (installer/pts-workbench.nsi)
 #   app-bundle.asar, app-bundle.json,           for computers still on the Electron app: its usual update files, so
 #   latest.yml, beta.yml                        it moves itself over to the new app (handoff/, scripts/release-files.js)
@@ -77,6 +78,8 @@ jobs:
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
+          # Diagnostics' helper (pts-vci32) is 32-bit: Ford's VCI drivers are
+          rustup target add i686-pc-windows-msvc
           rustc --version
 
       # Compiled crates kept between builds (only rebuilding what changed): named from Cargo.toml / Cargo.lock as
@@ -98,7 +101,10 @@ jobs:
       - name: Build
         if: steps.version.outputs.exists == 'false'
         shell: bash
-        run: cargo build --workspace --release
+        run: |
+          cargo build --workspace --exclude vci-bridge --release
+          cargo build -p vci-bridge --release --target i686-pc-windows-msvc
+          cp target/i686-pc-windows-msvc/release/pts-vci32.exe target/release/
 
       - name: Gather the program files
         if: steps.version.outputs.exists == 'false'
@@ -115,7 +121,7 @@ jobs:
             cp pdfium/bin/pdfium.dll target/release/
           fi
           mkdir -p dist/app
-          for f in pts-workbench.exe pts-workbench-app.exe pts-signin.exe pdfium.dll; do
+          for f in pts-workbench.exe pts-workbench-app.exe pts-signin.exe pdfium.dll pts-vci32.exe; do
             if [ ! -f "target/release/$f" ]; then echo "::error::target/release/$f wasn't built"; exit 1; fi
             cp "target/release/$f" dist/app/
           done
@@ -187,7 +193,7 @@ jobs:
         run: |
           cd dist
           gh release upload "v${{ steps.version.outputs.number }}" --clobber \
-            app/pts-workbench.exe app/pts-workbench-app.exe app/pts-signin.exe app/pdfium.dll \
+            app/pts-workbench.exe app/pts-workbench-app.exe app/pts-signin.exe app/pdfium.dll app/pts-vci32.exe \
             "PTS-Workbench-Setup-${{ steps.version.outputs.number }}.exe" \
             app-bundle.asar app-bundle.json latest.yml beta.yml workbench.json
 

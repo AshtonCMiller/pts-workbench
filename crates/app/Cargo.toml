@@ -33,6 +33,8 @@ ui-kit.workspace = true
 xtime-ui.workspace = true
 hours-ui.workspace = true
 ford-ui.workspace = true
+# Diagnostics: talking to the vehicle through Ford's VCI
+vci = { path = "../vci", features = ["client"]}
 keyring.workspace = true
 iced.workspace = true
 tokio.workspace = true

@@ -1,11 +1,12 @@
 //! The app's screens. `view` puts them together: the top bar, then (with the sidebar and chat on either side) your
 //! Xtime dashboard or the Workbench. First setup and Settings fill the window instead.
 //!
-//!   topbar.rs     Xtime / Workbench, Chat, My ROs, Settings
+//!   topbar.rs     Xtime / Workbench / Diagnostics, Chat, My ROs, Settings
 //!   bottombar.rs  the shift clock, Xtime's state and the latest message, Feedback
 //!   sidebar.rs    open vehicles and your ROs
 //!   notes.rs      Notifications: the list, and the pop-up for a new one
 //!   workbench.rs  one vehicle: its tabs and the Service Manual's tabs
+//!   diag.rs       Diagnostics: the VCI, the vehicle plugged in, the network test
 //!   settings.rs   first setup and Settings
 //!   feedback.rs   Feedback: send a bug or an idea, your reports, everyone's (the admin)
 //!   print_window.rs  the app's Print window: a preview of every page, the printer, copies
@@ -18,6 +19,7 @@
 pub use ui_kit::{anim, pill, style};
 
 mod bottombar;
+mod diag;
 mod feedback;
 pub mod lines;
 mod notes;
@@ -46,6 +48,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 // your ROs as Xtime's dashboard has them (crates/xtime-ui)
                 Mode::Xtime => anim::page(xtime_ui::my_ros::dashboard(&app.my_ros, &app.search).map(Message::from), phase).into(),
                 Mode::Workbench => anim::page(workbench::view(app), phase).into(),
+                Mode::Diagnostics => anim::page(diag::view(app), phase).into(),
             };
             // My ROs and Chat slide in and out of their sides
             row![

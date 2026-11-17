@@ -1,4 +1,4 @@
-//! The top bar: getting around (Xtime / Workbench, Chat, My ROs, Settings). What's going on is in the bottom bar.
+//! The top bar: getting around (Xtime / Workbench / Diagnostics, Chat, My ROs, Settings). What's going on is in the bottom bar.
 
 use iced::widget::{button, container, horizontal_space, row, text};
 use iced::{Alignment, Element, Length};
@@ -19,9 +19,23 @@ pub fn view(app: &App) -> Element<'_, Message> {
         format!("Workbench  {}", app.open.len())
     };
 
+    // a dot when a vehicle's connected
+    let diagnostics = if app.diag.connected() {
+        "Diagnostics  •".to_string()
+    } else {
+        "Diagnostics".to_string()
+    };
     let modes = anim::tabs(
-        if app.mode == Mode::Xtime { 0 } else { 1 },
-        vec![mode("Xtime".into(), Mode::Xtime).into(), mode(workbench, Mode::Workbench).into()],
+        match app.mode {
+            Mode::Xtime => 0,
+            Mode::Workbench => 1,
+            Mode::Diagnostics => 2,
+        },
+        vec![
+            mode("Xtime".into(), Mode::Xtime).into(),
+            mode(workbench, Mode::Workbench).into(),
+            mode(diagnostics, Mode::Diagnostics).into(),
+        ],
     );
     let mut bar = row![modes, horizontal_space()].spacing(6).align_y(Alignment::Center);
     let toggle = |label: String, on: bool, msg: Message| button(text(label)).padding([5, 10]).style(style::toggle(on)).on_press(msg);

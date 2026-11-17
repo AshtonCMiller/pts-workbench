@@ -16,11 +16,13 @@ use crate::ui::anim::{self, Phase};
 use crate::workspace::{ManualTab, Tab, Workspace};
 use crate::{sample, ui};
 
-/// Top bar: Xtime (your dashboard) or the Workbench (the vehicles you have open)
+/// Top bar: Xtime (your dashboard), the Workbench (the vehicles you have open), or Diagnostics (the vehicle plugged
+/// into the VCI)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Xtime,
     Workbench,
+    Diagnostics,
 }
 
 /// What fills the window
@@ -124,6 +126,8 @@ pub struct App {
     pub watch: crate::notes::Watch,
     pub notes_open: bool,
     pub toast: Option<(u64, Phase)>,
+    /// Diagnostics: the VCI and the vehicle plugged into it
+    pub diag: crate::diag::Diag,
     /// The Dealership chat panel (crates/xtime-ui): your conversations, read from Xtime
     pub chat_panel: xtime_ui::chat::ChatPanel,
     /// Chat's settings as last kept in xtime-chat.json (written again only when Xtime says otherwise)
@@ -284,6 +288,8 @@ pub enum Message {
     Synced(Box<crate::syncing::Outcome>),
     SetSync(bool),
     SetMode(Mode),
+    /// Diagnostics (the VCI and the vehicle plugged in): its own messages
+    Vci(crate::diag::DiagMsg),
     Search(String),
     /// Open (or show) a vehicle by RO number
     OpenRo(String),
@@ -489,6 +495,7 @@ impl App {
             notes: crate::notes::Notes::load(crate::timecard::now_ms()),
             watch: Default::default(),
             notes_open: false,
+            diag: crate::diag::Diag::default(),
             toast: None,
             chat_panel: xtime_ui::chat::ChatPanel::new(),
             chat_saved,
@@ -578,6 +585,7 @@ impl App {
     fn screen_name(&self) -> String {
         match (&self.screen, self.mode, self.workspace()) {
             (_, Mode::Xtime, _) => "Xtime".into(),
+            (_, Mode::Diagnostics, _) => "Diagnostics".into(),
             (_, Mode::Workbench, None) => "Workbench".into(),
             (_, Mode::Workbench, Some(ws)) => match ws.tab {
                 Tab::ServiceManual => format!("Workbench › Service Manual › {}", ws.manual.label()),
@@ -748,7 +756,21 @@ impl App {
 
     fn apply(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::SetMode(m) => self.mode = m,
+            Message::SetMode(m) => {
+                self.mode = m;
+                if m == Mode::Diagnostics {
+                    return self.diag.shown().map(Message::Vci);
+                }
+            }
+            Message::Vci(m) => {
+                let (task, out) = self.diag.update(m);
+                let task = task.map(Message::Vci);
+                return match out {
+                    crate::diag::Out::None => task,
+                    crate::diag::Out::Copy(text) => Task::batch([task, iced::clipboard::write(text)]),
+                    crate::diag::Out::OpenRo(ro) => Task::batch([task, Task::done(Message::OpenRo(ro))]),
+                };
+            }
             Message::Search(s) => self.search = s,
             Message::OpenRo(ro) => {
                 if self.notes.read_ro(&ro) {
@@ -2590,6 +2612,12 @@ impl App {
             // the chat, every 30 s while it's open (otherwise with your ROs, every minute)
             if self.chat {
                 iced::time::every(std::time::Duration::from_secs(30)).map(|_| Message::RefreshChat)
+            } else {
+                Subscription::none()
+            },
+            // Diagnostics, connected: the battery's voltage every 5 s
+            if self.diag.connected() {
+                iced::time::every(std::time::Duration::from_secs(5)).map(|_| Message::Vci(crate::diag::DiagMsg::ReadVolts))
             } else {
                 Subscription::none()
             },

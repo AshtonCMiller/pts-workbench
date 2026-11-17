@@ -19,7 +19,7 @@ const dist = path.join(root, 'dist');
 const { VERSION, TAG, REPO } = process.env;
 if (!VERSION || !TAG || !REPO) { console.error('VERSION, TAG and REPO are needed'); process.exit(1); }
 
-const PROGRAM = ['pts-workbench.exe', 'pts-workbench-app.exe', 'pts-signin.exe', 'pdfium.dll'];
+const PROGRAM = ['pts-workbench.exe', 'pts-workbench-app.exe', 'pts-signin.exe', 'pdfium.dll', 'pts-vci32.exe'];
 const SETUP = `PTS-Workbench-Setup-${VERSION}.exe`;
 
 const sha = (alg, buf, enc) => crypto.createHash(alg).update(buf).digest(enc);

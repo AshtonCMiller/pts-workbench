@@ -4480,6 +4480,7 @@ dependencies = [
  "tokio",
  "ui-kit",
  "ureq",
+ "vci",
  "windows-sys 0.59.0",
  "winresource",
  "workbench-net",
@@ -6299,6 +6300,23 @@ name = "utf_types"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a3b425286980a367278453f3b6d28cdcb134b574e5a35824a6ff5eebad50bb6"
+
+[[package]]
+name = "vci"
+version = "0.5.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "vci-bridge"
+version = "0.5.0"
+dependencies = [
+ "serde_json",
+ "vci",
+]
 
 [[package]]
 name = "vecmath"
