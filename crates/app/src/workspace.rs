@@ -2,7 +2,7 @@
 
 use xtime::dashboard::AssignedRo;
 // the vehicle's name and the RO's stage (crates/xtime-ui), under their usual names here
-pub use xtime_ui::my_ros::{STAGES, mode_label, stage, vehicle_name};
+pub use xtime_ui::my_ros::{mode_label, vehicle_name};
 
 /// One open vehicle (RO)
 #[derive(Debug, Clone)]

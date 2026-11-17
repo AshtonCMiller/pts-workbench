@@ -3,16 +3,20 @@
 //! under them, the other recommendations, and the inspection lines (hidden until asked for). Each line shows its
 //! approval, labor type, hours and price, and a Done box that changes it in Xtime; click a line for its concern, cause,
 //! correction, notes and parts. Read from Xtime every minute while it's showing. No customer details are read.
+//!
+//! Each line has a handle on its left: drag it to reorder the lines, or to put a recommendation under a customer
+//! concern (or back out on its own), as on Xtime's RO page. Where it'll land opens up under the cursor.
 
 use std::collections::HashMap;
 
 use iced::alignment::Horizontal;
-use iced::widget::{Column, Row, Space, button, checkbox, column, container, horizontal_space, row, text};
-use iced::{Alignment, Color, Element, Length};
-use xtime::ro::{self, Line, RoView, Sections};
+use iced::widget::{Column, Row, Space, button, checkbox, column, container, horizontal_space, mouse_area, row, text};
+use iced::{Alignment, Color, Element, Length, mouse};
+use xtime::ro::{self, Line, Place, RoView, Sections};
 
 use ui_kit::{anim, pill, style};
 
+use crate::ro_view::{Drag, Target};
 use crate::{Ask, LoadError, Msg, XtimeView};
 
 /// What the Xtime View shows from the rest of the app
@@ -115,18 +119,29 @@ pub fn view<'a>(xv: &'a XtimeView, shown: &Shown) -> Element<'a, Msg> {
                 .style(style::muted),
         );
     }
-    page = page.push(section(
+    let mut lists = column![].spacing(12);
+    if let Some(d) = &xv.drag {
+        lists = lists.push(drag_hint(d));
+    }
+    lists = lists.push(section(
         &cx,
         "Customer Initial Concerns",
+        Place::Concerns,
         sections.concerns.iter().map(|(c, kids)| (*c, kids.clone())).collect(),
         v,
     ));
-    page = page.push(section(
+    lists = lists.push(section(
         &cx,
         "Additional Service Recommendations",
+        Place::Recommendations,
         sections.loose.iter().map(|&i| (i, vec![])).collect(),
         v,
     ));
+    // dragging: off the lists, it goes back where it was if let go
+    page = page.push(match &xv.drag {
+        Some(_) => Element::from(mouse_area(lists).on_exit(Msg::DragOff).interaction(mouse::Interaction::Grabbing)),
+        None => lists.into(),
+    });
     if v.lines.iter().all(Line::is_inspection) {
         page = page.push(empty_card("No lines on this RO yet."));
     }
@@ -510,9 +525,10 @@ fn section_head<'a>(title: &'a str, count: usize, approved: &[&Line]) -> Row<'a,
     h
 }
 
-/// Lines with the recommendations under each (indexes into the RO's lines)
-fn section<'a>(cx: &Ctx<'a, '_>, title: &'a str, groups: Vec<(usize, Vec<usize>)>, v: &'a RoView) -> Element<'a, Msg> {
-    if groups.is_empty() {
+/// Lines with the recommendations under each (indexes into the RO's lines); `place`: which of Xtime's lists it is
+fn section<'a>(cx: &Ctx<'a, '_>, title: &'a str, place: Place, groups: Vec<(usize, Vec<usize>)>, v: &'a RoView) -> Element<'a, Msg> {
+    let dragging_here = cx.xv.drag.as_ref().is_some_and(|d| d.fits(&place));
+    if groups.is_empty() && !dragging_here {
         return Space::with_height(0).into();
     }
     let recs: Vec<&Line> = groups
@@ -523,7 +539,19 @@ fn section<'a>(cx: &Ctx<'a, '_>, title: &'a str, groups: Vec<(usize, Vec<usize>)
         .collect();
     let mut list = column![section_head(title, groups.len(), &recs)].spacing(8);
     for (i, kids) in groups {
-        list = list.push(line_card(cx, &v.lines[i], kids.iter().map(|&k| &v.lines[k]).collect()));
+        let l = &v.lines[i];
+        if let Some(m) = marker(cx.xv, &place, Some(l)) {
+            list = list.push(m);
+        }
+        list = list.push(line_card(cx, l, &place, kids.iter().map(|&k| &v.lines[k]).collect()));
+    }
+    // the end of the list
+    if dragging_here {
+        let label = match place {
+            Place::Concerns => "Move it to the end of the concerns",
+            _ => "Move it here, on its own",
+        };
+        list = list.push(slot(cx.xv, Target { place, before: None }, label.to_string()));
     }
     list.into()
 }
@@ -544,7 +572,7 @@ fn inspection<'a>(cx: &Ctx<'a, '_>, v: &'a RoView, s: &Sections) -> Element<'a, 
     let mut list = column![head].spacing(8);
     if xv.show_inspection {
         for &i in &s.inspection {
-            list = list.push(line_card(cx, &v.lines[i], vec![]));
+            list = list.push(line_card(cx, &v.lines[i], &Place::Recommendations, vec![]));
         }
     } else {
         list = list.push(
@@ -556,8 +584,121 @@ fn inspection<'a>(cx: &Ctx<'a, '_>, v: &'a RoView, s: &Sections) -> Element<'a, 
     list.into()
 }
 
-/// A line: its head (click to open), what's under it when open, and the recommendations added under it
-fn line_card<'a>(cx: &Ctx<'a, '_>, l: &'a Line, children: Vec<&'a Line>) -> Element<'a, Msg> {
+/// What's shown while a line's being dragged: what to do
+fn drag_hint<'a>(d: &Drag) -> Element<'a, Msg> {
+    let tip = if d.primary {
+        "Drag between the concerns to change their order. Let go to move it, or press Esc to put it back."
+    } else {
+        "Drag it onto a concern to put it under that concern, or between lines to change the order. Esc puts it back."
+    };
+    anim::page(
+        container(text(tip).size(13))
+            .padding([8, 14])
+            .width(Length::Fill)
+            .style(|t: &iced::Theme| {
+                let accent = style::colors(t).accent;
+                container::Style {
+                    background: Some(Color { a: 0.10, ..accent }.into()),
+                    border: iced::Border {
+                        color: Color { a: 0.4, ..accent },
+                        width: 1.0,
+                        radius: 10.0.into(),
+                    },
+                    ..Default::default()
+                }
+            }),
+        anim::Phase::Entering(d.since),
+    )
+    .into()
+}
+
+/// Where the dragged line would land: it opens up (springing in) with what letting go does
+fn landing<'a>(d: &Drag, label: String) -> Element<'a, Msg> {
+    anim::page(
+        container(text(label).size(13).font(style::BOLD))
+            .padding([10, 14])
+            .width(Length::Fill)
+            .center_x(Length::Fill)
+            .style(|t: &iced::Theme| {
+                let accent = style::colors(t).accent;
+                container::Style {
+                    text_color: Some(accent),
+                    background: Some(Color { a: 0.12, ..accent }.into()),
+                    border: iced::Border {
+                        color: accent,
+                        width: 2.0,
+                        radius: 10.0.into(),
+                    },
+                    ..Default::default()
+                }
+            }),
+        anim::Phase::Entering(d.target_since),
+    )
+    .into()
+}
+
+/// The landing spot shown before `l` (or at the end: none), when that's where the dragged line would land
+fn marker<'a>(xv: &XtimeView, place: &Place, l: Option<&Line>) -> Option<Element<'a, Msg>> {
+    let d = xv.drag.as_ref()?;
+    let t = d.target.as_ref()?;
+    let here = &t.place == place && t.before.as_deref() == l.map(|l| l.key()).as_deref();
+    here.then(|| {
+        mouse_area(landing(d, "Move it here".into()))
+            .on_enter(Msg::DragOver(t.clone()))
+            .into()
+    })
+}
+
+/// A place to drop at the end of a list (while dragging a line that can go there): a thin strip that opens up when
+/// the line's over it
+fn slot<'a>(xv: &XtimeView, t: Target, label: String) -> Element<'a, Msg> {
+    let Some(d) = &xv.drag else { return Space::with_height(0).into() };
+    let active = d.target.as_ref() == Some(&t);
+    let inner: Element<'a, Msg> = if active {
+        landing(d, label)
+    } else {
+        container(text(label).size(12).style(style::muted))
+            .padding([6, 14])
+            .width(Length::Fill)
+            .center_x(Length::Fill)
+            .style(|th: &iced::Theme| container::Style {
+                border: iced::Border {
+                    color: style::colors(th).line,
+                    width: 1.0,
+                    radius: 10.0.into(),
+                },
+                ..Default::default()
+            })
+            .into()
+    };
+    mouse_area(inner).on_enter(Msg::DragOver(t)).into()
+}
+
+/// The handle a line's dragged by: three short bars (drawn, so it shows in every font)
+fn grip<'a>(key: String, on: bool) -> Element<'a, Msg> {
+    let bar = || {
+        container(Space::new(12, 2)).style(move |t: &iced::Theme| container::Style {
+            background: Some(style::colors(t).muted.into()),
+            border: iced::Border {
+                radius: 1.0.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+    };
+    let g = container(column![bar(), bar(), bar()].spacing(3)).padding([10, 6]);
+    if !on {
+        return g.into();
+    }
+    mouse_area(g)
+        .on_press(Msg::DragStart(key))
+        .interaction(mouse::Interaction::Grab)
+        .into()
+}
+
+/// A line: its head (click to open), what's under it when open, and the recommendations added under it. `place`:
+/// which of Xtime's lists it's in (where dropping on it puts a dragged line).
+fn line_card<'a>(cx: &Ctx<'a, '_>, l: &'a Line, place: &Place, children: Vec<&'a Line>) -> Element<'a, Msg> {
     let xv = cx.xv;
     let key = l.key();
     let opened = xv.open.get(&key).copied();
@@ -633,13 +774,42 @@ fn line_card<'a>(cx: &Ctx<'a, '_>, l: &'a Line, children: Vec<&'a Line>) -> Elem
         None => Space::with_width(0).into(),
     };
     let flag = container(flag).width(FLAG_WIDTH).align_x(Alignment::End);
-    let mut card = column![
-        row![head_button, flag, done]
-            .spacing(10)
-            .align_y(Alignment::Center)
-            .padding([0, 10])
-    ]
-    .spacing(0);
+    // the handle (not on inspection lines, or while a line's being moved)
+    let draggable = !l.is_inspection();
+    let handle: Element<'a, Msg> = if draggable {
+        grip(key.clone(), xv.line_moving.is_none() && !busy)
+    } else {
+        Space::with_width(0).into()
+    };
+    let head_row = row![handle, head_button, flag, done]
+        .spacing(10)
+        .align_y(Alignment::Center)
+        .padding(iced::Padding {
+            top: 0.0,
+            right: 10.0,
+            bottom: 0.0,
+            left: if draggable { 2.0 } else { 10.0 },
+        });
+    // dragging: over this line, the dragged one would land before it; over a concern, a recommendation goes under it
+    let dragged = xv.drag.as_ref().is_some_and(|d| d.key == key);
+    let head: Element<'a, Msg> = match &xv.drag {
+        Some(d) if draggable && !dragged => {
+            let t = if l.primary && !d.primary {
+                Target {
+                    place: Place::Under(l.id.clone()),
+                    before: children.first().map(|c| c.key()),
+                }
+            } else {
+                Target {
+                    place: place.clone(),
+                    before: Some(key.clone()),
+                }
+            };
+            mouse_area(head_row).on_enter(Msg::DragOver(t)).into()
+        }
+        _ => head_row.into(),
+    };
+    let mut card = column![head].spacing(0);
 
     if let Some(at) = opened {
         // Edit (Xtime's Add Service window, filled in from the line); Delete for recommendations (press twice)
@@ -675,7 +845,10 @@ fn line_card<'a>(cx: &Ctx<'a, '_>, l: &'a Line, children: Vec<&'a Line>) -> Elem
         ];
         card = card.push(anim::page(body, anim::Phase::Entering(at)).on_card());
     }
-    if !children.is_empty() {
+    // a recommendation being dragged can go under this concern (at the end of what's under it)
+    let under = Place::Under(l.id.clone());
+    let can_take = l.primary && xv.drag.as_ref().is_some_and(|d| !dragged && d.fits(&under));
+    if !children.is_empty() || can_take {
         let label = if l.dms.is_empty() {
             "Recommended for this concern".to_string()
         } else {
@@ -683,7 +856,25 @@ fn line_card<'a>(cx: &Ctx<'a, '_>, l: &'a Line, children: Vec<&'a Line>) -> Elem
         };
         let mut kids = column![text(label).size(12).font(style::BOLD).style(style::muted)].spacing(6);
         for c in children {
-            kids = kids.push(line_card(cx, c, vec![]));
+            if let Some(m) = marker(xv, &under, Some(c)) {
+                kids = kids.push(m);
+            }
+            kids = kids.push(line_card(cx, c, &under, vec![]));
+        }
+        if can_take {
+            let to = if l.dms.is_empty() {
+                "this concern".to_string()
+            } else {
+                format!("line {}", l.dms)
+            };
+            kids = kids.push(slot(
+                xv,
+                Target {
+                    place: under,
+                    before: None,
+                },
+                format!("Put it under {to}"),
+            ));
         }
         card = card.push(container(kids).padding(iced::Padding {
             top: 4.0,
@@ -699,6 +890,18 @@ fn line_card<'a>(cx: &Ctx<'a, '_>, l: &'a Line, children: Vec<&'a Line>) -> Elem
             let mut s = style::card(theme);
             s.border.color = edge;
             s.border.width = if faded { 1.0 } else { 1.5 };
+            // picked up: it shows lifted out of its place
+            if dragged {
+                let accent = style::colors(theme).accent;
+                s.border.color = accent;
+                s.border.width = 2.0;
+                s.text_color = Some(style::colors(theme).muted);
+                s.shadow = iced::Shadow {
+                    color: Color { a: 0.25, ..Color::BLACK },
+                    offset: iced::Vector::new(0.0, 6.0),
+                    blur_radius: 18.0,
+                };
+            }
             s
         })
         .into()

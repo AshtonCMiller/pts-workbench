@@ -1,5 +1,6 @@
 //! The Xtime View's state and what changes it: reading the RO (and its inspection form), opening lines, Done, the
-//! inspection form's items and forms, deleting a line. Its look: view.rs and inspection.rs.
+//! inspection form's items and forms, deleting a line, dragging lines to reorder them (and recommendations under a
+//! concern, or out from under one). Its look: view.rs and inspection.rs.
 //!
 //! The app keeps one [`XtimeView`] per open vehicle and sends it [`Msg`]s for that RO. What only the app can do comes
 //! back from [`XtimeView::update`] as [`Out`]s: a notice for the bottom bar, "signed out", the RO as it was just read
@@ -11,7 +12,7 @@ use std::time::Instant;
 use iced::Task;
 use xtime::Xtime;
 use xtime::inspect::{FormChoice, InspectionForm, Press, RedService};
-use xtime::ro::RoView;
+use xtime::ro::{Place, RoView, same_id};
 use xtime::stage::{Check, Move, Moved, Rating, RatingAsk};
 
 use crate::LoadError;
@@ -62,6 +63,43 @@ pub struct XtimeView {
     pub confirm: Option<Move>,
     pub moving: Option<Move>,
     pub rating: Option<RatingState>,
+    /// A line being dragged (and where it would land if let go now)
+    pub drag: Option<Drag>,
+    /// A line whose move is being sent to Xtime (its line ID)
+    pub line_moving: Option<String>,
+    /// The RO being read when a move was made: what comes back is from before it (read again)
+    stale: bool,
+}
+
+/// A line being dragged by its handle
+#[derive(Debug, Clone)]
+pub struct Drag {
+    /// Its line ID
+    pub key: String,
+    /// A customer concern (they only go among the concerns; recommendations go under one, or on their own)
+    pub primary: bool,
+    pub target: Option<Target>,
+    /// When it was picked up, and when the target last changed (for their animations)
+    pub since: Instant,
+    pub target_since: Instant,
+}
+
+/// Where a dragged line would land: in one of Xtime's lists, before a line (its ID), or at the end
+#[derive(Debug, Clone, PartialEq)]
+pub struct Target {
+    pub place: Place,
+    pub before: Option<String>,
+}
+
+impl Drag {
+    /// Whether this line can be dropped there
+    pub fn fits(&self, place: &Place) -> bool {
+        match place {
+            Place::Concerns => self.primary,
+            Place::Under(c) => !self.primary && !same_id(c, &serde_json::Value::String(self.key.clone())),
+            Place::Recommendations => !self.primary,
+        }
+    }
 }
 
 /// The store's "Repair Order Quality" rating of the advisor, asked before the RO goes on
@@ -142,6 +180,13 @@ pub enum Msg {
     RateText(String),
     SendRating,
     CancelRating,
+    /// Dragging a line: picked up by its handle (its line ID); over somewhere it can go; off the lists; let go
+    /// (`true`: dropped where it's over; `false`: Escape, put back); Xtime's answer to the move
+    DragStart(String),
+    DragOver(Target),
+    DragOff,
+    DragEnd(bool),
+    LineMoved(String, Result<(), LoadError>),
     /// A button meant for the app
     Ask(Ask),
 }
@@ -249,6 +294,66 @@ impl XtimeView {
         (task, outs)
     }
 
+    /// A line dropped: moved here right away, then in Xtime (its own RO page's way: the list it's in, where in it)
+    fn move_line(&mut self, env: &Env, key: &str, t: Target) -> Step {
+        let Some(v) = self.view.as_mut() else { return just(vec![]) };
+        let Some(line) = v.lines.iter().find(|l| l.key() == key) else {
+            return just(vec![]);
+        };
+        let id = line.id.clone();
+        let was_group = line.group_id.clone();
+        // where it lands, as Xtime counts it: before a line, or after the last one shown in that list
+        let shown: Vec<serde_json::Value> = shown_in(v, &t.place).into_iter().map(|l| l.id.clone()).collect();
+        let before = t
+            .before
+            .as_ref()
+            .and_then(|b| v.lines.iter().find(|l| &l.key() == b))
+            .map(|l| l.id.clone());
+        let order = v.drop_order(&id, &t.place, before.as_ref(), &shown.iter().collect::<Vec<_>>());
+        let group = match &t.place {
+            Place::Under(c) => Some(c.clone()),
+            _ => None,
+        };
+        // nothing changes: nothing sent
+        let same_list = match (&group, &was_group) {
+            (Some(a), Some(b)) => same_id(a, b),
+            (None, g) => g.as_ref().is_none_or(|g| g.is_null()),
+            _ => false,
+        };
+        let now_at = v.xtime_list(&t.place).iter().position(|l| same_id(&l.id, &id)).map(|i| i + 1);
+        if same_list && now_at == Some(order) {
+            return just(vec![]);
+        }
+        // on screen now: under its new concern (or none), in its new place
+        let from = v.lines.iter().position(|l| same_id(&l.id, &id)).expect("found above");
+        let mut moved = v.lines.remove(from);
+        moved.group_id = group.clone();
+        let to = match &before {
+            Some(b) => v.lines.iter().position(|l| same_id(&l.id, b)).unwrap_or(v.lines.len()),
+            None => shown
+                .iter()
+                .filter(|s| !same_id(s, &id))
+                .filter_map(|s| v.lines.iter().position(|l| same_id(&l.id, s)))
+                .max()
+                .map_or_else(|| first_slot(v, &t.place), |i| i + 1),
+        };
+        v.lines.insert(to.min(v.lines.len()), moved);
+        // and in Xtime
+        self.line_moving = Some(key.to_string());
+        self.busy.insert(key.to_string());
+        if self.loading {
+            self.stale = true;
+        }
+        let (x, store, ro, key) = (env.xtime.clone(), env.store.clone(), self.ro.clone(), key.to_string());
+        (
+            Task::perform(
+                async move { x.move_line(&store, &ro, &id, group.as_ref(), order).await.map_err(LoadError::from) },
+                move |r| Msg::LineMoved(key.clone(), r),
+            ),
+            vec![],
+        )
+    }
+
     fn make_move(&mut self, env: &Env, mv: Move, rating: Option<Rating>) -> Task<Msg> {
         self.confirm = None;
         self.moving = Some(mv);
@@ -264,6 +369,16 @@ impl XtimeView {
             Msg::Load(force) => return (self.load(env, force), vec![]),
             Msg::Loaded(result) => {
                 self.loading = false;
+                // read before (or while) a line was moved: not what Xtime has now
+                if self.stale || self.line_moving.is_some() {
+                    self.stale = false;
+                    let again = if self.line_moving.is_none() {
+                        self.load(env, true)
+                    } else {
+                        Task::none()
+                    };
+                    return (again, vec![]);
+                }
                 match result {
                     Ok(view) => {
                         self.error = None;
@@ -552,8 +667,85 @@ impl XtimeView {
                 return (self.make_move(env, mv, Some(rating)), vec![]);
             }
             Msg::CancelRating => self.rating = None,
+            Msg::DragStart(key) => {
+                let Some(line) = self.view.as_ref().and_then(|v| v.lines.iter().find(|l| l.key() == key)) else {
+                    return just(vec![]);
+                };
+                if env.sample || self.line_moving.is_some() || self.busy.contains(&key) || line.is_inspection() {
+                    return just(vec![]);
+                }
+                let now = Instant::now();
+                self.drag = Some(Drag {
+                    primary: line.primary,
+                    key,
+                    target: None,
+                    since: now,
+                    target_since: now,
+                });
+            }
+            Msg::DragOver(t) => {
+                if let Some(d) = self.drag.as_mut().filter(|d| d.fits(&t.place) && d.target.as_ref() != Some(&t)) {
+                    // (over itself: it stays where it is)
+                    d.target = (t.before.as_deref() != Some(d.key.as_str())).then_some(t);
+                    d.target_since = Instant::now();
+                }
+            }
+            Msg::DragOff => {
+                if let Some(d) = self.drag.as_mut().filter(|d| d.target.is_some()) {
+                    d.target = None;
+                    d.target_since = Instant::now();
+                }
+            }
+            Msg::DragEnd(drop) => {
+                let Some(d) = self.drag.take() else { return just(vec![]) };
+                let Some(t) = d.target.filter(|_| drop) else { return just(vec![]) };
+                return self.move_line(env, &d.key, t);
+            }
+            Msg::LineMoved(key, result) => {
+                self.line_moving = None;
+                self.busy.remove(&key);
+                if self.loading {
+                    self.stale = true; // (read again when that comes back)
+                }
+                let letter = self.letter(&key);
+                let out = match result {
+                    Ok(()) => vec![],
+                    Err(e) => {
+                        let mut out = vec![Out::Notice(format!(
+                            "Couldn't move {} in Xtime ({})",
+                            if letter.is_empty() {
+                                "the line".to_string()
+                            } else {
+                                format!("line {letter}")
+                            },
+                            e.plain()
+                        ))];
+                        if e == LoadError::SignedOut {
+                            out.push(Out::SignedOut);
+                        }
+                        out
+                    }
+                };
+                // as Xtime has it now (a move that didn't work goes back)
+                return (self.load(env, true), out);
+            }
             Msg::Ask(a) => return just(vec![Out::Ask(a)]),
         }
         just(vec![])
+    }
+}
+
+/// The lines of one of Xtime's lists that the Xtime View shows there (the inspection lines are shown on their own)
+pub fn shown_in<'a>(v: &'a RoView, place: &Place) -> Vec<&'a xtime::ro::Line> {
+    v.xtime_list(place).into_iter().filter(|l| !l.is_inspection()).collect()
+}
+
+/// Where a line goes in the RO's lines when it's the first in an empty list: after its concern (under one), after the
+/// last concern (among them), or at the end (a recommendation on its own)
+fn first_slot(v: &RoView, place: &Place) -> usize {
+    match place {
+        Place::Under(c) => v.lines.iter().position(|l| same_id(&l.id, c)).map_or(v.lines.len(), |i| i + 1),
+        Place::Concerns => v.lines.iter().rposition(|l| l.primary).map_or(0, |i| i + 1),
+        Place::Recommendations => v.lines.len(),
     }
 }

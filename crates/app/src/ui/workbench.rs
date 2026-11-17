@@ -116,7 +116,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 .height(Length::Fill)
                 .into()
         }
-        Tab::ServiceManual => container(manual(app, ws, manual_tab))
+        Tab::ServiceManual => container(manual(ws, manual_tab))
             .width(Length::Fill)
             .height(Length::Fill)
             .into(),
@@ -171,7 +171,7 @@ fn coming<'a>(title: &'a str, about: &'a str, needs: &'a str) -> Element<'a, Mes
     .into()
 }
 
-fn manual<'a>(app: &'a App, ws: &'a Workspace, tab: ManualTab) -> Element<'a, Message> {
+fn manual<'a>(ws: &'a Workspace, tab: ManualTab) -> Element<'a, Message> {
     let ro = ws.ro.ro.clone();
     match tab {
         // crates/ford-ui: its own messages, for this RO

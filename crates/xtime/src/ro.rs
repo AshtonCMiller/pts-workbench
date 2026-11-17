@@ -193,6 +193,22 @@ pub fn mode_name(mode: i64) -> String {
     }
 }
 
+/// One of the RO page's lists of lines (where a line can be dragged to)
+#[derive(Debug, Clone, PartialEq)]
+pub enum Place {
+    /// The customer concerns
+    Concerns,
+    /// Under a customer concern (its line ID)
+    Under(Value),
+    /// Additional Service Recommendations (not under a concern)
+    Recommendations,
+}
+
+/// The same line ID (Xtime sends them as numbers; a string of the same number is the same)
+pub fn same_id(a: &Value, b: &Value) -> bool {
+    a == b || (!a.is_null() && text(Some(a)) == text(Some(b)))
+}
+
 /// The RO's lines in the RO page's groups: customer concerns (each with the recommendations added under it), the
 /// other recommendations, and the inspection lines. Indexes into [`RoView::lines`].
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -230,30 +246,47 @@ impl RoView {
         spiff_over(self.spiff_total())
     }
 
+    /// The lines in one of Xtime's lists, in order (as its RO page has them): the customer concerns, the lines under
+    /// one concern (its line ID), or the recommendations on their own (inspection lines included: Xtime lists them
+    /// there too)
+    pub fn xtime_list(&self, place: &Place) -> Vec<&Line> {
+        let top = |l: &Line| l.group_id.as_ref().is_none_or(|g| g.is_null());
+        self.lines
+            .iter()
+            .filter(|l| match place {
+                Place::Concerns => top(l) && l.primary,
+                Place::Recommendations => top(l) && !l.primary,
+                Place::Under(c) => l.group_id.as_ref().is_some_and(|g| same_id(g, c)),
+            })
+            .collect()
+    }
+
+    /// Where a line dropped in `place` lands, as Xtime counts it (from 1): before the line `before`, or after the last
+    /// of `shown` (the lines of that list the app shows, in order) when there's none. The line moving isn't counted.
+    pub fn drop_order(&self, moving: &Value, place: &Place, before: Option<&Value>, shown: &[&Value]) -> usize {
+        let list: Vec<&Line> = self.xtime_list(place).into_iter().filter(|l| !same_id(&l.id, moving)).collect();
+        let at = |id: &Value| list.iter().position(|l| same_id(&l.id, id));
+        let index = match before.and_then(at) {
+            Some(i) => i,
+            None => shown
+                .iter()
+                .filter(|id| !same_id(id, moving))
+                .filter_map(|id| at(id))
+                .max()
+                .map_or(0, |i| i + 1),
+        };
+        index + 1
+    }
+
     pub fn sections(&self) -> Sections {
         let lines = &self.lines;
         let (insp, main): (Vec<usize>, Vec<usize>) = (0..lines.len()).partition(|&i| lines[i].is_inspection());
         let primaries: Vec<usize> = main.iter().copied().filter(|&i| lines[i].primary).collect();
-        let same = |a: &Value, b: &Value| a == b || (!a.is_null() && text(Some(a)) == text(Some(b)));
-        // Xtime's own grouping (GroupID is the concern it was added under), then ParentLineId, then the same line letter
+        // Xtime's own grouping, as its RO page has it: a line's GroupID is the concern it's under (set when it's added
+        // under one, or dragged there; a line that shares a concern's letter isn't under it unless Xtime says so)
         let parent_of = |r: &Line| -> Option<usize> {
-            if let Some(g) = r.group_id.as_ref().filter(|g| !g.is_null()) {
-                if let Some(&p) = primaries.iter().find(|&&p| same(&lines[p].id, g)) {
-                    return Some(p);
-                }
-            }
-            if let Some(pid) = r.parent_id.as_ref().filter(|p| !p.is_null()) {
-                let hit = primaries
-                    .iter()
-                    .find(|&&p| same(&lines[p].id, pid) || lines[p].rolid.as_ref().is_some_and(|x| !x.is_null() && same(x, pid)));
-                if let Some(&p) = hit {
-                    return Some(p);
-                }
-            }
-            if !r.dms.is_empty() {
-                return primaries.iter().copied().find(|&p| lines[p].dms == r.dms);
-            }
-            None
+            let g = r.group_id.as_ref().filter(|g| !g.is_null())?;
+            primaries.iter().copied().find(|&p| same_id(&lines[p].id, g))
         };
         let mut concerns: Vec<(usize, Vec<usize>)> = primaries.iter().map(|&p| (p, Vec::new())).collect();
         let mut loose = Vec::new();
@@ -677,6 +710,20 @@ impl Xtime {
             .await
             .map(|_| ())
     }
+
+    /// Moves a line, as dragging it on the RO page does: under a customer concern (`group`: the concern's line ID) or
+    /// on its own (none), at `order` (where it lands in that list, from 1: see [`RoView::drop_order`]).
+    /// (Xtime's RODetailsService.updateDisplayOrder.)
+    pub async fn move_line(&self, store: &str, ro: &str, line_id: &Value, group: Option<&Value>, order: usize) -> Result<()> {
+        let path = format!(
+            "/api/Stores/{}/RepairOrders/{}/Lines/{}/DisplayOrder?format=json",
+            encode(store.trim()),
+            encode(ro),
+            encode(&text(Some(line_id)))
+        );
+        let body = json!({ "ID": line_id, "GroupID": group.cloned().unwrap_or(Value::Null), "DisplayOrder": order });
+        self.ro_call(Method::PUT, &path, Some(body)).await.map(|_| ())
+    }
 }
 
 // ---------- times, as the RO page shows them ----------
@@ -786,6 +833,35 @@ mod tests {
         assert_eq!(s.loose, vec![1]); // Cabin filter (line B, no concern B)
         assert_eq!(s.inspection, vec![3]);
         assert_eq!(v.advisor.label(), ""); // no staff list: no names
+    }
+
+    #[test]
+    fn works_out_where_a_dropped_line_lands() {
+        let data = json!({ "Data": { "RONumber": 1, "RepairOrderLines": [
+            { "ID": 1, "DMSNumber": "A", "IsPrimary": true, "ServiceName": "[Primary]: Check noise", "DisplayOrder": 1 },
+            { "ID": 7, "IsPrimary": true, "ServiceName": "[Primary]: Oil change", "DisplayOrder": 2 },
+            { "ID": 3, "IsPrimary": false, "ServiceName": "Wipers", "GroupID": 1, "DisplayOrder": 1 },
+            { "ID": 2, "IsPrimary": false, "ServiceName": "Cabin filter", "DisplayOrder": 1 },
+            { "ID": 4, "ServiceName": "Q99PX Multipoint", "DisplayOrder": 2 },
+            { "ID": 6, "IsPrimary": false, "ServiceName": "Battery", "DisplayOrder": 3 }
+        ] } });
+        let v = parse_view(&data, &[]).unwrap();
+        let ids = |p: &Place| v.xtime_list(p).iter().map(|l| l.key()).collect::<Vec<_>>();
+        assert_eq!(ids(&Place::Concerns), ["1", "7"]);
+        assert_eq!(ids(&Place::Under(json!(1))), ["3"]);
+        // Xtime's list of recommendations has the inspection line in it too
+        assert_eq!(ids(&Place::Recommendations), ["2", "4", "6"]);
+        let (two, six) = (json!(2), json!(6));
+        // Battery dragged above Cabin filter: first
+        assert_eq!(v.drop_order(&json!(6), &Place::Recommendations, Some(&two), &[&two, &six]), 1);
+        // Cabin filter dragged to the end (after Battery, the last shown): third, after the inspection line
+        assert_eq!(v.drop_order(&json!(2), &Place::Recommendations, None, &[&two, &six]), 3);
+        // Cabin filter under the noise concern, after Wipers: second there
+        assert_eq!(v.drop_order(&json!(2), &Place::Under(json!(1)), None, &[&json!(3)]), 2);
+        // under a concern with nothing under it yet: first
+        assert_eq!(v.drop_order(&json!(2), &Place::Under(json!(7)), None, &[]), 1);
+        // the oil change concern moved above the noise one
+        assert_eq!(v.drop_order(&json!(7), &Place::Concerns, Some(&json!(1)), &[]), 1);
     }
 
     #[test]

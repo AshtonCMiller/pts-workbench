@@ -309,6 +309,8 @@ pub enum Message {
     RefreshView,
     /// The Xtime View of an open vehicle (its RO number): its own messages (crates/xtime-ui)
     Xv(String, xtime_ui::Msg),
+    /// A line being dragged in an Xtime View: let go (`true`), or Esc (`false`)
+    XvDragEnd(bool),
     /// An open vehicle's OASIS tab (its RO number): its own messages (crates/ford-ui)
     Oasis(String, ford_ui::OasisMsg),
     /// An open vehicle's TSBs tab (its RO number): its own messages (crates/ford-ui)
@@ -1055,6 +1057,11 @@ impl App {
                 };
                 return Task::batch([task, self.xtime_outs(&ro, outs)]);
             }
+            Message::XvDragEnd(drop) => {
+                if let Some(ro) = self.open.iter().find(|w| w.xv.drag.is_some()).map(|w| w.ro.ro.clone()) {
+                    return Task::done(Message::Xv(ro, xtime_ui::Msg::DragEnd(drop)));
+                }
+            }
             Message::RefreshView => {
                 let showing = self.workspace().filter(|w| self.mode == Mode::Workbench && w.tab == Tab::XtimeView);
                 if let Some(ro) = showing.map(|w| w.ro.ro.clone()) {
@@ -1534,6 +1541,8 @@ impl App {
             Message::LoadRos => return self.load_ros(),
             Message::RosLoaded(result) => {
                 let ok = result.is_ok();
+                // the first real list (the app starts on its samples, and the Xtime View reads nothing until then)
+                let first = self.sample_data;
                 self.ros_loaded(result);
                 if ok {
                     // ROs opened on another computer whose VIN is now known; the chat's new messages (and the Chat
@@ -1557,7 +1566,19 @@ impl App {
                         .collect();
                     let news = self.watch.dashboard(&list, timecard::now_ms());
                     let notify = self.notify(news);
-                    return Task::batch([self.check_spiffs(), self.refresh_chat(), waiting, notify]);
+                    // the vehicle reopened from last time, showing its Xtime View: read it now, rather than at the next
+                    // minute's refresh (or only once another RO's picked)
+                    let view = match self
+                        .workspace()
+                        .filter(|w| first && self.mode == Mode::Workbench && w.tab == Tab::XtimeView)
+                    {
+                        Some(w) => {
+                            let ro = w.ro.ro.clone();
+                            self.load_view(&ro, true)
+                        }
+                        None => Task::none(),
+                    };
+                    return Task::batch([self.check_spiffs(), self.refresh_chat(), waiting, notify, view]);
                 }
             }
             Message::ToggleClock => {
@@ -2612,6 +2633,19 @@ impl App {
             // the chat, every 30 s while it's open (otherwise with your ROs, every minute)
             if self.chat {
                 iced::time::every(std::time::Duration::from_secs(30)).map(|_| Message::RefreshChat)
+            } else {
+                Subscription::none()
+            },
+            // a line being dragged in the Xtime View: letting go of it (anywhere), or Esc
+            if self.open.iter().any(|w| w.xv.drag.is_some()) {
+                iced::event::listen_with(|event, _, _| match event {
+                    iced::Event::Mouse(iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left)) => Some(Message::XvDragEnd(true)),
+                    iced::Event::Keyboard(keyboard::Event::KeyPressed {
+                        key: Key::Named(Named::Escape),
+                        ..
+                    }) => Some(Message::XvDragEnd(false)),
+                    _ => None,
+                })
             } else {
                 Subscription::none()
             },

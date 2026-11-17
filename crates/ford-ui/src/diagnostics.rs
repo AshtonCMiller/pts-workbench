@@ -6,7 +6,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use ford::diagnostics::{DiagPage, DiagRequest, DiagResult, DtcInfo, parse_query};
-use iced::widget::{Column, button, checkbox, column, container, horizontal_space, row, text, text_input};
+use iced::widget::{Column, button, checkbox, column, container, row, text, text_input};
 use iced::{Alignment, Element, Length, Task};
 use ui_kit::scroll::scrollable;
 use ui_kit::{anim, pill, style};
