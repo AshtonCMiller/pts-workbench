@@ -14,6 +14,7 @@
 - **A brand new app:** PTS Workbench has been rebuilt from the ground up. It starts quicker, is lighter on the computer, and everything (Xtime, the Service Manual, your hours) is drawn by the app itself.
 
 - **New Diagnostics Interface:** Designed as a stand-in replacement for IDS and FDRS where available - it communicates on the standard J2534 communication bus that modern VCIs operate under (including Fords VCM3 and VCMM). Adds a helper build next to the app executable for this 64-bit app to communicate with fords 32-bit VCI Drivers. **DIAGNOSTICS MODE IS VERY EXPERIMENTAL. USE AT YOUR OWN RISK. NO INFORMATION IS SHARED WITH FORD SERVERS - NO LOGGING FOR WARRANTY PURPOSES AT THIS TIME.**
+- **Diagnostic networks** have been expanded to implement networks aside from just HS-CAN, as well as DIAG networks used by the gateway module on newer vehicles.
 - **Your lines in the sidebar:** the vehicle you're on shows its lines under it. Flag each one, click its hours to set what it really pays, and click the date under a flagged line to move it to the day you really flagged it. **Lines** folds them away.
 - **Workshop Manual:** the contents (narrowed to this vehicle), search, and procedures in tabs, with pictures you can click to zoom.
 - **Pinpoint tests, one step at a time:** answer Yes or No and the next step slides in. Your answers are recorded to Vehicle History, just like PTS.

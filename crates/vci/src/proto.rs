@@ -27,11 +27,24 @@ pub enum Request {
     Open { dll: String },
     /// The battery voltage at the OBD port
     Voltage,
-    /// Joins the vehicle's high-speed CAN bus (OBD pins 6 / 14) for diagnostics (ISO 15765)
-    Connect { baud: u32 },
+    /// Joins the vehicle's CAN bus for diagnostics (ISO 15765): the high-speed one (OBD pins 6 / 14), or with
+    /// `ms_can` an older Ford's medium-speed one (pins 3 / 11, 125 kbit/s)
+    Connect {
+        baud: u32,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        ms_can: bool,
+    },
     /// One diagnostic request to a module (`tx`: its address, `rx`: its answers'), and its answer (the "wait"
-    /// answers a module gives while it works on it are waited through)
-    Ask { tx: u32, rx: u32, data: Vec<u8>, timeout_ms: u32 },
+    /// answers a module gives while it works on it are waited through). `ms_can`: on pins 3 / 11 (the helper moves
+    /// to that bus first, and back again for one that isn't).
+    Ask {
+        tx: u32,
+        rx: u32,
+        data: Vec<u8>,
+        timeout_ms: u32,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        ms_can: bool,
+    },
     /// Leaves the bus
     Disconnect,
     /// Closes the interface (and leaves the bus)
@@ -91,6 +104,7 @@ mod tests {
             rx: 0x7E8,
             data: vec![0x22, 0xF1, 0x90],
             timeout_ms: 250,
+            ms_can: false,
         };
         let line = serde_json::to_string(&r).unwrap();
         assert_eq!(line, r#"{"op":"ask","tx":2016,"rx":2024,"data":[34,241,144],"timeout_ms":250}"#);

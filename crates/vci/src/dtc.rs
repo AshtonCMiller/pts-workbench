@@ -4,7 +4,7 @@
 //! [`SelfTest`] goes step by step like the network test: [`SelfTest::next`] is the next request, [`SelfTest::answer`]
 //! what came back. Clearing asks each module that answered to clear, then reads them all again.
 
-use crate::modules;
+use crate::modules::{self, Bus, Entry};
 use crate::scan::Ask;
 
 /// The statuses asked for: failed now, failed this drive cycle, pending, confirmed (stored), warning light on.
@@ -161,6 +161,8 @@ pub struct Module {
     pub address: u32,
     pub short: &'static str,
     pub name: &'static str,
+    /// Where it's asked
+    pub bus: Bus,
     pub result: Found,
     /// Clearing: how it went (none: not asked; Ok; Err(its refusal))
     pub clear: Option<Result<(), u8>>,
@@ -193,16 +195,18 @@ pub struct SelfTest {
 }
 
 impl SelfTest {
-    /// Every module on the high-speed CAN list, or only these (the ones the network test found)
-    pub fn new(only: Option<&[u32]>) -> Self {
+    /// Every module on the list (on pins 6 / 14), or these (the ones the network test found, where it found them)
+    pub fn new(found: Option<&[(Entry, Bus)]>) -> Self {
+        let all: Vec<(Entry, Bus)> = modules::MODULES.iter().map(|e| (*e, Bus::Hs)).collect();
         SelfTest {
-            modules: modules::HS_CAN
+            modules: found
+                .unwrap_or(&all)
                 .iter()
-                .filter(|(a, ..)| only.is_none_or(|o| o.contains(a)))
-                .map(|&(address, short, name)| Module {
+                .map(|&((address, short, name), bus)| Module {
                     address,
                     short,
                     name,
+                    bus,
                     result: Found::Waiting,
                     clear: None,
                 })
@@ -253,6 +257,7 @@ impl SelfTest {
                 Pass::Clear => 2000,
                 Pass::Read => TIMEOUT_MS,
             },
+            bus: m.bus,
         })
     }
 
@@ -317,7 +322,8 @@ mod tests {
 
     #[test]
     fn clears_then_reads_again() {
-        let mut t = SelfTest::new(Some(&[0x7E0, 0x726]));
+        let mut t = SelfTest::new(Some(&[((0x7E0, "PCM", "Powertrain"), Bus::Hs), ((0x726, "BCM", "Body"), Bus::Ms)]));
+        assert_eq!(t.next().unwrap().bus, Bus::Hs);
         assert_eq!(t.modules.len(), 2);
         t.answer(Some(&[0x59, 0x02, 0xFF, 0x04, 0x20, 0x00, 0x08]));
         t.answer(None);

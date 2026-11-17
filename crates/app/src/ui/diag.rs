@@ -6,6 +6,7 @@
 use iced::widget::{Column, Space, button, column, container, horizontal_space, pick_list, progress_bar, row, text};
 use iced::{Alignment, Color, Element, Length};
 use ui_kit::scroll::scrollable;
+use vci::modules::Bus;
 use vci::scan::{Module, Status};
 
 use super::{anim, pill, style};
@@ -347,7 +348,7 @@ fn selftest_card(d: &Diag) -> Element<'_, Message> {
     let (asked, total, on) = t.progress();
     if d.testing {
         let doing = if t.clearing() { "Clearing" } else { "Reading" };
-        let now = on.map(|m| format!("{doing} the {} ({})…", m.short, m.name)).unwrap_or_default();
+        let now = on.map(|m| format!("{doing} the {}…", tag(m.short, m.address))).unwrap_or_default();
         body = body.push(
             column![
                 row![
@@ -384,7 +385,7 @@ fn selftest_card(d: &Diag) -> Element<'_, Message> {
     for m in t.modules.iter().filter(|m| !m.codes().is_empty()) {
         let mut list = column![
             row![
-                text(m.short).font(style::BOLD),
+                text(tag(m.short, m.address)).font(style::BOLD),
                 text(m.name).size(13).style(style::muted),
                 horizontal_space(),
                 pill(
@@ -401,15 +402,21 @@ fn selftest_card(d: &Diag) -> Element<'_, Message> {
         }
         body = body.push(container(list).padding([10, 12]).width(Length::Fill).style(style::panel));
     }
-    let names = |f: &dyn Fn(&vci::dtc::Module) -> bool| t.modules.iter().filter(|m| f(m)).map(|m| m.short).collect::<Vec<_>>();
+    let names = |f: &dyn Fn(&vci::dtc::Module) -> bool| {
+        t.modules
+            .iter()
+            .filter(|m| f(m))
+            .map(|m| tag(m.short, m.address))
+            .collect::<Vec<_>>()
+    };
     let clean = names(&|m| matches!(&m.result, vci::dtc::Found::Codes(c) if c.is_empty()));
     let refused = names(&|m| matches!(m.result, vci::dtc::Found::Refused(_)));
     let not_cleared: Vec<String> = t
         .modules
         .iter()
         .filter_map(|m| match m.clear {
-            Some(Err(0)) => Some(format!("{} (no answer)", m.short)),
-            Some(Err(n)) => Some(format!("{} ({})", m.short, vci::uds::refusal(n))),
+            Some(Err(0)) => Some(format!("{} (no answer)", tag(m.short, m.address))),
+            Some(Err(n)) => Some(format!("{} ({})", tag(m.short, m.address), vci::uds::refusal(n))),
             _ => None,
         })
         .collect();
@@ -436,6 +443,15 @@ fn status_pill<'a>(m: &Module) -> Element<'a, Message> {
     }
 }
 
+/// A module's short name ("ABS"), or its address for one found by the full search ("7A5")
+fn tag(short: &str, address: u32) -> String {
+    if short == vci::modules::UNLISTED.0 {
+        format!("{address:03X}")
+    } else {
+        short.to_string()
+    }
+}
+
 fn module_row(m: &Module) -> Element<'_, Message> {
     let mut detail = column![].spacing(1);
     if !m.part.is_empty() {
@@ -450,10 +466,16 @@ fn module_row(m: &Module) -> Element<'_, Message> {
     container(
         row![
             column![
-                text(m.short).font(style::BOLD),
-                text(format!("{:03X}", m.address)).size(11).font(style::MONO).style(style::muted)
+                text(tag(m.short, m.address)).font(style::BOLD),
+                text(match m.bus {
+                    Bus::Hs => format!("{:03X}", m.address),
+                    Bus::Ms => format!("{:03X} · MS-CAN", m.address),
+                })
+                .size(11)
+                .font(style::MONO)
+                .style(style::muted)
             ]
-            .width(70),
+            .width(96),
             text(m.name).size(13).width(Length::FillPortion(3)),
             container(detail).width(Length::FillPortion(3)),
             container(status_pill(m)).width(120).align_x(iced::alignment::Horizontal::Right),
@@ -481,16 +503,25 @@ fn scan_card(d: &Diag) -> Element<'_, Message> {
         return card(
             "Network test",
             action,
-            text("Asks each module on the high-speed CAN bus who it is: its part number and software. Nothing is changed.")
-                .size(13)
-                .style(style::muted)
-                .into(),
+            text(
+                "Asks each module who it is: its part number and software. On newer Fords the gateway (GWM) passes the \
+                 requests on to every network; on older ones, pins 3 / 11 (MS-CAN) are asked too. Nothing is changed.",
+            )
+            .size(13)
+            .style(style::muted)
+            .into(),
         );
     };
     let (asked, total, on) = scan.progress();
     let mut body = column![].spacing(10);
     if d.scanning {
-        let now = on.map(|m| format!("Asking the {} ({})…", m.short, m.name)).unwrap_or_default();
+        let now = on
+            .map(|m| match (m.listed, m.bus) {
+                (false, b) => format!("Full search: {:03X} on {}…", m.address, b.label()),
+                (true, Bus::Ms) => format!("Asking the {} on pins 3 / 11 (MS-CAN)…", m.short),
+                (true, Bus::Hs) => format!("Asking the {} ({})…", m.short, m.name),
+            })
+            .unwrap_or_default();
         body = body.push(
             column![
                 row![
@@ -532,14 +563,40 @@ fn scan_card(d: &Diag) -> Element<'_, Message> {
         }
         body = body.push(container(list).style(style::panel));
     }
-    let silent: Vec<&str> = scan
-        .modules
-        .iter()
-        .filter(|m| m.status == Status::NoAnswer)
-        .map(|m| m.short)
-        .collect();
-    if !silent.is_empty() {
-        body = body.push(text(format!("No answer: {}", silent.join(", "))).size(12).style(style::muted));
+    // the list's modules that didn't answer (on each network asked)
+    for bus in [Bus::Hs, Bus::Ms] {
+        let silent: Vec<&str> = scan
+            .modules
+            .iter()
+            .filter(|m| m.listed && m.bus == bus && m.status == Status::NoAnswer)
+            .map(|m| m.short)
+            .collect();
+        if !silent.is_empty() {
+            let on = if scan.modules.iter().any(|m| m.bus == Bus::Ms) {
+                format!(" on {}", bus.label())
+            } else {
+                String::new()
+            };
+            body = body.push(text(format!("No answer{on}: {}", silent.join(", "))).size(12).style(style::muted));
+        }
+    }
+    if let Some(n) = &d.scan_note {
+        body = body.push(text(n.as_str()).size(12).style(style::muted));
+    }
+    // the full search: every other diagnostic address (once the list's done)
+    let searched = scan.modules.iter().any(|m| !m.listed);
+    if !d.scanning && scan.done() && !searched {
+        body = body.push(
+            row![
+                text("A module missing? The full search asks every other diagnostic address (about half a minute).")
+                    .size(12)
+                    .style(style::muted)
+                    .width(Length::Fill),
+                ghost("Full search", (d.connected() && !d.busy()).then_some(DiagMsg::FullSearch)),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        );
     }
     card("Network test", action, body.into())
 }

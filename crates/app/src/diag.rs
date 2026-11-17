@@ -3,7 +3,9 @@
 //!   1. Find the VCI: the J2534 interfaces Windows has (Ford's VCI Software installs them), the VCM 3 picked first.
 //!   2. Connect: the VCI opened, the battery voltage read, the high-speed CAN bus joined (OBD pins 6 / 14).
 //!   3. Identify: the PCM asked for the VIN (22 F190; OBD's 09 02 if it won't say), matched to your ROs.
-//!   4. Network test: each module on the bus asked for its part number and software (crates/vci/scan.rs).
+//!   4. Network test: each module asked for its part number and software (crates/vci/scan.rs). On pins 6 / 14
+//!      (on a newer Ford, the gateway passes the requests on to every network); on an older Ford without a
+//!      gateway, on pins 3 / 11 (MS-CAN) too. The full search asks every other diagnostic address as well.
 //!   5. Self test: each module's trouble codes; and clearing them, when you ask (crates/vci/dtc.rs).
 //!
 //! All of it through the 32-bit helper (crates/vci-bridge), asked one thing at a time. Only reads, and clearing codes
@@ -18,7 +20,7 @@ use std::time::Instant;
 use iced::Task;
 use vci::client::Bridge;
 use vci::dtc::SelfTest;
-use vci::modules;
+use vci::modules::{self, Bus};
 use vci::proto::{Device, Reply, Request};
 use vci::scan::Scan;
 use vci::uds;
@@ -57,6 +59,9 @@ pub struct Diag {
     pub no_vin: bool,
     pub scan: Option<Scan>,
     pub scanning: bool,
+    /// What the network test found out about the vehicle's networks ("Gateway vehicle…"), and a pass that couldn't
+    /// be made
+    pub scan_note: Option<String>,
     /// The self test: each module's codes
     pub selftest: Option<SelfTest>,
     pub testing: bool,
@@ -86,6 +91,7 @@ impl Default for Diag {
             no_vin: false,
             scan: None,
             scanning: false,
+            scan_note: None,
             selftest: None,
             testing: false,
             confirm_clear: false,
@@ -131,6 +137,8 @@ pub enum DiagMsg {
     StopScan,
     /// One module's answer (the request it answers, what came back)
     Scanned(vci::scan::Ask, Result<Option<Vec<u8>>, String>),
+    /// The network test's full search: every other diagnostic address
+    FullSearch,
     /// Self test: read every module's codes; clear them (asks first); one module's answer
     RunSelfTest,
     StopSelfTest,
@@ -191,6 +199,7 @@ async fn connect(b: Bridge, dll: String) -> Result<Joined, String> {
     if let Err(e) = ok(b
         .call(Request::Connect {
             baud: modules::HS_CAN_BAUD,
+            ms_can: false,
         })
         .await)
     {
@@ -203,7 +212,14 @@ async fn connect(b: Bridge, dll: String) -> Result<Joined, String> {
 
 async fn ask(b: &Bridge, tx: u32, data: Vec<u8>, timeout_ms: u32) -> Result<Option<Vec<u8>>, String> {
     let rx = modules::answers_at(tx);
-    match ok(b.call(Request::Ask { tx, rx, data, timeout_ms }).await)? {
+    let req = Request::Ask {
+        tx,
+        rx,
+        data,
+        timeout_ms,
+        ms_can: false,
+    };
+    match ok(b.call(req).await)? {
         Reply::Answer { data, .. } => Ok(data),
         other => Err(format!("The VCI answered oddly ({other:?})")),
     }
@@ -484,8 +500,9 @@ impl Diag {
                 self.scanning = true;
                 self.stopping = false;
                 self.error = None;
+                self.scan_note = None;
                 let t0 = self.t0();
-                self.push_log(format!("{}  ··  Network test (high-speed CAN)", stamp(t0)));
+                self.push_log(format!("{}  ··  Network test (pins 6 / 14)", stamp(t0)));
                 note("Network test started");
                 none(self.ask_next(first).map(|(a, got)| DiagMsg::Scanned(a, got)))
             }
@@ -508,6 +525,16 @@ impl Diag {
                             return none(Task::none());
                         };
                         scan.answer(answer.as_deref());
+                        // the list done on pins 6 / 14: an older Ford (no gateway) has more on pins 3 / 11
+                        if scan.done() && !self.stopping && asked.bus == Bus::Hs && !scan.modules.iter().any(|m| m.bus == Bus::Ms) {
+                            if scan.gateway() {
+                                self.scan_note =
+                                    Some("This vehicle has a gateway (GWM): every module is reached through it, from pins 6 / 14.".into());
+                            } else if scan.modules.iter().all(|m| m.listed) {
+                                scan.add_ms_can();
+                                self.log.push(format!("{}  ··  No gateway: pins 3 / 11 (MS-CAN) too", stamp(t0)));
+                            }
+                        }
                         match scan.next() {
                             Some(next) if !self.stopping => none(self.ask_next(next).map(|(a, got)| DiagMsg::Scanned(a, got))),
                             _ => {
@@ -517,6 +544,22 @@ impl Diag {
                                     "Network test {}: {found} module(s) answered of {asked_n} asked ({total} on the list)",
                                     if self.stopping { "stopped" } else { "done" }
                                 ));
+                                self.scanning = false;
+                                self.stopping = false;
+                                none(Task::none())
+                            }
+                        }
+                    }
+                    // pins 3 / 11 can't be reached (the VCI, or the vehicle): that pass left out, the rest carries on
+                    Err(e) if asked.bus == Bus::Ms && self.scan.is_some() => {
+                        note(&format!("Network test: pins 3 / 11 left out ({e})"));
+                        self.push_log(format!("{}  ··  {e}", stamp(t0)));
+                        self.scan_note = Some(format!("Pins 3 / 11 (MS-CAN) couldn't be reached: {e}"));
+                        let scan = self.scan.as_mut().expect("checked");
+                        scan.skip(Bus::Ms);
+                        match scan.next() {
+                            Some(next) if !self.stopping => none(self.ask_next(next).map(|(a, got)| DiagMsg::Scanned(a, got))),
+                            _ => {
                                 self.scanning = false;
                                 self.stopping = false;
                                 none(Task::none())
@@ -533,16 +576,37 @@ impl Diag {
                     }
                 }
             }
+            DiagMsg::FullSearch => {
+                if !self.connected() || self.busy() {
+                    return none(Task::none());
+                }
+                let Some(scan) = self.scan.as_mut().filter(|s| s.done()) else {
+                    return none(Task::none());
+                };
+                scan.add_sweep(Bus::Hs);
+                // (an older Ford's pins 3 / 11 too, when anything answered there)
+                if scan.any_on(Bus::Ms) {
+                    scan.add_sweep(Bus::Ms);
+                }
+                let Some(first) = scan.next() else { return none(Task::none()) };
+                self.scanning = true;
+                self.stopping = false;
+                self.error = None;
+                let t0 = self.t0();
+                self.push_log(format!("{}  ··  Network test: the full search", stamp(t0)));
+                note("Network test: full search started");
+                none(self.ask_next(first).map(|(a, got)| DiagMsg::Scanned(a, got)))
+            }
             DiagMsg::RunSelfTest => {
                 if !self.connected() || self.busy() {
                     return none(Task::none());
                 }
                 // only the modules the network test found, when it's been run all the way
-                let found: Option<Vec<u32>> = self
+                let found: Option<Vec<(modules::Entry, Bus)>> = self
                     .scan
                     .as_ref()
                     .filter(|s| s.done() && s.found() > 0)
-                    .map(|s| s.modules.iter().filter(|m| m.present()).map(|m| m.address).collect());
+                    .map(|s| s.modules.iter().filter(|m| m.present()).map(|m| m.entry()).collect());
                 let t = SelfTest::new(found.as_deref());
                 let Some(first) = t.next() else { return none(Task::none()) };
                 self.selftest = Some(t);
@@ -634,7 +698,11 @@ impl Diag {
                             .map(|c| format!("{} ({})", c.full(), c.status_words().join(", ")))
                             .collect::<Vec<_>>()
                             .join(", ");
-                        format!("{}: {codes}", m.short)
+                        if m.short == modules::UNLISTED.0 {
+                            format!("{:03X}: {codes}", m.address)
+                        } else {
+                            format!("{}: {codes}", m.short)
+                        }
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
@@ -684,6 +752,7 @@ impl Diag {
                         rx: a.rx,
                         data: a.data.clone(),
                         timeout_ms: a.timeout_ms,
+                        ms_can: a.bus == Bus::Ms,
                     })
                     .await)
                 {

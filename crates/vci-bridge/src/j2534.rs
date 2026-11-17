@@ -1,5 +1,7 @@
-//! SAE J2534 (04.04) through the interface's own driver: open it, its voltage, join the high-speed CAN bus for
-//! diagnostics (ISO 15765, 11-bit addresses), one diagnostic request and its answer, close.
+//! SAE J2534 (04.04) through the interface's own driver: open it, its voltage, join a CAN bus for diagnostics
+//! (ISO 15765, 11-bit addresses): the high-speed one on pins 6 / 14, or an older Ford's medium-speed one on pins
+//! 3 / 11 (J2534-2's pin-switched ISO15765_PS, its pins set with J1962_PINS); one diagnostic request and its answer,
+//! close.
 //!
 //! A request to a module: a flow-control filter for its address pair (so the VCI handles the multi-frame transfer),
 //! the request written, its answer read (the "still working on it" answers waited through), the filter taken away.
@@ -74,6 +76,13 @@ type GetLastError = unsafe extern "system" fn(*mut c_char) -> i32;
 
 // J2534 04.04
 const ISO15765: u32 = 6;
+/// J2534-2: ISO 15765 on the pins asked for (J1962_PINS)
+const ISO15765_PS: u32 = 0x8005;
+const J1962_PINS: u32 = 0x8001;
+/// Pins 3 (CAN high) and 11 (CAN low)
+const PINS_3_11: u32 = 0x030B;
+const MS_CAN_BAUD: u32 = 125_000;
+const HS_CAN_BAUD: u32 = 500_000;
 const FLOW_CONTROL_FILTER: u32 = 3;
 const ISO15765_FRAME_PAD: u32 = 0x40;
 const READ_VBATT: u32 = 0x03;
@@ -113,7 +122,8 @@ fn c_text(buf: &[c_char]) -> String {
 pub struct Interface {
     module: *mut c_void,
     device: u32,
-    channel: Option<u32>,
+    /// The channel, and whether it's on pins 3 / 11
+    channel: Option<(u32, bool)>,
     pub versions: (String, String, String),
     f: Calls,
 }
@@ -212,16 +222,43 @@ impl Interface {
         Ok(mv)
     }
 
-    /// Joins the high-speed CAN bus (pins 6 / 14) for diagnostics
-    pub fn connect(&mut self, baud: u32) -> Result<(), String> {
+    /// Joins a CAN bus for diagnostics: pins 6 / 14, or (`ms`) pins 3 / 11
+    pub fn connect(&mut self, baud: u32, ms: bool) -> Result<(), String> {
         self.disconnect();
         let mut channel = 0u32;
+        let protocol = if ms { ISO15765_PS } else { ISO15765 };
         // SAFETY: J2534 Connect: ISO 15765, 11-bit addresses (no flags)
-        let r = unsafe { (self.f.connect)(self.device, ISO15765, 0, baud, &mut channel) };
+        let r = unsafe { (self.f.connect)(self.device, protocol, 0, baud, &mut channel) };
         if r != 0 {
-            return Err(self.fail("Couldn't join the CAN bus", r));
+            return Err(self.fail(
+                if ms {
+                    "Couldn't reach pins 3 / 11 (MS-CAN)"
+                } else {
+                    "Couldn't join the CAN bus"
+                },
+                r,
+            ));
         }
-        self.channel = Some(channel);
+        if ms {
+            // its pins, before anything else on the channel
+            let mut pins = [SConfig {
+                parameter: J1962_PINS,
+                value: PINS_3_11,
+            }];
+            let mut list = SConfigList {
+                count: 1,
+                list: pins.as_mut_ptr(),
+            };
+            // SAFETY: SET_CONFIG with one parameter
+            let r = unsafe { (self.f.ioctl)(channel, SET_CONFIG, (&mut list as *mut SConfigList).cast(), std::ptr::null_mut()) };
+            if r != 0 {
+                let e = self.fail("Couldn't reach pins 3 / 11 (MS-CAN)", r);
+                // SAFETY: connected above
+                unsafe { (self.f.disconnect)(channel) };
+                return Err(e);
+            }
+        }
+        self.channel = Some((channel, ms));
         // block size and separation time 0: modules send their multi-frame answers as fast as they like
         let mut params = [
             SConfig {
@@ -243,38 +280,52 @@ impl Interface {
     }
 
     pub fn disconnect(&mut self) {
-        if let Some(c) = self.channel.take() {
+        if let Some((c, _)) = self.channel.take() {
             // SAFETY: the channel was connected
             unsafe { (self.f.disconnect)(c) };
         }
     }
 
-    /// One diagnostic request to a module, and its answer (none: none in time); how long it asked to wait
-    pub fn ask(&mut self, tx: u32, rx: u32, data: &[u8], timeout_ms: u32) -> Result<(Option<Vec<u8>>, u32), String> {
-        let channel = self.channel.ok_or("Not on the CAN bus")?;
+    /// One diagnostic request to a module (on pins 3 / 11 with `ms`: the bus changed first when it's on the other),
+    /// and its answer (none: none in time); how long it asked to wait
+    pub fn ask(&mut self, tx: u32, rx: u32, data: &[u8], timeout_ms: u32, ms: bool) -> Result<(Option<Vec<u8>>, u32), String> {
+        let (_, on_ms) = self.channel.ok_or("Not on the CAN bus")?;
+        if on_ms != ms {
+            self.connect(if ms { MS_CAN_BAUD } else { HS_CAN_BAUD }, ms)?;
+        }
+        let (channel, _) = self.channel.ok_or("Not on the CAN bus")?;
+        let protocol = if ms { ISO15765_PS } else { ISO15765 };
         let id = |a: u32| [(a >> 24) as u8, (a >> 16) as u8, (a >> 8) as u8, a as u8];
         // the flow-control filter: answers from `rx`, flow control sent to `tx`
-        let mask = Msg::new(ISO15765, ISO15765_FRAME_PAD, &[0x00, 0x00, 0x07, 0xFF]);
-        let pattern = Msg::new(ISO15765, ISO15765_FRAME_PAD, &id(rx));
-        let flow = Msg::new(ISO15765, ISO15765_FRAME_PAD, &id(tx));
+        let mask = Msg::new(protocol, ISO15765_FRAME_PAD, &[0x00, 0x00, 0x07, 0xFF]);
+        let pattern = Msg::new(protocol, ISO15765_FRAME_PAD, &id(rx));
+        let flow = Msg::new(protocol, ISO15765_FRAME_PAD, &id(tx));
         let mut filter = 0u32;
         // SAFETY: three messages and the filter's ID out
         let r = unsafe { (self.f.start_filter)(channel, FLOW_CONTROL_FILTER, &*mask, &*pattern, &*flow, &mut filter) };
         if r != 0 {
             return Err(self.fail("Couldn't set up the request", r));
         }
-        let result = self.ask_filtered(channel, tx, rx, data, timeout_ms);
+        let result = self.ask_filtered(channel, protocol, tx, rx, data, timeout_ms);
         // SAFETY: the filter started above
         unsafe { (self.f.stop_filter)(channel, filter) };
         result
     }
 
-    fn ask_filtered(&mut self, channel: u32, tx: u32, rx: u32, data: &[u8], timeout_ms: u32) -> Result<(Option<Vec<u8>>, u32), String> {
+    fn ask_filtered(
+        &mut self,
+        channel: u32,
+        protocol: u32,
+        tx: u32,
+        rx: u32,
+        data: &[u8],
+        timeout_ms: u32,
+    ) -> Result<(Option<Vec<u8>>, u32), String> {
         // SAFETY: CLEAR_RX_BUFFER takes nothing
         unsafe { (self.f.ioctl)(channel, CLEAR_RX_BUFFER, std::ptr::null_mut(), std::ptr::null_mut()) };
         let mut bytes = vec![(tx >> 24) as u8, (tx >> 16) as u8, (tx >> 8) as u8, tx as u8];
         bytes.extend_from_slice(data);
-        let msg = Msg::new(ISO15765, ISO15765_FRAME_PAD, &bytes);
+        let msg = Msg::new(protocol, ISO15765_FRAME_PAD, &bytes);
         let mut count = 1u32;
         // SAFETY: one message
         let r = unsafe { (self.f.write)(channel, &*msg, &mut count, 1000) };
@@ -284,7 +335,7 @@ impl Interface {
         let start = Instant::now();
         let mut deadline = start + Duration::from_millis(u64::from(timeout_ms));
         let mut waited = 0u32;
-        let mut got = Msg::new(ISO15765, 0, &[]);
+        let mut got = Msg::new(protocol, 0, &[]);
         while Instant::now() < deadline {
             let mut count = 1u32;
             // SAFETY: room for one message
