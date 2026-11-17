@@ -12,6 +12,7 @@ use iced::Task;
 use xtime::Xtime;
 use xtime::inspect::{FormChoice, InspectionForm, Press, RedService};
 use xtime::ro::RoView;
+use xtime::stage::{Check, Move, Moved, Rating, RatingAsk};
 
 use crate::LoadError;
 
@@ -20,6 +21,8 @@ use crate::LoadError;
 pub struct Env {
     pub xtime: Xtime,
     pub store: String,
+    /// Your technician ID (whose ROs are yours, for Send to Approval / Review)
+    pub tech_id: String,
     /// The app is showing its sample ROs (they aren't in Xtime: nothing is read)
     pub sample: bool,
 }
@@ -52,6 +55,54 @@ pub struct XtimeView {
     /// Another form picked in the drop-down (switched with Switch form)
     pub switch_to: Option<FormChoice>,
     pub switching: bool,
+    /// The moves Xtime offers you on this RO (Send to Approval, Send to Review…), worked out as Xtime's page does
+    pub stage: Option<Check>,
+    pub stage_loading: bool,
+    /// A move pressed (asked once more), the one being made, and the rating Xtime wants first (with what's picked)
+    pub confirm: Option<Move>,
+    pub moving: Option<Move>,
+    pub rating: Option<RatingState>,
+}
+
+/// The store's "Repair Order Quality" rating of the advisor, asked before the RO goes on
+#[derive(Debug, Clone, Default)]
+pub struct RatingState {
+    pub mv: Option<Move>,
+    pub ask: RatingAsk,
+    /// 1–5 (0: none yet)
+    pub stars: u8,
+    pub option: Option<String>,
+    pub text: String,
+}
+
+impl RatingState {
+    /// Whether it can be sent (as Xtime's: 3 stars or fewer need a reason, picked or typed)
+    pub fn ready(&self) -> bool {
+        if self.stars == 0 {
+            return false;
+        }
+        if self.stars > 3 {
+            return true;
+        }
+        if self.ask.drop_down {
+            return match self.option.as_deref() {
+                Some("Other") => !self.text.trim().is_empty(),
+                Some(_) => true,
+                None => false,
+            };
+        }
+        !self.ask.text_field || !self.text.trim().is_empty()
+    }
+
+    fn reason(&self) -> String {
+        if self.stars > 3 {
+            return String::new();
+        }
+        match self.option.as_deref() {
+            Some(o) if self.ask.drop_down && o != "Other" => o.to_string(),
+            _ => self.text.trim().to_string(),
+        }
+    }
 }
 
 /// What the Xtime View does
@@ -79,6 +130,18 @@ pub enum Msg {
     PickForm(FormChoice),
     SwitchForm,
     FormSwitched(Result<(), LoadError>),
+    /// The moves Xtime offers (read with the RO); a move pressed (asked once more: None takes the question away),
+    /// made, and how it went
+    StageLoaded(Result<Check, LoadError>),
+    AskMove(Option<Move>),
+    MakeMove(Move),
+    Moved(Move, Result<Moved, LoadError>),
+    /// The rating Xtime asks for first: stars, a reason picked, a reason typed, Send, Cancel
+    RateStars(u8),
+    RateOption(String),
+    RateText(String),
+    SendRating,
+    CancelRating,
     /// A button meant for the app
     Ask(Ask),
 }
@@ -157,7 +220,44 @@ impl XtimeView {
             .unwrap_or_default()
     }
 
+    /// Reads the moves Xtime offers you (only in Inspection and Repair, the stages a technician moves an RO on from)
+    pub fn load_stage(&mut self, env: &Env) -> Task<Msg> {
+        let mode = self.view.as_ref().map(|v| v.mode).unwrap_or(0);
+        if env.sample || self.stage_loading || self.moving.is_some() || !matches!(mode, 3 | 6) {
+            if !matches!(mode, 3 | 6) {
+                self.stage = None;
+            }
+            return Task::none();
+        }
+        self.stage_loading = true;
+        let (x, store, ro, tech) = (env.xtime.clone(), env.store.clone(), self.ro.clone(), env.tech_id.clone());
+        Task::perform(
+            async move { x.stage_check(&store, &ro, &tech).await.map_err(LoadError::from) },
+            Msg::StageLoaded,
+        )
+    }
+
     pub fn update(&mut self, msg: Msg, env: &Env) -> Step {
+        // a line done, or an inspection item saved: what Xtime offers may have changed
+        let restage = matches!(&msg, Msg::DoneSaved(_, _, Ok(_)) | Msg::ItemSaved(_, _, _, Ok(_)));
+        let (task, outs) = self.step(msg, env);
+        if restage {
+            return (Task::batch([task, self.load_stage(env)]), outs);
+        }
+        (task, outs)
+    }
+
+    fn make_move(&mut self, env: &Env, mv: Move, rating: Option<Rating>) -> Task<Msg> {
+        self.confirm = None;
+        self.moving = Some(mv);
+        let (x, store, ro, tech) = (env.xtime.clone(), env.store.clone(), self.ro.clone(), env.tech_id.clone());
+        Task::perform(
+            async move { x.move_ro(&store, &ro, &tech, mv, rating).await.map_err(LoadError::from) },
+            move |r| Msg::Moved(mv, r),
+        )
+    }
+
+    fn step(&mut self, msg: Msg, env: &Env) -> Step {
         match msg {
             Msg::Load(force) => return (self.load(env, force), vec![]),
             Msg::Loaded(result) => {
@@ -167,8 +267,9 @@ impl XtimeView {
                         self.error = None;
                         self.at = Some(crate::now());
                         self.view = Some(view.clone());
-                        // read with the RO: its inspection form
-                        return (self.load_form(env), vec![Out::Read(view)]);
+                        // read with the RO: its inspection form, and the moves Xtime offers you
+                        let stage = self.load_stage(env);
+                        return (Task::batch([self.load_form(env), stage]), vec![Out::Read(view)]);
                     }
                     Err(e) => {
                         let out = if e == LoadError::SignedOut { vec![Out::SignedOut] } else { vec![] };
@@ -368,6 +469,83 @@ impl XtimeView {
                     Err(e) => just(vec![Out::Notice(format!("Couldn't switch the form ({})", e.plain()))]),
                 };
             }
+            Msg::StageLoaded(r) => {
+                self.stage_loading = false;
+                match r {
+                    Ok(c) => self.stage = Some(c),
+                    Err(LoadError::SignedOut) => return just(vec![Out::SignedOut]),
+                    // (the buttons stay as they were; the next read tries again)
+                    Err(_) => {}
+                }
+            }
+            Msg::AskMove(mv) => self.confirm = mv,
+            Msg::MakeMove(mv) => {
+                if self.moving.is_some() || env.sample {
+                    return just(vec![]);
+                }
+                return (self.make_move(env, mv, None), vec![]);
+            }
+            Msg::Moved(mv, r) => {
+                self.moving = None;
+                let ro = self.ro.clone();
+                return match r {
+                    Ok(Moved::Done) => {
+                        self.rating = None;
+                        self.stage = None;
+                        let said = match mv.target() {
+                            Some(4) => format!("RO {ro} sent to Approval"),
+                            Some(6) => format!("RO {ro} is in Repair"),
+                            Some(7) => format!("RO {ro} sent to Review"),
+                            _ => format!("RO {ro}: started working"),
+                        };
+                        (self.load(env, true), vec![Out::Notice(said)])
+                    }
+                    Ok(Moved::NeedsRating(ask)) => {
+                        self.rating = Some(RatingState {
+                            mv: Some(mv),
+                            ask,
+                            ..Default::default()
+                        });
+                        just(vec![])
+                    }
+                    Err(LoadError::SignedOut) => just(vec![Out::SignedOut]),
+                    Err(e) => {
+                        let task = self.load_stage(env);
+                        (task, vec![Out::Notice(format!("Couldn't move RO {ro} on ({})", e.plain()))])
+                    }
+                };
+            }
+            Msg::RateStars(n) => {
+                if let Some(r) = &mut self.rating {
+                    r.stars = n.clamp(1, 5);
+                }
+            }
+            Msg::RateOption(o) => {
+                if let Some(r) = &mut self.rating {
+                    r.option = Some(o);
+                }
+            }
+            Msg::RateText(t) => {
+                if let Some(r) = &mut self.rating {
+                    r.text = t.chars().take(500).collect();
+                }
+            }
+            Msg::SendRating => {
+                let Some(r) = self.rating.clone().filter(RatingState::ready) else {
+                    return just(vec![]);
+                };
+                let Some(mv) = r.mv else { return just(vec![]) };
+                if self.moving.is_some() {
+                    return just(vec![]);
+                }
+                let rating = Rating {
+                    target_user: r.ask.target_user.clone(),
+                    stars: r.stars,
+                    reason: r.reason(),
+                };
+                return (self.make_move(env, mv, Some(rating)), vec![]);
+            }
+            Msg::CancelRating => self.rating = None,
             Msg::Ask(a) => return just(vec![Out::Ask(a)]),
         }
         just(vec![])

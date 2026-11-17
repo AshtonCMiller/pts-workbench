@@ -1803,6 +1803,7 @@ impl App {
         xtime_ui::Env {
             xtime: self.xtime.clone(),
             store: self.settings.store_id.clone(),
+            tech_id: self.settings.tech_id.clone(),
             sample: self.sample_data,
         }
     }

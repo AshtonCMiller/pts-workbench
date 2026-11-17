@@ -65,14 +65,49 @@ pub fn view<'a>(xv: &'a XtimeView, shown: &Shown) -> Element<'a, Msg> {
     };
     let cx = Ctx { xv, flags: &shown.flags };
     let sections = v.sections();
-    // Add Service: Xtime's Add Service window
-    let toolbar = row![
+    // Add Service: Xtime's Add Service window; then the moves Xtime offers you (Send to Approval, Send to Review…)
+    let mut toolbar = row![
         button(text("Add Service").size(13).font(style::BOLD))
             .padding([6, 14])
             .style(button::primary)
             .on_press_maybe(shown.can_add_service.then_some(Msg::Ask(Ask::AddService(None)))),
-    ];
-    let mut page = column![header(xv, shown, v), top_cards(v), toolbar].spacing(12);
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center);
+    toolbar = toolbar.push(horizontal_space());
+    if let Some(c) = &xv.stage {
+        for &mv in &c.moves {
+            let busy = xv.moving == Some(mv);
+            toolbar = toolbar.push(
+                button(
+                    text(if busy { "Sending…" } else { mv.label(c.parts_enabled) })
+                        .size(13)
+                        .font(style::BOLD),
+                )
+                .padding([6, 14])
+                .style(button::success)
+                .on_press_maybe((xv.moving.is_none() && xv.rating.is_none()).then_some(Msg::AskMove(Some(mv)))),
+            );
+        }
+        if c.mode == 3 && c.yours && c.required_missing > 0 && c.required_missing != usize::MAX {
+            toolbar = toolbar.push(
+                text(format!(
+                    "{} Required inspection item{} to fill in before it can go on",
+                    c.required_missing,
+                    if c.required_missing == 1 { "" } else { "s" }
+                ))
+                .size(12)
+                .style(style::muted),
+            );
+        }
+    }
+    let mut page = column![header(xv, shown, v), top_cards(v), toolbar.wrap()].spacing(12);
+    if let (Some(mv), Some(c)) = (xv.confirm, &xv.stage) {
+        page = page.push(confirm_card(&v.ro, mv, c.parts_enabled, c.send_to_parts));
+    }
+    if let Some(r) = &xv.rating {
+        page = page.push(rating_card(xv, r));
+    }
     if let Some(e) = &xv.error {
         page = page.push(
             text(format!("Couldn't refresh: {}", e.text().trim_start_matches("Xtime: ")))
@@ -98,6 +133,114 @@ pub fn view<'a>(xv: &'a XtimeView, shown: &Shown) -> Element<'a, Msg> {
     page = page.push(inspection(&cx, v, &sections));
     page = page.push(crate::inspection::section(xv));
     page.into()
+}
+
+/// "Send RO 123 to Approval?" (a stage change goes to the advisor and parts: asked once more)
+fn confirm_card(ro: &str, mv: xtime::stage::Move, parts_enabled: bool, to_parts: bool) -> Element<'_, Msg> {
+    use xtime::stage::Move;
+    let about = match mv {
+        Move::CompleteToApproval { .. } | Move::BackToApproval if parts_enabled && to_parts => {
+            "It goes to the advisor for approval, and to parts for a quote (the parts status becomes Waiting)."
+        }
+        Move::CompleteToApproval { .. } | Move::BackToApproval => "It goes to the advisor for approval.",
+        Move::CompleteToRepair => "The inspection's done: you work on the primary lines.",
+        Move::CompleteToReview | Move::ToReview => "All the work's done: it goes to the advisor for review.",
+        Move::StartWorking => "It's on hold no more: you're working on it.",
+    };
+    let question = match mv {
+        Move::StartWorking => format!("Start working on RO {ro}?"),
+        Move::CompleteToRepair => format!("Complete the inspection on RO {ro}?"),
+        _ => format!("{} for RO {ro}?", mv.label(parts_enabled)),
+    };
+    container(
+        column![
+            text(question).size(15).font(style::BOLD),
+            text(about).size(13).style(style::muted),
+            row![
+                horizontal_space(),
+                button(text("Cancel").size(13))
+                    .padding([6, 14])
+                    .style(style::ghost)
+                    .on_press(Msg::AskMove(None)),
+                button(text("Yes, send it").size(13).font(style::BOLD))
+                    .padding([6, 14])
+                    .style(button::success)
+                    .on_press(Msg::MakeMove(mv)),
+            ]
+            .spacing(8),
+        ]
+        .spacing(8),
+    )
+    .padding(14)
+    .width(Length::Fill)
+    .style(style::card_highlight)
+    .into()
+}
+
+/// The store's "Repair Order Quality": the advisor rated before the RO goes on (as Xtime's page asks)
+fn rating_card<'a>(xv: &'a XtimeView, r: &'a crate::ro_view::RatingState) -> Element<'a, Msg> {
+    let mut stars = row![].spacing(4);
+    for n in 1..=5u8 {
+        let on = n <= r.stars;
+        stars = stars.push(
+            button(
+                text(if on { "★" } else { "☆" })
+                    .size(26)
+                    .color(if on { color(AMBER) } else { color(GREY) }),
+            )
+            .padding([0, 2])
+            .style(button::text)
+            .on_press(Msg::RateStars(n)),
+        );
+    }
+    let mut c = column![
+        text(r.ask.title.as_str()).size(15).font(style::BOLD),
+        text("Your store asks you to rate the advisor on this RO before it goes on.")
+            .size(13)
+            .style(style::muted),
+        stars,
+    ]
+    .spacing(8);
+    let low = r.stars > 0 && r.stars <= 3;
+    if low && r.ask.drop_down && !r.ask.options.is_empty() {
+        let mut opts = Column::new().spacing(4);
+        for o in &r.ask.options {
+            let picked = r.option.as_deref() == Some(o.as_str());
+            opts = opts.push(
+                button(text(o.as_str()).size(13))
+                    .width(Length::Fill)
+                    .padding([5, 10])
+                    .style(style::toggle(picked))
+                    .on_press(Msg::RateOption(o.clone())),
+            );
+        }
+        c = c.push(text("Why?").size(13).font(style::BOLD)).push(opts);
+    }
+    let typed = low && ((r.ask.drop_down && r.option.as_deref() == Some("Other")) || (!r.ask.drop_down && r.ask.text_field));
+    if typed {
+        c = c.push(
+            iced::widget::text_input("Why? (a few words)", &r.text)
+                .on_input(Msg::RateText)
+                .padding(8)
+                .size(13),
+        );
+    }
+    let sending = xv.moving.is_some();
+    c = c.push(
+        row![
+            horizontal_space(),
+            button(text("Cancel").size(13))
+                .padding([6, 14])
+                .style(style::ghost)
+                .on_press(Msg::CancelRating),
+            button(text(if sending { "Sending…" } else { "Rate and send" }).size(13).font(style::BOLD))
+                .padding([6, 14])
+                .style(button::success)
+                .on_press_maybe((r.ready() && !sending).then_some(Msg::SendRating)),
+        ]
+        .spacing(8),
+    );
+    container(c).padding(14).width(Length::Fill).style(style::card_highlight).into()
 }
 
 /// Before the RO has been read: reading, or why it couldn't be

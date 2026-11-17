@@ -22,6 +22,7 @@ pub mod inspect;
 mod json;
 pub mod ro;
 pub mod service;
+pub mod stage;
 pub mod xml;
 pub mod xmpp;
 
