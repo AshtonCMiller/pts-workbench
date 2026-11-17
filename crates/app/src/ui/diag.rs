@@ -469,7 +469,7 @@ fn module_row(m: &Module) -> Element<'_, Message> {
                 text(tag(m.short, m.address)).font(style::BOLD),
                 text(match m.bus {
                     Bus::Hs => format!("{:03X}", m.address),
-                    Bus::Ms => format!("{:03X} · MS-CAN", m.address),
+                    other => format!("{:03X} · {}", m.address, other.label()),
                 })
                 .size(11)
                 .font(style::MONO)
@@ -518,8 +518,8 @@ fn scan_card(d: &Diag) -> Element<'_, Message> {
         let now = on
             .map(|m| match (m.listed, m.bus) {
                 (false, b) => format!("Full search: {:03X} on {}…", m.address, b.label()),
-                (true, Bus::Ms) => format!("Asking the {} on pins 3 / 11 (MS-CAN)…", m.short),
                 (true, Bus::Hs) => format!("Asking the {} ({})…", m.short, m.name),
+                (true, b) => format!("Asking the {} on {} (pins {})…", m.short, b.label(), b.pins_label()),
             })
             .unwrap_or_default();
         body = body.push(
@@ -563,24 +563,34 @@ fn scan_card(d: &Diag) -> Element<'_, Message> {
         }
         body = body.push(container(list).style(style::panel));
     }
-    // the list's modules that didn't answer (on each network asked)
-    for bus in [Bus::Hs, Bus::Ms] {
-        let silent: Vec<&str> = scan
-            .modules
-            .iter()
-            .filter(|m| m.listed && m.bus == bus && m.status == Status::NoAnswer)
-            .map(|m| m.short)
-            .collect();
-        if !silent.is_empty() {
-            let on = if scan.modules.iter().any(|m| m.bus == Bus::Ms) {
-                format!(" on {}", bus.label())
-            } else {
-                String::new()
-            };
-            body = body.push(text(format!("No answer{on}: {}", silent.join(", "))).size(12).style(style::muted));
+    // the list's modules that didn't answer on pins 6 / 14; the other networks, what answered there
+    let silent: Vec<&str> = scan
+        .modules
+        .iter()
+        .filter(|m| m.listed && m.bus == Bus::Hs && m.status == Status::NoAnswer)
+        .map(|m| m.short)
+        .collect();
+    if !silent.is_empty() {
+        body = body.push(text(format!("No answer: {}", silent.join(", "))).size(12).style(style::muted));
+    }
+    if !d.scanning {
+        for bus in Bus::OTHERS {
+            let asked: Vec<&Module> = scan
+                .modules
+                .iter()
+                .filter(|m| m.bus == bus && m.status != Status::Waiting)
+                .collect();
+            let unreachable = d.scan_notes.iter().any(|n| n.starts_with(&bus.full_label()));
+            if !asked.is_empty() && !unreachable && !asked.iter().any(|m| m.present()) {
+                body = body.push(
+                    text(format!("Nothing answered on {}.", bus.full_label()))
+                        .size(12)
+                        .style(style::muted),
+                );
+            }
         }
     }
-    if let Some(n) = &d.scan_note {
+    for n in &d.scan_notes {
         body = body.push(text(n.as_str()).size(12).style(style::muted));
     }
     // the full search: every other diagnostic address (once the list's done)

@@ -6,8 +6,9 @@
 //! [`Scan::answer`] what came back.
 //!
 //! It goes in passes, each added when the one before is done ([`Scan::add`]): the modules on the list on pins 6 / 14;
-//! then, on an older Ford (no gateway answered), the list again on pins 3 / 11; and, when asked, the full search (every
-//! other diagnostic address, more quickly).
+//! then, on an older Ford (no gateway answered), the list again on each of its other networks (HS-CAN2 or MS-CAN on
+//! pins 3 / 11, HS-CAN2 on 8 / 12, HS-CAN3 on 1 / 9: [`Scan::add_other_networks`]); and, when asked, the full search
+//! (every other diagnostic address).
 
 use crate::modules::{self, Bus, Entry};
 use crate::uds::{self, Answer};
@@ -16,6 +17,8 @@ use crate::uds::{self, Answer};
 pub const TIMEOUT_MS: u32 = 300;
 /// The full search's (most addresses have nothing: a module answers well within this)
 pub const SWEEP_TIMEOUT_MS: u32 = 120;
+/// The other networks' (most of the list isn't on each)
+pub const OTHERS_TIMEOUT_MS: u32 = 150;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
@@ -108,11 +111,19 @@ impl Scan {
         }
     }
 
-    /// The list again on pins 3 / 11 (an older Ford's medium-speed CAN), but for the modules found on pins 6 / 14
-    pub fn add_ms_can(&mut self) {
+    /// The list again on an older Ford's other networks (MS-CAN, HS-CAN2, HS-CAN3), but for the modules found on
+    /// pins 6 / 14
+    pub fn add_other_networks(&mut self) {
         let found: Vec<u32> = self.modules.iter().filter(|m| m.present()).map(|m| m.address).collect();
         let list: Vec<Entry> = modules::MODULES.iter().copied().filter(|m| !found.contains(&m.0)).collect();
-        self.add(Bus::Ms, &list, true, TIMEOUT_MS);
+        for bus in Bus::OTHERS {
+            self.add(bus, &list, true, OTHERS_TIMEOUT_MS);
+        }
+    }
+
+    /// Whether the other networks have been asked
+    pub fn others_asked(&self) -> bool {
+        self.modules.iter().any(|m| m.bus != Bus::Hs)
     }
 
     /// The full search on a network: every other diagnostic address (not where a module found answers)
@@ -216,6 +227,30 @@ impl Scan {
         }
     }
 
+    /// Passes that aren't needed: pins 3 / 11 answered at 500 kbit/s (HS-CAN2), so they aren't MS-CAN; and once a
+    /// gateway's answered on another network, the modules behind it have been reached through it (pins 8 / 12 and
+    /// 1 / 9 aren't asked)
+    fn drop_needless(&mut self) {
+        let Some(bus) = self.modules.get(self.at).map(|m| m.bus) else {
+            return;
+        };
+        let needless = match bus {
+            Bus::Ms => self.any_on(Bus::Hs2),
+            Bus::Hs2b | Bus::Hs3 => self.gateway(),
+            _ => false,
+        };
+        if needless {
+            let at = self.at;
+            let mut i = 0;
+            self.modules.retain(|m| {
+                let keep = i < at || !(m.bus == bus && m.status == Status::Waiting);
+                i += 1;
+                keep
+            });
+            self.drop_needless();
+        }
+    }
+
     fn next_module(&mut self) {
         // a module found by the full search: the address it answers at isn't asked (it's not a module's)
         if let Some(m) = self.modules.get(self.at).filter(|m| m.present()) {
@@ -229,6 +264,7 @@ impl Scan {
         }
         self.at += 1;
         self.step = Step::Part;
+        self.drop_needless();
     }
 }
 
@@ -269,12 +305,25 @@ mod tests {
         assert_eq!(s.next(), None);
         assert_eq!(s.progress().0, s.modules.len());
         assert!(!s.gateway());
-        // an older Ford: the list again on pins 3 / 11, but for the two found
-        s.add_ms_can();
+        // an older Ford: the list again on its other networks, but for the two found
+        s.add_other_networks();
         let a = s.next().unwrap();
-        assert_eq!((a.tx, a.bus), (0x7E1, Bus::Ms));
-        assert_eq!(s.modules.len(), 2 * modules::MODULES.len() - 2);
-        s.skip(Bus::Ms);
+        assert_eq!(a.timeout_ms, OTHERS_TIMEOUT_MS);
+        assert_eq!(s.modules.len(), modules::MODULES.len() + 4 * (modules::MODULES.len() - 2));
+        // HS-CAN2 on 3 / 11 first: the ABS answers there, so 3 / 11 isn't asked as MS-CAN; 8 / 12 next
+        assert_eq!((a.tx, a.bus), (0x7E1, Bus::Hs2));
+        while s.next().is_some_and(|a| a.bus == Bus::Hs2) {
+            if s.next().unwrap().tx == 0x760 {
+                s.answer(Some(&[0x7F, 0x22, 0x31]));
+                s.answer(None);
+            } else {
+                s.answer(None);
+            }
+        }
+        assert_eq!(s.next().unwrap().bus, Bus::Hs2b);
+        assert!(!s.modules.iter().any(|m| m.bus == Bus::Ms));
+        s.skip(Bus::Hs2b);
+        s.skip(Bus::Hs3);
         assert!(s.done());
         // the full search: a module at 7A5 answers, so 7AD (where it answers) isn't asked
         s.add_sweep(Bus::Hs);

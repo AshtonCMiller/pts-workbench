@@ -1,6 +1,6 @@
 //! SAE J2534 (04.04) through the interface's own driver: open it, its voltage, join a CAN bus for diagnostics
-//! (ISO 15765, 11-bit addresses): the high-speed one on pins 6 / 14, or an older Ford's medium-speed one on pins
-//! 3 / 11 (J2534-2's pin-switched ISO15765_PS, its pins set with J1962_PINS); one diagnostic request and its answer,
+//! (ISO 15765, 11-bit addresses): the high-speed one on pins 6 / 14, or an older Ford's other networks on their own
+//! pins (J2534-2's pin-switched ISO15765_PS, its pins set with J1962_PINS); one diagnostic request and its answer,
 //! close.
 //!
 //! A request to a module: a flow-control filter for its address pair (so the VCI handles the multi-frame transfer),
@@ -78,10 +78,9 @@ type GetLastError = unsafe extern "system" fn(*mut c_char) -> i32;
 const ISO15765: u32 = 6;
 /// J2534-2: ISO 15765 on the pins asked for (J1962_PINS)
 const ISO15765_PS: u32 = 0x8005;
+/// J2534-2: the first extra ISO 15765 channel (its pins set with J1962_PINS too)
+const ISO15765_CH1: u32 = 0x9400;
 const J1962_PINS: u32 = 0x8001;
-/// Pins 3 (CAN high) and 11 (CAN low)
-const PINS_3_11: u32 = 0x030B;
-const MS_CAN_BAUD: u32 = 125_000;
 const HS_CAN_BAUD: u32 = 500_000;
 const FLOW_CONTROL_FILTER: u32 = 3;
 const ISO15765_FRAME_PAD: u32 = 0x40;
@@ -118,12 +117,21 @@ fn c_text(buf: &[c_char]) -> String {
     String::from_utf8_lossy(&bytes).trim().to_string()
 }
 
+/// A channel on a network: its protocol, pins (0: 6 / 14) and speed
+#[derive(Debug, Clone, Copy)]
+struct On {
+    channel: u32,
+    protocol: u32,
+    pins: u32,
+    baud: u32,
+}
+
 /// The interface, open; its channel on the CAN bus while joined. Closed (and the driver let go of) when dropped.
 pub struct Interface {
     module: *mut c_void,
     device: u32,
-    /// The channel, and whether it's on pins 3 / 11
-    channel: Option<(u32, bool)>,
+    /// The channel, while on a network
+    channel: Option<On>,
     pub versions: (String, String, String),
     f: Calls,
 }
@@ -222,43 +230,62 @@ impl Interface {
         Ok(mv)
     }
 
-    /// Joins a CAN bus for diagnostics: pins 6 / 14, or (`ms`) pins 3 / 11
-    pub fn connect(&mut self, baud: u32, ms: bool) -> Result<(), String> {
-        self.disconnect();
+    /// Opens a channel with its pins set (J2534-2), or why not
+    fn open_on_pins(&mut self, protocol: u32, baud: u32, pins: u32) -> Result<u32, i32> {
         let mut channel = 0u32;
-        let protocol = if ms { ISO15765_PS } else { ISO15765 };
-        // SAFETY: J2534 Connect: ISO 15765, 11-bit addresses (no flags)
+        // SAFETY: J2534 Connect (no flags)
         let r = unsafe { (self.f.connect)(self.device, protocol, 0, baud, &mut channel) };
         if r != 0 {
-            return Err(self.fail(
-                if ms {
-                    "Couldn't reach pins 3 / 11 (MS-CAN)"
-                } else {
-                    "Couldn't join the CAN bus"
-                },
-                r,
-            ));
+            return Err(r);
         }
-        if ms {
-            // its pins, before anything else on the channel
-            let mut pins = [SConfig {
-                parameter: J1962_PINS,
-                value: PINS_3_11,
-            }];
-            let mut list = SConfigList {
-                count: 1,
-                list: pins.as_mut_ptr(),
-            };
-            // SAFETY: SET_CONFIG with one parameter
-            let r = unsafe { (self.f.ioctl)(channel, SET_CONFIG, (&mut list as *mut SConfigList).cast(), std::ptr::null_mut()) };
+        // its pins, before anything else on the channel
+        let mut list_items = [SConfig {
+            parameter: J1962_PINS,
+            value: pins,
+        }];
+        let mut list = SConfigList {
+            count: 1,
+            list: list_items.as_mut_ptr(),
+        };
+        // SAFETY: SET_CONFIG with one parameter
+        let r = unsafe { (self.f.ioctl)(channel, SET_CONFIG, (&mut list as *mut SConfigList).cast(), std::ptr::null_mut()) };
+        if r != 0 {
+            // SAFETY: connected above
+            unsafe { (self.f.disconnect)(channel) };
+            return Err(r);
+        }
+        Ok(channel)
+    }
+
+    /// Joins a CAN network for diagnostics: pins 6 / 14 (`pins` 0), or other pins (J1962_PINS: 0x030B is 3 / 11).
+    /// Other pins are J2534-2's pin-switched ISO 15765; a VCI that refuses that is asked for its first extra CAN
+    /// channel instead.
+    pub fn connect(&mut self, baud: u32, pins: u32) -> Result<(), String> {
+        self.disconnect();
+        let (channel, protocol) = if pins == 0 {
+            let mut channel = 0u32;
+            // SAFETY: J2534 Connect: ISO 15765, 11-bit addresses (no flags)
+            let r = unsafe { (self.f.connect)(self.device, ISO15765, 0, baud, &mut channel) };
             if r != 0 {
-                let e = self.fail("Couldn't reach pins 3 / 11 (MS-CAN)", r);
-                // SAFETY: connected above
-                unsafe { (self.f.disconnect)(channel) };
-                return Err(e);
+                return Err(self.fail("Couldn't join the CAN bus", r));
             }
-        }
-        self.channel = Some((channel, ms));
+            (channel, ISO15765)
+        } else {
+            let what = format!("Couldn't reach pins {} / {}", pins >> 8, pins & 0xFF);
+            match self.open_on_pins(ISO15765_PS, baud, pins) {
+                Ok(c) => (c, ISO15765_PS),
+                Err(first) => match self.open_on_pins(ISO15765_CH1, baud, pins) {
+                    Ok(c) => (c, ISO15765_CH1),
+                    Err(_) => return Err(self.fail(&what, first)),
+                },
+            }
+        };
+        self.channel = Some(On {
+            channel,
+            protocol,
+            pins,
+            baud,
+        });
         // block size and separation time 0: modules send their multi-frame answers as fast as they like
         let mut params = [
             SConfig {
@@ -280,21 +307,21 @@ impl Interface {
     }
 
     pub fn disconnect(&mut self) {
-        if let Some((c, _)) = self.channel.take() {
+        if let Some(On { channel: c, .. }) = self.channel.take() {
             // SAFETY: the channel was connected
             unsafe { (self.f.disconnect)(c) };
         }
     }
 
-    /// One diagnostic request to a module (on pins 3 / 11 with `ms`: the bus changed first when it's on the other),
-    /// and its answer (none: none in time); how long it asked to wait
-    pub fn ask(&mut self, tx: u32, rx: u32, data: &[u8], timeout_ms: u32, ms: bool) -> Result<(Option<Vec<u8>>, u32), String> {
-        let (_, on_ms) = self.channel.ok_or("Not on the CAN bus")?;
-        if on_ms != ms {
-            self.connect(if ms { MS_CAN_BAUD } else { HS_CAN_BAUD }, ms)?;
+    /// One diagnostic request to a module, on the network at `pins` and `baud` (0, 0: pins 6 / 14 at 500 kbit/s;
+    /// moved to first when it's on another), and its answer (none: none in time); how long it asked to wait
+    pub fn ask(&mut self, tx: u32, rx: u32, data: &[u8], timeout_ms: u32, pins: u32, baud: u32) -> Result<(Option<Vec<u8>>, u32), String> {
+        let baud = if baud == 0 { HS_CAN_BAUD } else { baud };
+        let on = self.channel.ok_or("Not on the CAN bus")?;
+        if on.pins != pins || on.baud != baud {
+            self.connect(baud, pins)?;
         }
-        let (channel, _) = self.channel.ok_or("Not on the CAN bus")?;
-        let protocol = if ms { ISO15765_PS } else { ISO15765 };
+        let On { channel, protocol, .. } = self.channel.ok_or("Not on the CAN bus")?;
         let id = |a: u32| [(a >> 24) as u8, (a >> 16) as u8, (a >> 8) as u8, a as u8];
         // the flow-control filter: answers from `rx`, flow control sent to `tx`
         let mask = Msg::new(protocol, ISO15765_FRAME_PAD, &[0x00, 0x00, 0x07, 0xFF]);

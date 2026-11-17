@@ -4,8 +4,11 @@
 //! Where they're reached from the OBD port (the DLC):
 //!   * Newer Fords have a gateway (the GWM, 716): the DLC has one diagnostic network (pins 6 / 14), and the GWM
 //!     passes requests on to the modules on the vehicle's other networks. Every module is asked there.
-//!   * Older Fords (no gateway) bring their medium-speed CAN out to pins 3 / 11 too (125 kbit/s): the body and
-//!     comfort modules are there.
+//!   * Older Fords bring another network out to the DLC too. Often pins 3 / 11 are HS-CAN2 (500 kbit/s), and a
+//!     gateway on it passes requests on to HS-CAN3 and MS-CAN (a 2017 F-150); on older ones pins 3 / 11 are MS-CAN
+//!     itself (125 kbit/s). Ford's full DLC also has HS-CAN2 on 8 / 12 and HS-CAN3 on 1 / 9. The network test asks
+//!     the list on each of these in turn (MS-CAN only when nothing answered on 3 / 11 at 500), and leaves out one it
+//!     can't reach.
 //!
 //! [`MODULES`] is the list the network test asks (by name). The full search ([`sweep`]) asks every other diagnostic
 //! address too, for modules that aren't on it.
@@ -13,25 +16,61 @@
 /// A network at the OBD port
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Bus {
-    /// High-speed CAN, pins 6 / 14, 500 kbit/s (on gateway vehicles: the diagnostic network to the GWM)
+    /// High-speed CAN 1, pins 6 / 14, 500 kbit/s (on gateway vehicles: the diagnostic network to the GWM)
     #[default]
     Hs,
-    /// Medium-speed CAN, pins 3 / 11, 125 kbit/s (older Fords, without a gateway)
+    /// High-speed CAN 2 on pins 3 / 11, 500 kbit/s (with a gateway behind it to HS-CAN3 and MS-CAN)
+    Hs2,
+    /// Medium-speed CAN, pins 3 / 11, 125 kbit/s
     Ms,
+    /// High-speed CAN 2 on pins 8 / 12, 500 kbit/s
+    Hs2b,
+    /// High-speed CAN 3, pins 1 / 9, 500 kbit/s
+    Hs3,
 }
 
 impl Bus {
+    /// The networks other than HS-CAN1, in the order they're asked
+    pub const OTHERS: [Bus; 4] = [Bus::Hs2, Bus::Ms, Bus::Hs2b, Bus::Hs3];
+
     pub fn label(self) -> &'static str {
         match self {
             Bus::Hs => "HS-CAN",
             Bus::Ms => "MS-CAN",
+            Bus::Hs2 | Bus::Hs2b => "HS-CAN2",
+            Bus::Hs3 => "HS-CAN3",
+        }
+    }
+
+    /// "HS-CAN2 (pins 3 / 11)"
+    pub fn full_label(self) -> String {
+        format!("{} (pins {})", self.label(), self.pins_label())
+    }
+
+    /// Its pins at the DLC ("3 / 11")
+    pub fn pins_label(self) -> &'static str {
+        match self {
+            Bus::Hs => "6 / 14",
+            Bus::Ms | Bus::Hs2 => "3 / 11",
+            Bus::Hs2b => "8 / 12",
+            Bus::Hs3 => "1 / 9",
         }
     }
 
     pub fn baud(self) -> u32 {
         match self {
-            Bus::Hs => HS_CAN_BAUD,
             Bus::Ms => MS_CAN_BAUD,
+            _ => HS_CAN_BAUD,
+        }
+    }
+
+    /// Its pins as J2534's J1962_PINS has them (high byte CAN high, low byte CAN low); 0: the usual 6 / 14
+    pub fn pins(self) -> u32 {
+        match self {
+            Bus::Hs => 0,
+            Bus::Ms | Bus::Hs2 => 0x030B,
+            Bus::Hs2b => 0x080C,
+            Bus::Hs3 => 0x0109,
         }
     }
 }

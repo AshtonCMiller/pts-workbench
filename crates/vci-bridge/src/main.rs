@@ -66,15 +66,16 @@ impl Vci {
                 })
             }
             Request::Voltage => self.with(|i| i.voltage().map(|millivolts| Reply::Voltage { millivolts })),
-            Request::Connect { baud, ms_can } => self.with(|i| i.connect(baud, ms_can).map(|_| Reply::Done)),
+            Request::Connect { baud, pins } => self.with(|i| i.connect(baud, pins).map(|_| Reply::Done)),
             Request::Ask {
                 tx,
                 rx,
                 data,
                 timeout_ms,
-                ms_can,
+                pins,
+                baud,
             } => self.with(|i| {
-                i.ask(tx, rx, &data, timeout_ms, ms_can)
+                i.ask(tx, rx, &data, timeout_ms, pins, baud)
                     .map(|(data, waited_ms)| Reply::Answer { data, waited_ms })
             }),
             Request::Disconnect => self.with(|i| {

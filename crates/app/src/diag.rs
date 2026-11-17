@@ -5,7 +5,8 @@
 //!   3. Identify: the PCM asked for the VIN (22 F190; OBD's 09 02 if it won't say), matched to your ROs.
 //!   4. Network test: each module asked for its part number and software (crates/vci/scan.rs). On pins 6 / 14
 //!      (on a newer Ford, the gateway passes the requests on to every network); on an older Ford without a
-//!      gateway, on pins 3 / 11 (MS-CAN) too. The full search asks every other diagnostic address as well.
+//!      gateway, on its other networks' pins too (MS-CAN 3 / 11, HS-CAN2 8 / 12, HS-CAN3 1 / 9). The full search
+//!      asks every other diagnostic address as well.
 //!   5. Self test: each module's trouble codes; and clearing them, when you ask (crates/vci/dtc.rs).
 //!
 //! All of it through the 32-bit helper (crates/vci-bridge), asked one thing at a time. Only reads, and clearing codes
@@ -59,9 +60,9 @@ pub struct Diag {
     pub no_vin: bool,
     pub scan: Option<Scan>,
     pub scanning: bool,
-    /// What the network test found out about the vehicle's networks ("Gateway vehicle…"), and a pass that couldn't
-    /// be made
-    pub scan_note: Option<String>,
+    /// What the network test found out about the vehicle's networks ("This vehicle has a gateway…"), and the
+    /// networks it couldn't reach
+    pub scan_notes: Vec<String>,
     /// The self test: each module's codes
     pub selftest: Option<SelfTest>,
     pub testing: bool,
@@ -91,7 +92,7 @@ impl Default for Diag {
             no_vin: false,
             scan: None,
             scanning: false,
-            scan_note: None,
+            scan_notes: Vec::new(),
             selftest: None,
             testing: false,
             confirm_clear: false,
@@ -199,7 +200,7 @@ async fn connect(b: Bridge, dll: String) -> Result<Joined, String> {
     if let Err(e) = ok(b
         .call(Request::Connect {
             baud: modules::HS_CAN_BAUD,
-            ms_can: false,
+            pins: 0,
         })
         .await)
     {
@@ -217,7 +218,8 @@ async fn ask(b: &Bridge, tx: u32, data: Vec<u8>, timeout_ms: u32) -> Result<Opti
         rx,
         data,
         timeout_ms,
-        ms_can: false,
+        pins: 0,
+        baud: 0,
     };
     match ok(b.call(req).await)? {
         Reply::Answer { data, .. } => Ok(data),
@@ -500,7 +502,7 @@ impl Diag {
                 self.scanning = true;
                 self.stopping = false;
                 self.error = None;
-                self.scan_note = None;
+                self.scan_notes.clear();
                 let t0 = self.t0();
                 self.push_log(format!("{}  ··  Network test (pins 6 / 14)", stamp(t0)));
                 note("Network test started");
@@ -525,14 +527,17 @@ impl Diag {
                             return none(Task::none());
                         };
                         scan.answer(answer.as_deref());
-                        // the list done on pins 6 / 14: an older Ford (no gateway) has more on pins 3 / 11
-                        if scan.done() && !self.stopping && asked.bus == Bus::Hs && !scan.modules.iter().any(|m| m.bus == Bus::Ms) {
+                        // the list done on pins 6 / 14: an older Ford (no gateway) has its other networks at the DLC too
+                        if scan.done() && !self.stopping && asked.bus == Bus::Hs && !scan.others_asked() {
                             if scan.gateway() {
-                                self.scan_note =
-                                    Some("This vehicle has a gateway (GWM): every module is reached through it, from pins 6 / 14.".into());
+                                self.scan_notes
+                                    .push("This vehicle has a gateway (GWM): every module is reached through it, from pins 6 / 14.".into());
                             } else if scan.modules.iter().all(|m| m.listed) {
-                                scan.add_ms_can();
-                                self.log.push(format!("{}  ··  No gateway: pins 3 / 11 (MS-CAN) too", stamp(t0)));
+                                scan.add_other_networks();
+                                self.log.push(format!(
+                                    "{}  ··  No gateway on 6 / 14: the other networks too (pins 3 / 11, 8 / 12, 1 / 9)",
+                                    stamp(t0)
+                                ));
                             }
                         }
                         match scan.next() {
@@ -550,13 +555,14 @@ impl Diag {
                             }
                         }
                     }
-                    // pins 3 / 11 can't be reached (the VCI, or the vehicle): that pass left out, the rest carries on
-                    Err(e) if asked.bus == Bus::Ms && self.scan.is_some() => {
-                        note(&format!("Network test: pins 3 / 11 left out ({e})"));
+                    // another network can't be reached (the VCI, or the vehicle): that pass left out, the rest carries on
+                    Err(e) if asked.bus != Bus::Hs && self.scan.is_some() => {
+                        let bus = asked.bus;
+                        note(&format!("Network test: {} left out ({e})", bus.label()));
                         self.push_log(format!("{}  ··  {e}", stamp(t0)));
-                        self.scan_note = Some(format!("Pins 3 / 11 (MS-CAN) couldn't be reached: {e}"));
+                        self.scan_notes.push(format!("{} couldn't be reached: {e}", bus.full_label()));
                         let scan = self.scan.as_mut().expect("checked");
-                        scan.skip(Bus::Ms);
+                        scan.skip(bus);
                         match scan.next() {
                             Some(next) if !self.stopping => none(self.ask_next(next).map(|(a, got)| DiagMsg::Scanned(a, got))),
                             _ => {
@@ -584,9 +590,11 @@ impl Diag {
                     return none(Task::none());
                 };
                 scan.add_sweep(Bus::Hs);
-                // (an older Ford's pins 3 / 11 too, when anything answered there)
-                if scan.any_on(Bus::Ms) {
-                    scan.add_sweep(Bus::Ms);
+                // (an older Ford's other networks too, where anything answered)
+                for bus in Bus::OTHERS {
+                    if scan.any_on(bus) {
+                        scan.add_sweep(bus);
+                    }
                 }
                 let Some(first) = scan.next() else { return none(Task::none()) };
                 self.scanning = true;
@@ -752,7 +760,8 @@ impl Diag {
                         rx: a.rx,
                         data: a.data.clone(),
                         timeout_ms: a.timeout_ms,
-                        ms_can: a.bus == Bus::Ms,
+                        pins: a.bus.pins(),
+                        baud: a.bus.baud(),
                     })
                     .await)
                 {
