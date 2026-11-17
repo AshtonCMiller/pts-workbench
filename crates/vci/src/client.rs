@@ -18,10 +18,11 @@ struct Running {
     out: Lines<BufReader<ChildStdout>>,
 }
 
-/// The helper (shared: one at a time asks it)
+/// The helper (shared: one at a time asks it). The demo vehicle, once it's opened, answers instead.
 #[derive(Clone, Default)]
 pub struct Bridge {
     running: Arc<Mutex<Option<Running>>>,
+    demo: Arc<Mutex<Option<crate::sim::Sim>>>,
 }
 
 impl std::fmt::Debug for Bridge {
@@ -80,6 +81,22 @@ fn start() -> Result<Running, String> {
 impl Bridge {
     /// Asks the helper something, and its answer (its own errors as `Reply::Error`; the helper not working as Err)
     pub async fn call(&self, req: Request) -> Result<Reply, String> {
+        // the demo vehicle: opened like a VCI, answering as a truck would (and taking as long)
+        {
+            let mut demo = self.demo.lock().await;
+            if let Request::Open { dll } = &req {
+                *demo = (dll == crate::sim::DEMO_DLL).then(crate::sim::Sim::new);
+            }
+            if let Some(sim) = demo.as_mut() {
+                let (reply, ms) = sim.answer(&req);
+                if matches!(req, Request::Close) {
+                    *demo = None;
+                }
+                drop(demo);
+                tokio::time::sleep(Duration::from_millis(ms)).await;
+                return Ok(reply);
+            }
+        }
         let mut guard = self.running.lock().await;
         if guard.is_none() {
             *guard = Some(start()?);
@@ -115,6 +132,7 @@ impl Bridge {
 
     /// Stops the helper (the VCI closed first, so it isn't left in use)
     pub async fn stop(&self) {
+        *self.demo.lock().await = None;
         let mut guard = self.running.lock().await;
         if let Some(mut r) = guard.take() {
             let line = serde_json::to_string(&Request::Close).unwrap_or_default() + "\n";

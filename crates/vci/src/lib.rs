@@ -10,6 +10,7 @@
 //!   uds.rs      the diagnostic requests (UDS: ISO 14229) and reading their answers: part numbers, the VIN, refusals
 //!   scan.rs     the network test: each module asked who it is, one after another
 //!   dtc.rs      the self test: each module's trouble codes, and clearing them
+//!   sim.rs      the demo vehicle (a made-up F-150, for trying Diagnostics without a truck)
 //!   client.rs   (the app's side) starting the helper and asking it things
 //!
 //! Only reads, and clearing trouble codes (when asked): nothing is written or programmed.
@@ -18,6 +19,7 @@ pub mod dtc;
 pub mod modules;
 pub mod proto;
 pub mod scan;
+pub mod sim;
 pub mod uds;
 
 #[cfg(feature = "client")]
