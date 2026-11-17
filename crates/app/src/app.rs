@@ -78,6 +78,20 @@ pub enum Overlay {
     WhatsNew,
 }
 
+/// "Add an RO" in the sidebar: the RO number typed, a VIN (asked for when Xtime can't say), and how it's going
+#[derive(Debug, Clone, Default)]
+pub struct AddRo {
+    pub ro: String,
+    pub vin: String,
+    pub looking: bool,
+    pub error: Option<String>,
+    pub ask_vin: bool,
+}
+
+pub fn add_ro_id() -> iced::widget::text_input::Id {
+    iced::widget::text_input::Id::new("add-ro")
+}
+
 pub struct App {
     pub settings: Settings,
     /// The settings form while it's open (saved with Save)
@@ -128,6 +142,17 @@ pub struct App {
     pub spiff_totals: std::collections::HashMap<String, f64>,
     pub spiff_checked: std::collections::HashMap<String, i64>,
     pub checking_spiffs: bool,
+    /// "Add an RO" in the sidebar, while it's open
+    pub add_ro: Option<AddRo>,
+    /// ROs in Dispatch with no technician (the sidebar offers to accept them), the one Accept was pressed on (asking
+    /// to be sure), and the one being accepted
+    pub dispatch: Vec<AssignedRo>,
+    pub accept_ask: Option<String>,
+    /// Whether the Dispatch list under My ROs is unfolded (folded each time the app starts)
+    pub show_dispatch: bool,
+    pub accepting: Option<String>,
+    /// ROs opened on another computer that aren't on your list: when each was last looked up in Xtime
+    pub waiting_tried: std::collections::HashMap<String, i64>,
     /// The time, for the clock (seconds since 1970; moves on every half minute)
     pub now: i64,
     /// The page shown (screen, mode, vehicle) and its transition: it slides out before the next one slides in
@@ -309,6 +334,22 @@ pub enum Message {
     RefreshPrinters,
     /// Your ROs, read in the background (for their spiff totals, and their lines for your hours)
     SpiffsChecked(Vec<(String, Option<xtime::ro::RoView>)>),
+    /// ROs read from Xtime (one just added, …): their lines, stage and parts kept up to date
+    RosRead(Vec<(String, Option<xtime::ro::RoView>)>),
+    /// ROs opened on another computer (not on your list) looked up in Xtime: opened here once their VIN is known
+    WaitingRead(Vec<(String, Option<xtime::ro::RoView>)>),
+    /// Accept on an RO in Dispatch (asks to be sure first: None takes the question away), Yes, and how it went
+    AskAccept(Option<String>),
+    /// Unfolds the Dispatch list under My ROs, or folds it away
+    ToggleDispatch,
+    AcceptRo(String),
+    Accepted(String, Result<(), LoadError>),
+    /// "Add an RO": opened (true) or closed, what's typed (the RO number, the VIN), Add, and what Xtime said
+    AddRo(bool),
+    AddRoNumber(String),
+    AddRoVin(String),
+    SubmitAddRo,
+    AddRoFound(String, Result<xtime::ro::RoView, LoadError>),
     /// Flag a line of the RO showing (by Xtime's line ID), or take the flag off
     FlagLine(String, bool),
     /// The hours report: open, close, which pay period (0 this one, -1 the one before…)
@@ -444,6 +485,12 @@ impl App {
             spiff_totals: Default::default(),
             spiff_checked: Default::default(),
             checking_spiffs: false,
+            add_ro: None,
+            dispatch: Vec::new(),
+            accept_ask: None,
+            show_dispatch: false,
+            accepting: None,
+            waiting_tried: Default::default(),
             now: clock::now(),
             outer,
             overlay: None,
@@ -1047,21 +1094,125 @@ impl App {
             },
             Message::SpiffsChecked(found) => {
                 self.checking_spiffs = false;
-                let now = clock::now();
-                let mut changed = false;
-                for (ro, view) in found {
-                    self.spiff_checked.insert(ro.clone(), now);
-                    if let Some(v) = view {
-                        self.spiff_totals.insert(ro.clone(), v.spiff_total());
-                        self.hours.set_spiff_total(&ro, v.spiff_total());
-                        // the hours keep each RO's lines (to flag them, and their hours)
-                        let lines = timecard::lines_of(&v).into_iter().map(|(_, l)| l).collect();
-                        self.hours.update_lines(&ro, lines, &timecard::ymm(&v), timecard::now_ms());
-                        changed = true;
+                self.took_views(found);
+            }
+            Message::RosRead(found) => self.took_views(found),
+            Message::WaitingRead(found) => {
+                let mut tasks = Vec::new();
+                for (ro, v) in &found {
+                    let Some(v) = v.as_ref().filter(|v| !v.vehicle.vin.is_empty()) else {
+                        continue;
+                    };
+                    if self.sync.waiting.remove(ro).is_none() || self.sample_data || self.open.iter().any(|w| &w.ro.ro == ro) {
+                        continue;
                     }
+                    self.open.push(Workspace::new(xtime_ui::my_ros::from_view(v)));
+                    tasks.push(self.load_ahead(ro));
                 }
-                if changed {
-                    let _ = timecard::save(&self.hours);
+                self.took_views(found);
+                return Task::batch(tasks);
+            }
+            Message::AddRo(open) => {
+                self.add_ro = open.then(AddRo::default);
+                if open {
+                    return iced::widget::text_input::focus(add_ro_id());
+                }
+            }
+            Message::AddRoNumber(t) => {
+                if let Some(a) = &mut self.add_ro {
+                    a.ro = t.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').take(20).collect();
+                    a.error = None;
+                }
+            }
+            Message::AddRoVin(t) => {
+                if let Some(a) = &mut self.add_ro {
+                    a.vin = t
+                        .trim()
+                        .to_uppercase()
+                        .chars()
+                        .filter(char::is_ascii_alphanumeric)
+                        .take(17)
+                        .collect();
+                }
+            }
+            Message::SubmitAddRo => return self.submit_add_ro(),
+            Message::AskAccept(ro) => self.accept_ask = ro,
+            Message::ToggleDispatch => {
+                self.show_dispatch = !self.show_dispatch;
+                self.accept_ask = None;
+            }
+            Message::AcceptRo(ro) => {
+                self.accept_ask = None;
+                if self.accepting.is_some() || self.sample_data {
+                    return Task::none();
+                }
+                let tech = self.settings.tech_id.trim().to_string();
+                if tech.is_empty() {
+                    self.notice = Some("Your technician ID isn't known yet: check your employee number in Settings.".into());
+                    return Task::none();
+                }
+                self.accepting = Some(ro.clone());
+                let (x, store) = (self.xtime.clone(), self.settings.store_id.clone());
+                return Task::perform(
+                    async move {
+                        let r = x.accept_ro(&store, &ro, &tech).await.map_err(LoadError::from);
+                        (ro, r)
+                    },
+                    |(ro, r)| Message::Accepted(ro, r),
+                );
+            }
+            Message::Accepted(ro, r) => {
+                self.accepting = None;
+                match r {
+                    Ok(()) => {
+                        self.notice = Some(format!("RO {ro} is yours: it's in Inspection now."));
+                        // yours now: on your list (until the dashboard's next load says so too), and opened
+                        if let Some(i) = self.dispatch.iter().position(|d| d.ro == ro) {
+                            let mut r = self.dispatch.remove(i);
+                            r.mode = Some(3.0);
+                            if !self.my_ros.iter().any(|m| m.ro == ro) {
+                                self.my_ros.push(r);
+                            }
+                        }
+                        let open = self.update(Message::OpenRo(ro));
+                        // (Xtime's list read again now, unless it's being read, so everything says where it really is)
+                        return Task::batch([open, self.load_ros()]);
+                    }
+                    Err(LoadError::SignedOut) => {
+                        self.ros_error = Some(LoadError::SignedOut);
+                        self.notice = Some(format!("Couldn't accept RO {ro}: Xtime is signed out. Sign in and try again."));
+                    }
+                    Err(e) => self.notice = Some(format!("Couldn't accept RO {ro} ({}).", e.plain())),
+                }
+            }
+            Message::AddRoFound(ro, r) => {
+                let Some(a) = &mut self.add_ro else { return Task::none() };
+                if a.ro != ro || !a.looking {
+                    return Task::none(); // closed, or another RO asked for meanwhile
+                }
+                a.looking = false;
+                match r {
+                    Ok(v) if !v.vehicle.vin.is_empty() => {
+                        let r = xtime_ui::my_ros::from_view(&v);
+                        return self.open_added(r, Some(v));
+                    }
+                    Ok(_) => {
+                        a.error = Some(format!("Xtime has no VIN on RO {ro} yet. Type it below to open the RO anyway."));
+                        a.ask_vin = true;
+                    }
+                    Err(e) => {
+                        a.error = Some(match e {
+                            LoadError::SignedOut => {
+                                "Xtime is signed out, so the RO can't be looked up. Sign in to Xtime, or type the VIN to open it anyway."
+                                    .into()
+                            }
+                            LoadError::NotFound(_) => {
+                                format!("Xtime doesn't have RO {ro}. Check the number, or type the VIN to open it anyway.")
+                            }
+                            e => format!("Couldn't look up RO {ro} ({}). Type the VIN to open it anyway.", e.plain()),
+                        });
+                        a.ask_vin = true;
+                    }
                 }
             }
             Message::FlagLine(line_id, on) => return self.flag_line(&line_id, on),
@@ -1891,6 +2042,33 @@ impl App {
             self.open.push(Workspace::new(r));
             tasks.push(self.load_ahead(&ro));
         }
+        // the rest aren't on your list (added by hand there): asked of Xtime, each at most every 10 minutes
+        let now = clock::now();
+        let ask: Vec<String> = self
+            .sync
+            .waiting
+            .keys()
+            .filter(|ro| !self.my_ros.iter().any(|r| &r.ro == *ro))
+            .filter(|ro| self.waiting_tried.get(*ro).is_none_or(|at| now - at >= 10 * 60))
+            .cloned()
+            .collect();
+        if !ask.is_empty() && !self.sample_data {
+            for ro in &ask {
+                self.waiting_tried.insert(ro.clone(), now);
+            }
+            let (x, store) = (self.xtime.clone(), self.settings.store_id.clone());
+            tasks.push(Task::perform(
+                async move {
+                    let mut found = Vec::new();
+                    for ro in ask {
+                        let v = x.ro_view(&store, &ro).await.ok();
+                        found.push((ro, v));
+                    }
+                    found
+                },
+                Message::WaitingRead,
+            ));
+        }
         Task::batch(tasks)
     }
 
@@ -2009,19 +2187,125 @@ impl App {
         self.chat_panel.load(&env, ros).map(Message::Chat)
     }
 
+    /// "Add an RO": one already open or on your list just opens; with a VIN typed it opens straight away; otherwise
+    /// Xtime is asked for it (its VIN, vehicle, stage and lines)
+    fn submit_add_ro(&mut self) -> Task<Message> {
+        let Some(a) = &mut self.add_ro else { return Task::none() };
+        let ro = a.ro.trim().to_string();
+        if ro.is_empty() || a.looking {
+            return Task::none();
+        }
+        if self.open.iter().any(|w| w.ro.ro == ro) || self.my_ros.iter().any(|r| r.ro == ro) {
+            self.add_ro = None;
+            return self.update(Message::OpenRo(ro));
+        }
+        if !a.vin.is_empty() {
+            let r = AssignedRo {
+                ro: ro.clone(),
+                vin: a.vin.clone(),
+                ..Default::default()
+            };
+            return self.open_added(r, None);
+        }
+        if self.sample_data {
+            a.error = Some("Sign in to Xtime first so the RO can be looked up, or type its VIN to open it anyway.".into());
+            a.ask_vin = true;
+            return Task::none();
+        }
+        a.looking = true;
+        a.error = None;
+        let (x, store) = (self.xtime.clone(), self.settings.store_id.clone());
+        Task::perform(
+            async move {
+                let r = x.ro_view(&store, &ro).await.map_err(LoadError::from);
+                (ro, r)
+            },
+            |(ro, r)| Message::AddRoFound(ro, r),
+        )
+    }
+
+    /// Opens an RO added by hand. From then on it's read from Xtime every minute while it's open (like your own ROs):
+    /// its lines and approvals go in your hours, its stage and parts show in the sidebar.
+    fn open_added(&mut self, r: AssignedRo, view: Option<xtime::ro::RoView>) -> Task<Message> {
+        self.add_ro = None;
+        let ro = r.ro.clone();
+        if !self.open.iter().any(|w| w.ro.ro == ro) {
+            self.open.push(Workspace::new(r));
+        }
+        let read = match view {
+            Some(v) => {
+                self.took_views(vec![(ro.clone(), Some(v))]);
+                Task::none()
+            }
+            // (the VIN typed: what Xtime has on it, if it can)
+            None if !self.sample_data => {
+                let (x, store, r) = (self.xtime.clone(), self.settings.store_id.clone(), ro.clone());
+                Task::perform(async move { vec![(r.clone(), x.ro_view(&store, &r).await.ok())] }, Message::RosRead)
+            }
+            None => Task::none(),
+        };
+        let ahead = self.load_ahead(&ro);
+        Task::batch([self.update(Message::OpenRo(ro)), ahead, read])
+    }
+
+    /// ROs just read from Xtime: their spiff totals, their lines in your hours (to flag, approvals as they come in),
+    /// and for open ROs that aren't on your list (added by hand, or gone from it) their stage, parts and flags
+    fn took_views(&mut self, found: Vec<(String, Option<xtime::ro::RoView>)>) {
+        let now = clock::now();
+        let mut changed = false;
+        for (ro, view) in found {
+            self.spiff_checked.insert(ro.clone(), now);
+            let Some(v) = view else { continue };
+            self.spiff_totals.insert(ro.clone(), v.spiff_total());
+            self.hours.set_spiff_total(&ro, v.spiff_total());
+            // the hours keep each RO's lines (to flag them, and their hours)
+            let lines = timecard::lines_of(&v).into_iter().map(|(_, l)| l).collect();
+            self.hours.update_lines(&ro, lines, &timecard::ymm(&v), timecard::now_ms());
+            changed = true;
+            let on_list = self.my_ros.iter().any(|r| r.ro == ro);
+            if let Some(ws) = self.open.iter_mut().find(|w| w.ro.ro == ro).filter(|_| !on_list) {
+                let mut r = xtime_ui::my_ros::from_view(&v);
+                // (what Xtime left out, as it was)
+                for (new, old) in [
+                    (&mut r.vin, &ws.ro.vin),
+                    (&mut r.year, &ws.ro.year),
+                    (&mut r.make, &ws.ro.make),
+                    (&mut r.model, &ws.ro.model),
+                    (&mut r.tag, &ws.ro.tag),
+                ] {
+                    if new.is_empty() {
+                        *new = old.clone();
+                    }
+                }
+                ws.ro = r;
+            }
+        }
+        if changed {
+            let _ = timecard::save(&self.hours);
+        }
+    }
+
     /// Reads the ROs on your list that haven't been read in the last 5 minutes, one after another, for their spiff
-    /// totals (My ROs shows which have a spiff to turn in)
+    /// totals (My ROs shows which have a spiff to turn in); and open ROs that aren't on your list (added by hand) every
+    /// minute, as nothing else keeps them up to date
     fn check_spiffs(&mut self) -> Task<Message> {
         if self.checking_spiffs || self.sample_data {
             return Task::none();
         }
         let now = clock::now();
-        let due: Vec<String> = self
+        let mut due: Vec<String> = self
             .my_ros
             .iter()
             .map(|r| r.ro.clone())
             .filter(|ro| self.spiff_checked.get(ro).is_none_or(|at| now - at >= 5 * 60))
             .collect();
+        due.extend(
+            self.open
+                .iter()
+                .filter(|w| !w.is_sample() && !self.my_ros.iter().any(|r| r.ro == w.ro.ro))
+                .map(|w| w.ro.ro.clone())
+                .filter(|ro| self.spiff_checked.get(ro).is_none_or(|at| now - at >= 50)),
+        );
         if due.is_empty() {
             return Task::none();
         }
@@ -2067,6 +2351,7 @@ impl App {
             }
         }
         self.my_ros = loaded.ros;
+        self.dispatch = loaded.dispatch;
         // who you are, from Xtime: the technician ID and name found from your employee number (or, for a name
         // missing from an earlier version, the name on your ROs)
         let before = (self.settings.tech_id.clone(), self.settings.name.clone());

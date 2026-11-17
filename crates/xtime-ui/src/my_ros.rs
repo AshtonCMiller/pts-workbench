@@ -55,12 +55,86 @@ pub fn stage(mode: Option<f64>) -> usize {
 /// Xtime's mode numbers, as the dashboard shows them
 pub fn mode_label(mode: Option<f64>) -> (&'static str, [u8; 3]) {
     match mode.map(|m| m as i64) {
+        Some(9) => ("Pre-RO", [0x5d, 0x66, 0x70]),
+        Some(2) => ("Dispatch", [0x47, 0x55, 0x69]),
         Some(3) => ("In Inspection", [0x7a, 0x5a, 0xf5]),
-        Some(4) => ("Pending Approval", [0xd9, 0x77, 0x06]),
-        Some(5) => ("Pending Approval (parts?)", [0xd9, 0x77, 0x06]),
+        Some(4 | 5) => ("Pending Approval", [0xd9, 0x77, 0x06]),
         Some(6) => ("In Repair", [0x15, 0x80, 0x3d]),
         Some(7) => ("Pending Review", [0x0e, 0x74, 0x90]),
+        Some(100) => ("Closed", [0x5d, 0x66, 0x70]),
         _ => ("", [0x5d, 0x66, 0x70]),
+    }
+}
+
+/// Xtime's parts status (the dashboard's P column, the RO's PartStatusID): 2 waiting at parts, 3 parts is working on
+/// it, 4 complete. Xtime sends a number, or sometimes its words.
+pub fn parts_label(v: Option<&serde_json::Value>) -> Option<(&'static str, [u8; 3])> {
+    let t = match v? {
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::String(s) => s.trim().to_ascii_lowercase(),
+        _ => return None,
+    };
+    let n = t.split('.').next().unwrap_or("");
+    if n == "2" || t.starts_with("wait") {
+        Some(("Parts: waiting at parts", [0xdc, 0x26, 0x26]))
+    } else if n == "3" || t.starts_with("work") {
+        Some(("Parts: being worked on", [0xd9, 0x77, 0x06]))
+    } else if n == "4" || t.starts_with("complete") {
+        Some(("Parts: complete", [0x15, 0x80, 0x3d]))
+    } else {
+        None
+    }
+}
+
+/// Everything about where an RO is, as pills: its stage, its parts, what it's waiting on
+pub fn status_tags(ro: &AssignedRo) -> Vec<(&'static str, [u8; 3])> {
+    let mut out = Vec::new();
+    let (mode, color) = mode_label(ro.mode);
+    if !mode.is_empty() {
+        out.push((mode, color));
+    }
+    if let Some(p) = parts_label(ro.dash.parts_status.as_ref()) {
+        out.push(p);
+    }
+    if ro.dash.not_in_stock {
+        out.push(("Parts not in stock", [0xdc, 0x26, 0x26]));
+    }
+    for (on, label, color) in [
+        (ro.waiting_parts, "Waiting on Parts", [0xdc, 0x26, 0x26]),
+        (ro.waiting_customer, "Waiting on Customer", [0xb4, 0x53, 0x09]),
+        (ro.waiting_warranty, "Waiting on Warranty", [0x7c, 0x3a, 0xed]),
+        (ro.dash.on_hold, "On Hold", [0x5d, 0x66, 0x70]),
+    ] {
+        if on {
+            out.push((label, color));
+        }
+    }
+    out
+}
+
+/// An RO read on its own (one added by hand, or no longer on your list) as the dashboard would list it: its stage,
+/// parts status and waiting flags kept up to date from the RO itself
+pub fn from_view(v: &xtime::ro::RoView) -> AssignedRo {
+    let mut dash = xtime::dashboard::DashColumns::default();
+    if v.part_status > 0 {
+        dash.parts_status = Some(serde_json::Value::from(v.part_status));
+    }
+    dash.on_hold = v.on_hold;
+    dash.waiter = v.waiter;
+    dash.express = v.express;
+    dash.advisor_name = v.advisor.name.clone();
+    AssignedRo {
+        ro: v.ro.clone(),
+        tag: v.tag.clone(),
+        year: v.vehicle.year.clone(),
+        make: v.vehicle.make.clone(),
+        model: v.vehicle.model.clone(),
+        vin: v.vehicle.vin.clone(),
+        mode: (v.mode != 0).then_some(v.mode as f64),
+        waiting_parts: v.waiting_parts,
+        waiting_customer: v.waiting_customer,
+        waiting_warranty: v.waiting_warranty,
+        dash,
     }
 }
 
@@ -183,16 +257,10 @@ fn separator<'a>(name: &'a str, count: usize) -> Element<'a, RosMsg> {
 }
 
 fn ro_item<'a>(ro: &'a AssignedRo, selected: bool, spiff: Option<&SpiffBadge>) -> Element<'a, RosMsg> {
-    // the group says where it is; only what it's waiting on shows here
+    // where it is (Dispatch, In Inspection, Pending Approval…), its parts, what it's waiting on
     let mut tags = row![].spacing(4);
-    for (on, label, color) in [
-        (ro.waiting_parts, "Waiting on Parts", [0xdc, 0x26, 0x26]),
-        (ro.waiting_customer, "Waiting on Customer", [0xb4, 0x53, 0x09]),
-        (ro.waiting_warranty, "Waiting on Warranty", [0x7c, 0x3a, 0xed]),
-    ] {
-        if on {
-            tags = tags.push(pill(label, color));
-        }
+    for (label, color) in status_tags(ro) {
+        tags = tags.push(pill(label, color));
     }
     // the spiff: turned in already, or there to be turned in (approved recommendations over $150)
     match spiff {
@@ -205,7 +273,7 @@ fn ro_item<'a>(ro: &'a AssignedRo, selected: bool, spiff: Option<&SpiffBadge>) -
         text(format!("Tag {}", ro.tag)).style(style::muted)
     ]
     .spacing(8);
-    button(column![title, text(vehicle_name(ro)).size(13), tags].spacing(4))
+    button(column![title, text(vehicle_name(ro)).size(13), tags.wrap()].spacing(4))
         .width(Length::Fill)
         .padding(8)
         .style(style::list_item(selected))

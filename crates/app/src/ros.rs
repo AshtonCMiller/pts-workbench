@@ -12,6 +12,8 @@ pub const EVERY: std::time::Duration = std::time::Duration::from_secs(60);
 #[derive(Debug, Clone)]
 pub struct Loaded {
     pub ros: Vec<AssignedRo>,
+    /// ROs in Dispatch with no technician yet (anyone's to accept)
+    pub dispatch: Vec<AssignedRo>,
     /// You, when your technician ID was looked up from your employee number this time
     pub found: Option<Employee>,
     /// Your name as Xtime has it on your ROs ("" when none says)
@@ -35,6 +37,7 @@ pub async fn load(x: Xtime, tech_id: String, employee_number: String, store: Str
     let dash = x.dashboard(&tech_id, paths::DASHBOARD, &staff_path).await?;
     Ok(Loaded {
         ros: dash.mine,
+        dispatch: dash.dispatch,
         found,
         tech_name: dash.tech_name,
     })

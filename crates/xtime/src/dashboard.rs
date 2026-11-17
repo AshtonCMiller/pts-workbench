@@ -17,13 +17,15 @@ pub struct Dashboard {
     pub total: usize,
     /// Yours
     pub mine: Vec<AssignedRo>,
+    /// ROs in Dispatch with no technician yet (anyone's to accept)
+    pub dispatch: Vec<AssignedRo>,
     /// Your name as Xtime has it on your ROs (for the window title); "" when none says
     pub tech_name: String,
     /// The field names (no values) of your first RO, to map Xtime's loosely named dashboard columns
     pub field_names: Option<Vec<String>>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct AssignedRo {
     pub ro: String,
     pub tag: String,
@@ -216,7 +218,20 @@ pub fn extract(data: &Value, tech_id: &str, staff: &[Value]) -> Dashboard {
     let is_mine = |ro: &Value| js_string(get(ro, "TechnicianID")) == tech_id;
     let mut field_list = None;
     let mut mine = Vec::new();
-    for &ro in all.iter().filter(|ro| is_mine(ro)) {
+    let mut dispatch = Vec::new();
+    for &ro in all.iter() {
+        let mine_too = is_mine(ro);
+        // in Dispatch (mode 2) with no technician: anyone's to accept
+        let unassigned =
+            matches!(get(ro, "TechnicianID"), None | Some(Value::Null)) || matches!(js_string(get(ro, "TechnicianID")).trim(), "" | "0");
+        let in_dispatch = get(ro, "CurrentMode").and_then(|m| match m {
+            Value::Number(n) => n.as_f64(),
+            Value::String(s) => s.trim().parse::<f64>().ok(),
+            _ => None,
+        }) == Some(2.0);
+        if !mine_too && !(unassigned && in_dispatch) {
+            continue;
+        }
         // the vehicle, or the first of a list of them
         let vehicle = get(ro, "Vehicle").and_then(|v| match v {
             Value::Array(a) => a.first(),
@@ -232,7 +247,7 @@ pub fn extract(data: &Value, tech_id: &str, staff: &[Value]) -> Dashboard {
             Value::Bool(b) => Some(if *b { 1.0 } else { 0.0 }),
             _ => None,
         });
-        mine.push(AssignedRo {
+        let row = AssignedRo {
             ro: text(get(ro, "RONumber")),
             tag: text(get(ro, "TagNumber")),
             year: v("year"),
@@ -244,7 +259,12 @@ pub fn extract(data: &Value, tech_id: &str, staff: &[Value]) -> Dashboard {
             waiting_customer: get(ro, "WaitingForCustomer") == Some(&Value::Bool(true)),
             waiting_warranty: get(ro, "WaitingForWarranty") == Some(&Value::Bool(true)),
             dash: dash_of(ro, &names),
-        });
+        };
+        if !mine_too {
+            dispatch.push(row);
+            continue;
+        }
+        mine.push(row);
         if field_list.is_none() {
             field_list = ro.as_object().map(field_names);
         }
@@ -258,6 +278,7 @@ pub fn extract(data: &Value, tech_id: &str, staff: &[Value]) -> Dashboard {
     Dashboard {
         total: all.len(),
         mine,
+        dispatch,
         tech_name,
         field_names: field_list,
     }
@@ -331,6 +352,24 @@ mod tests {
         assert!(ro.dash.waiter);
         assert_eq!(d.tech_name, "Ashton M");
         assert!(d.field_names.unwrap().iter().any(|f| f.starts_with("Vehicle{")));
+    }
+
+    #[test]
+    fn unassigned_ros_in_dispatch() {
+        let data = json!({ "DashboardModes": [
+            { "Mode": 2, "ROs": [
+                { "RONumber": 1, "TechnicianID": null, "CurrentMode": 2, "Vehicle": { "VIN": "a" } },
+                { "RONumber": 2, "TechnicianID": 0, "CurrentMode": "2", "Vehicle": { "VIN": "b" } },
+                { "RONumber": 3, "TechnicianID": 12, "CurrentMode": 2, "Vehicle": { "VIN": "c" } },
+                { "RONumber": 4, "CurrentMode": 3, "Vehicle": { "VIN": "d" } },
+                { "RONumber": 5, "TechnicianID": 77, "CurrentMode": 2, "Vehicle": { "VIN": "e" } }
+            ]}
+        ]});
+        let d = extract(&data, "77", &[]);
+        let ros: Vec<&str> = d.dispatch.iter().map(|r| r.ro.as_str()).collect();
+        assert_eq!(ros, ["1", "2"]);
+        assert_eq!(d.mine.len(), 1);
+        assert_eq!(d.mine[0].ro, "5");
     }
 
     #[test]

@@ -110,11 +110,11 @@ fn sync(app: &App) -> Element<'_, Message> {
 /// The version running, how updates are going, Beta updates, and Restart to update when one's ready
 fn version(app: &App) -> Element<'_, Message> {
     let u = &app.updates;
+    // the checkbox on a line of its own: next to it, the buttons were squeezed down to a letter a line
+    let beta = checkbox("Beta updates: new features first (less tested)", u.beta)
+        .text_size(13)
+        .on_toggle_maybe(u.on().then_some(Message::SetBetaUpdates));
     let mut actions = row![
-        checkbox("Beta updates: new features first (less tested)", u.beta)
-            .text_size(13)
-            .on_toggle_maybe(u.on().then_some(Message::SetBetaUpdates)),
-        horizontal_space(),
         button(text("What's new").size(13))
             .padding([5, 12])
             .style(style::ghost)
@@ -139,6 +139,7 @@ fn version(app: &App) -> Element<'_, Message> {
         text(format!("PTS Workbench v{} · {}", u.running, u.describe()))
             .size(13)
             .style(style::muted),
+        beta,
         actions,
     ]
     .spacing(6)

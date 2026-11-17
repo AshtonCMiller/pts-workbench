@@ -21,3 +21,6 @@
 - **Cloud Sync** has been re-implemented. It is now stable enough to be implemented by default. Can be turned off in Settings > Sync
 - **Hour tracking** has been improved and re-implemented, just the same as Electron was.
 - **Labor Times** has been improved and re-implemented, just the same as Electron.
+- **Add an RO** has been added back in as a much-needed tool for working on repair orders from other technicians.
+- **RO Status** has been updated, so the sidebar will now show the current status of each RO.
+- **Accept new ROs from Dispatch:** Finally, through the built-in XTime display, we can finally accept new ROs from dispatch.

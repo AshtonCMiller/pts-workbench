@@ -27,6 +27,8 @@ pub struct RoView {
     pub waiting_parts: bool,
     pub waiting_customer: bool,
     pub waiting_warranty: bool,
+    /// Xtime's parts status (its P column): 2 waiting at parts, 3 parts is working on it, 4 complete; 0 none
+    pub part_status: i64,
     /// "11/15/2026"
     pub promised_date: String,
     /// "17:00"
@@ -543,6 +545,7 @@ pub fn parse_view(data: &Value, staff: &[Value]) -> Result<RoView> {
         waiting_parts: truthy(get(ro, "WaitingForParts")),
         waiting_customer: truthy(get(ro, "WaitingForCustomer")),
         waiting_warranty: truthy(get(ro, "WaitingForWarranty")),
+        part_status: number(get(ro, "PartStatusID")).filter(|n| n.is_finite()).unwrap_or(0.0) as i64,
         promised_date: field(ro, "PromisedDate"),
         promised_time: field(ro, "PromisedTime"),
         opened: if opened.is_empty() { day(get(ro, "CreateDate")) } else { opened },
@@ -618,6 +621,48 @@ impl Xtime {
             .await?;
         let staff = self.staff_list(&crate::paths::employees(store)).await;
         parse_view(&data, staff.as_deref().map(Vec::as_slice).unwrap_or(&[]))
+    }
+
+    /// Accepts an RO in Dispatch: it becomes yours and goes to Inspection, exactly like the Accept button on Xtime's RO
+    /// page (Xtime's InspectUILibrary: its view-history event, the technician set, then the stage). `tech_id`: your
+    /// technician ID (the one your ROs carry).
+    pub async fn accept_ro(&self, store: &str, ro: &str, tech_id: &str) -> Result<()> {
+        let tech: Value = tech_id
+            .trim()
+            .parse::<i64>()
+            .map(Value::from)
+            .unwrap_or_else(|_| Value::from(tech_id.trim()));
+        // (Xtime sends these two together, and moves the RO on only when both worked)
+        self.ro_call(
+            Method::POST,
+            &format!("/api/Events/{}", encode(ro)),
+            Some(json!({ "EventType": { "ID": 193 }, "Description": "" })),
+        )
+        .await?;
+        self.ro_call(
+            Method::PUT,
+            &format!(
+                "/api/Stores/{}/RepairOrders/{}/Technician?format=json",
+                encode(store.trim()),
+                encode(ro)
+            ),
+            Some(json!({ "TechnicianID": tech })),
+        )
+        .await?;
+        self.set_mode(store, ro, 3).await
+    }
+
+    /// Moves an RO to another stage (`mode`: 3 Inspection, 4 Approval, 6 Repair, 7 Review), as Xtime's Accept does.
+    /// (Only Accept uses it so far: what Xtime's own Send to Approval / Review buttons send isn't known yet.)
+    async fn set_mode(&self, store: &str, ro: &str, mode: i64) -> Result<()> {
+        let path = format!(
+            "/api/Stores/{}/RepairOrders/{}/ROMode?format=json",
+            encode(store.trim()),
+            encode(ro)
+        );
+        self.ro_call(Method::PUT, &path, Some(json!({ "ROModeID": mode, "ClosedReason": 1 })))
+            .await
+            .map(|_| ())
     }
 
     /// Marks a line done (or not), exactly like Xtime's Done button
