@@ -75,6 +75,10 @@ pub fn view<'a>(xv: &'a XtimeView, shown: &Shown) -> Element<'a, Msg> {
             .padding([6, 14])
             .style(button::primary)
             .on_press_maybe(shown.can_add_service.then_some(Msg::Ask(Ask::AddService(None)))),
+        button(text("Message about this RO").size(13))
+            .padding([6, 14])
+            .style(style::ghost)
+            .on_press(Msg::Ask(Ask::Chat)),
     ]
     .spacing(8)
     .align_y(Alignment::Center);

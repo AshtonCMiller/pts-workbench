@@ -18,3 +18,5 @@ chrono.workspace = true
 tokio.workspace = true
 # PDFs drawn as pages (pdf.rs): PDFium.
 pdfium-render.workspace = true
+# wiring diagrams drawn (paper.rs): reads and re-draws ford's SVG pages
+resvg = "0.45"

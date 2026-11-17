@@ -9,6 +9,7 @@
 //!   article.rs   one of Ford's documents opened (a bulletin, an FSA's document), or its PDF
 //!   manual.rs    the Workshop Manual: contents, search, procedures as tabs
 //!   document.rs  Ford's documents drawn in the app's style (headings, paragraphs, lists, tables, pictures)
+//!   wiring.rs    Wiring: the vehicle's wiring book, its diagrams drawn in the app (paper.rs: the sheet)
 //!
 //! Each tab has its own state, messages and view, like crates/xtime-ui's parts. What only the app can do (copying,
 //! signing in to PTS, the bottom bar's notice) goes back to it as [`Out`]s.
@@ -20,9 +21,11 @@ pub mod document;
 pub mod labor;
 pub mod manual;
 pub mod oasis;
+pub mod paper;
 pub mod pdf;
 pub mod pinpoint;
 pub mod tsb;
+pub mod wiring;
 
 pub use diagnostics::{DiagMsg, DiagView};
 pub use doc_tab::{DocMsg as DocTabMsg, DocTab};
@@ -30,6 +33,7 @@ pub use labor::{LaborMsg, LaborView};
 pub use manual::{ManualMsg, ManualView};
 pub use oasis::{OasisMsg, OasisView};
 pub use tsb::{TsbMsg, TsbView};
+pub use wiring::{WiringMsg, WiringView};
 
 /// What a tab asks Ford with
 #[derive(Clone)]
@@ -37,6 +41,8 @@ pub struct Env {
     pub ford: ford::Ford,
     /// The app is showing its sample ROs (their VINs aren't real: nothing is asked)
     pub sample: bool,
+    /// The dark appearance (the wiring diagrams are drawn in it)
+    pub dark: bool,
 }
 
 /// What only the app can do
@@ -61,6 +67,8 @@ pub enum Out {
     OpenProcedure { link: ford::doc::ProcLink, title: String },
     /// Print the Labor Times tray (with its one-time use parts), or a parts list, in the app's Print window
     Print(labor::LaborPrint),
+    /// Open a wiring page in the Wiring tab (from Diagnostics)
+    OpenWiring(wiring::At),
     /// Open a bulletin (`kind`: "TSB", "GSB", "SSM") in the TSBs tab
     OpenBulletin {
         kind: String,

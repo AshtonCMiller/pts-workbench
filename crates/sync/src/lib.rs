@@ -2,8 +2,10 @@
 //!
 //! What syncs: flags, hours and your hours for lines, renamed lines, RO lines and Review / Completed, the shift
 //! clock, and which ROs are open in the Workbench (RO numbers and year / make / model only; each computer finds the
-//! VIN itself). Never: VINs, customer details, sign-ins, settings or tab layouts. (Spiffs are this app's own and
-//! stay on this computer for now: the Electron app would take them for deleted.)
+//! VIN itself). Never: VINs, customer details, sign-ins, settings or tab layouts.
+//!
+//! Spiffs sync too, in a document of their own beside the hours ([`Keys::spiffs`]): the Electron app doesn't know
+//! spiffs, and would take them for deleted if they were in its document. Only this app reads that one.
 //!
 //! How: each piece is a record with a time; when two computers changed things, the records are merged one by one
 //! and the newest change to each wins, so nothing else is lost. Deleted things leave a "deleted" marker. Everything
@@ -19,7 +21,7 @@ use std::io::{Read, Write};
 
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
-use hours::{Flag, Hours, OpenRo, RoRec, Shift, TLine};
+use hours::{Flag, Hours, OpenRo, RoRec, Shift, Spiff, TLine};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha1::Sha1;
@@ -41,6 +43,16 @@ const FORMAT: i64 = 1;
 pub struct Keys {
     pub id: String,
     key: [u8; 32],
+}
+
+impl Keys {
+    /// The spiffs' document: its own ID on the server (from yours), the same key
+    pub fn spiffs(&self) -> Keys {
+        Keys {
+            id: hex(&Sha256::digest(format!("spiffs|{}", self.id).as_bytes())),
+            key: self.key,
+        }
+    }
 }
 
 impl std::fmt::Debug for Keys {
@@ -298,6 +310,23 @@ pub fn records_from(h: &Hours, device: &str) -> BTreeMap<String, Value> {
     out
 }
 
+/// The spiffs turned in as records: p/RO (when it was marked, what it came to, the tag and year / make / model)
+pub fn spiff_records(spiffs: &BTreeMap<String, Spiff>, _device: &str) -> BTreeMap<String, Value> {
+    spiffs
+        .iter()
+        .map(|(ro, s)| (format!("p/{ro}"), serde_json::to_value(s).unwrap_or(Value::Null)))
+        .collect()
+}
+
+/// Merged spiff records → the spiffs
+pub fn apply_spiffs(spiffs: &mut BTreeMap<String, Spiff>, recs: &BTreeMap<String, Rec>) {
+    *spiffs = recs
+        .iter()
+        .filter(|(_, r)| !r.del)
+        .filter_map(|(k, r)| Some((k.strip_prefix("p/")?.to_string(), serde_json::from_value(r.v.clone()).ok()?)))
+        .collect();
+}
+
 fn newer(a: &Rec, b: &Rec) -> bool {
     if a.t != b.t { a.t > b.t } else { a.d > b.d }
 }
@@ -526,6 +555,8 @@ pub struct State {
     pub joining: bool,
     pub dirty: bool,
     pub last_sync: Option<i64>,
+    /// The spiffs' document (its own version and history; the same computer ID)
+    pub spiffs: Option<Box<State>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -552,6 +583,7 @@ impl Default for State {
             joining: true,
             dirty: false,
             last_sync: None,
+            spiffs: None,
         }
     }
 }
@@ -566,6 +598,11 @@ impl State {
     /// Compares the hours with the journal and times whatever changed here; the records as they are now
     pub fn stamp(&mut self, h: &Hours, now: i64) -> BTreeMap<String, Value> {
         let current = records_from(h, &self.device_id);
+        self.stamp_records(current, now)
+    }
+
+    /// Compares records as they are now with the journal and times whatever changed here
+    fn stamp_records(&mut self, current: BTreeMap<String, Value>, now: i64) -> BTreeMap<String, Value> {
         let mut changed = false;
         for (k, v) in &current {
             let hh = hash_of(v);
@@ -615,7 +652,13 @@ impl State {
 
     /// This computer's records (timed)
     pub fn local_records(&mut self, h: &Hours, now: i64) -> BTreeMap<String, Rec> {
-        let current = self.stamp(h, now);
+        let current = records_from(h, &self.device_id);
+        self.timed(current, now)
+    }
+
+    /// Records as they are now, timed from the journal (and the journal brought up to date)
+    fn timed(&mut self, current: BTreeMap<String, Value>, now: i64) -> BTreeMap<String, Rec> {
+        let current = self.stamp_records(current, now);
         self.journal
             .iter()
             .map(|(k, e)| {
@@ -641,6 +684,18 @@ impl State {
         self.journal.clear();
         self.joining = true;
         self.dirty = true;
+        self.spiffs = None;
+    }
+
+    /// The spiffs' side (made the first time, with this computer's ID)
+    fn spiff_side(&mut self) -> &mut State {
+        let device = self.device_id.clone();
+        self.spiffs.get_or_insert_with(|| {
+            Box::new(State {
+                device_id: device,
+                ..State::default()
+            })
+        })
     }
 }
 
@@ -685,9 +740,50 @@ fn records_of(keys: &Keys, doc: &Doc) -> Result<BTreeMap<String, Rec>, String> {
 }
 
 /// One sync (`sync.js` `run`): the server's copy merged with this computer's, this computer brought up to date,
-/// and what changed here sent (when someone else saved first, merged again and tried again)
+/// and what changed here sent (when someone else saved first, merged again and tried again). Then the spiffs'
+/// document the same way.
 pub async fn run(http: Http, url: String, keys: Keys, hours: Hours, mut st: State, now: i64) -> Outcome {
-    // a different person on this computer: a fresh history for them (their hours are merged in)
+    let mut hours = hours;
+    let (applied, result) = sync_doc(&http, &url, &keys, &mut hours, &mut st, now, records_from, apply_records).await;
+    let mut applied_spiffs = false;
+    let result = match result {
+        Ok(()) => {
+            let mut spiffs = hours.spiffs.clone();
+            let side = st.spiff_side();
+            let (got, r) = sync_doc(&http, &url, &keys.spiffs(), &mut spiffs, side, now, spiff_records, apply_spiffs).await;
+            if got {
+                hours.spiffs = spiffs;
+                applied_spiffs = true;
+            }
+            r
+        }
+        e => e,
+    };
+    if result.is_ok() {
+        st.dirty = false;
+        st.last_sync = Some(now);
+    }
+    Outcome {
+        hours: (applied || applied_spiffs).then_some(hours),
+        state: st,
+        result,
+    }
+}
+
+/// One document synced: `to_records` makes its records from `data`, `apply` puts merged records back into it.
+/// Whether anything came from elsewhere (`data` changed), and how it went.
+#[allow(clippy::too_many_arguments)]
+async fn sync_doc<T>(
+    http: &Http,
+    url: &str,
+    keys: &Keys,
+    data: &mut T,
+    st: &mut State,
+    now: i64,
+    to_records: fn(&T, &str) -> BTreeMap<String, Value>,
+    apply: fn(&mut T, &BTreeMap<String, Rec>),
+) -> (bool, Result<(), String>) {
+    // a different person on this computer: a fresh history for them (their data is merged in)
     if st.who.as_deref() != Some(keys.id.as_str()) {
         st.who = Some(keys.id.clone());
         st.version = 0;
@@ -695,21 +791,21 @@ pub async fn run(http: Http, url: String, keys: Keys, hours: Hours, mut st: Stat
         st.dirty = true;
         st.joining = true;
     }
-    let mut hours = hours;
     let mut applied = false;
     let base = format!("{}/v1/store/{}", url.trim_end_matches('/'), keys.id);
     let result: Result<(), String> = async {
-        let mut local = st.local_records(&hours, now);
-        let (mut status, mut got) = request(&http, Method::GET, &base, None).await?;
+        let recs = to_records(data, &st.device_id);
+        let mut local = st.timed(recs, now);
+        let (mut status, mut got) = request(http, Method::GET, &base, None).await?;
         for _ in 0..5 {
             if status != 200 && status != 409 {
                 return Err(format!("the sync server said {status}"));
             }
-            let remote = records_of(&keys, &got)?;
+            let remote = records_of(keys, &got)?;
             let merged = merge(&local, &remote);
             // anything from elsewhere: this computer brought up to date
             if merged.iter().any(|(k, r)| local.get(k) != Some(r)) {
-                apply_records(&mut hours, &merged);
+                apply(data, &merged);
                 st.journal = merged
                     .iter()
                     .map(|(k, r)| {
@@ -726,7 +822,8 @@ pub async fn run(http: Http, url: String, keys: Keys, hours: Hours, mut st: Stat
                 applied = true;
             }
             // (with anything the merge itself tidied up: joined shifts…)
-            local = st.local_records(&hours, now);
+            let recs = to_records(data, &st.device_id);
+            local = st.timed(recs, now);
             let needs_upload = local.iter().any(|(k, r)| remote.get(k).is_none_or(|x| x.t != r.t || x.d != r.d))
                 || remote.keys().any(|k| !local.contains_key(k));
             if !needs_upload {
@@ -734,9 +831,9 @@ pub async fn run(http: Http, url: String, keys: Keys, hours: Hours, mut st: Stat
                 break;
             }
             let records: Map<String, Value> = local.iter().map(|(k, r)| (k.clone(), r.to_value())).collect();
-            let data = encrypt(&keys, &json!({ "format": FORMAT, "records": records }))?;
-            let body = json!({ "base": got.version, "data": data }).to_string();
-            let (put_status, put) = request(&http, Method::PUT, &base, Some(body)).await?;
+            let sealed = encrypt(keys, &json!({ "format": FORMAT, "records": records }))?;
+            let body = json!({ "base": got.version, "data": sealed }).to_string();
+            let (put_status, put) = request(http, Method::PUT, &base, Some(body)).await?;
             match put_status {
                 200 => {
                     st.version = put.version;
@@ -757,11 +854,7 @@ pub async fn run(http: Http, url: String, keys: Keys, hours: Hours, mut st: Stat
         st.dirty = false;
         st.last_sync = Some(now);
     }
-    Outcome {
-        hours: applied.then_some(hours),
-        state: st,
-        result,
-    }
+    (applied, result)
 }
 
 #[cfg(test)]
@@ -869,6 +962,43 @@ mod tests {
         assert_eq!(back.flags[0].hours, 2.0);
         assert_eq!(back.open_ros["820367"].ymm, "2023 Ford Bronco Sport");
         assert_eq!(back.shifts.len(), 1);
+    }
+
+    #[test]
+    fn spiffs_round_trip_in_their_own_document() {
+        let keys = derive_keys("3590", "1234").unwrap();
+        let s = keys.spiffs();
+        assert_eq!(s.id.len(), 64);
+        assert_ne!(s.id, keys.id);
+        let mut spiffs = BTreeMap::new();
+        spiffs.insert(
+            "820367".to_string(),
+            Spiff {
+                at: 5,
+                total: 189.5,
+                tag: "T12".into(),
+                vehicle: "2026 Ford Bronco".into(),
+            },
+        );
+        let recs = spiff_records(&spiffs, "dev1");
+        assert_eq!(recs.keys().collect::<Vec<_>>(), ["p/820367"]);
+        let mut timed: BTreeMap<String, Rec> = recs.into_iter().map(|(k, v)| (k, rec(1, "dev1", v))).collect();
+        timed.insert(
+            "p/1".into(),
+            Rec {
+                t: 2,
+                d: "x".into(),
+                v: Value::Null,
+                del: true,
+            },
+        );
+        let mut back = BTreeMap::new();
+        apply_spiffs(&mut back, &timed);
+        assert_eq!(back, spiffs);
+        // the spiffs' side keeps this computer's ID
+        let mut st = State::default();
+        let id = st.device_id.clone();
+        assert_eq!(st.spiff_side().device_id, id);
     }
 
     #[test]

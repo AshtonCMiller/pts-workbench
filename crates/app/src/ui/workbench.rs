@@ -116,10 +116,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 .height(Length::Fill)
                 .into()
         }
-        Tab::ServiceManual => container(manual(ws, manual_tab))
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into(),
+        Tab::ServiceManual => container(manual(ws, manual_tab)).width(Length::Fill).height(Length::Fill).into(),
     };
     page.push(anim::page(content, app.inner.phase)).into()
 }
@@ -183,6 +180,7 @@ fn manual<'a>(ws: &'a Workspace, tab: ManualTab) -> Element<'a, Message> {
         ManualTab::Workshop => ford_ui::manual::view(&ws.wsm, ws.is_sample()).map(move |m| Message::Wsm(ro.clone(), m)),
         ManualTab::Diagnostics => ford_ui::diagnostics::view(&ws.diag, ws.is_sample()).map(move |m| Message::Diag(ro.clone(), m)),
         ManualTab::Labor => ford_ui::labor::view(&ws.labor, ws.is_sample()).map(move |m| Message::Labor(ro.clone(), m)),
+        ManualTab::Wiring => ford_ui::wiring::view(&ws.wiring, ws.is_sample()).map(move |m| Message::Wiring(ro.clone(), m)),
         ManualTab::Doc(key) => match ws.docs.iter().find(|d| d.key == key) {
             Some(d) => ford_ui::doc_tab::view(d).map(move |m| Message::Doc(ro.clone(), key, m)),
             None => text("This tab was closed.").into(),

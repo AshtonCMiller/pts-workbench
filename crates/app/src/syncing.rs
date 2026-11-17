@@ -2,7 +2,7 @@
 //! your hours change, and every minute, this computer's hours are merged with your other computers' (on either app)
 //! through the sync server, encrypted. ROs opened on another computer open here too once their VIN is known (from
 //! your ROs in Xtime: the VIN itself never syncs); ROs closed on another computer close here. Also: what sync's
-//! doing, for Settings, and this computer's side of it (`sync-state.json`).
+//! doing, for Settings, and this computer's side of it (`sync-state.json`). Spiffs turned in sync too (this app only).
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

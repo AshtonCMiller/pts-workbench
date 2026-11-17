@@ -79,6 +79,17 @@ pub struct DiagResult {
     pub article: String,
     /// A bulletin's, video's or wiring page's address
     pub url: String,
+    /// A wiring result: Ford's kind for it ("conn_search", "celttl", "cfc"…), its diagram, page and connector
+    pub wiring: Option<WiringRef>,
+}
+
+/// Where a wiring result goes (for the Wiring tab)
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct WiringRef {
+    pub kind: String,
+    pub cell: String,
+    pub page: String,
+    pub conn: String,
 }
 
 /// A page of results, and how many of each kind there are
@@ -357,6 +368,12 @@ pub fn read_result(r: &Value, ctx: &DiagContext) -> DiagResult {
                 );
             }
             out.url.push_str("&comefrom=enhancesearch");
+            out.wiring = Some(WiringRef {
+                kind: kind.clone(),
+                cell: s(&r["wiringCell"]),
+                page: page.clone(),
+                conn: conn.clone(),
+            });
             out.description.clear();
         }
         _ => {}
@@ -451,7 +468,7 @@ impl Ford {
     /// vehicle it identified last, and its own page keeps a copy for each VIN to put back when you switch vehicles:
     /// so does this. The cookie as it is when it's this vehicle's; else this VIN's copy; else the VIN identified again
     /// (as PTS does), and the cookie read then. Values are never logged.
-    async fn vehicle_options(&self, vin: &str, build_date: &str) -> Option<(Vec<String>, Option<String>, String)> {
+    pub(crate) async fn vehicle_options(&self, vin: &str, build_date: &str) -> Option<(Vec<String>, Option<String>, String)> {
         let now = || self.http.cookie(&self.base, "FeaturesAttributes");
         if let Some(raw) = now() {
             if let Some(f) = feature_attributes(&raw, build_date) {

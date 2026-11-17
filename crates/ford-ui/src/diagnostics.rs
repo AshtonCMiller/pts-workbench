@@ -1,7 +1,8 @@
 //! The Diagnostics tab (the Electron app's `manual/diagnostics/`): Ford's "Enhanced Search" for the vehicle. Type
 //! DTCs (P0420, U3000:49) and/or words (no crank, liftgate); the results come back grouped like Ford's Diagnostics
 //! tab, each group a tab with its count (the highlight slides between them). A pinpoint test opens right at the test
-//! in the Workshop Manual tab; a procedure there too; a bulletin in the TSBs tab; wiring and videos on Ford's site.
+//! in the Workshop Manual tab; a procedure there too; a bulletin in the TSBs tab; a wiring page in the Wiring tab;
+//! videos (and connector faces) on Ford's site.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -241,6 +242,32 @@ impl DiagView {
                             title: r.title.clone(),
                             url: r.url.clone(),
                         }),
+                        // a wiring page: in the Wiring tab (connector faces and the connector list are Ford's own pages)
+                        (None, "wiring")
+                            if r.wiring.as_ref().is_some_and(|w| {
+                                w.kind != "cfc" && !ford::wiring::cell_no(&w.cell).is_empty() && ford::wiring::cell_no(&w.cell) != "150"
+                            }) =>
+                        {
+                            let w = r.wiring.clone().unwrap_or_default();
+                            let kind = ford::wiring::hit_kind(&w.kind, &w.conn);
+                            let cell = if w.kind.ends_with("_index") {
+                                "151".to_string()
+                            } else {
+                                ford::wiring::cell_no(&w.cell)
+                            };
+                            outs.push(Out::OpenWiring(crate::wiring::At {
+                                cell,
+                                page: w.page.parse().unwrap_or(1),
+                                item: if !w.conn.is_empty() {
+                                    w.conn.clone()
+                                } else if kind == ford::wiring::HitKind::Component {
+                                    ford::wiring::clean(r.title.split(": ").next().unwrap_or(""))
+                                } else {
+                                    String::new()
+                                },
+                                title: String::new(),
+                            }));
+                        }
                         _ if !r.url.is_empty() => {
                             let _ = crate::open_external(&r.url);
                         }

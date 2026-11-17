@@ -298,6 +298,8 @@ pub enum Message {
     SetManualTab(ManualTab),
     ToggleSidebar,
     ToggleChat,
+    /// The chat panel, on an RO's conversation (started there if it has none)
+    ChatAbout(String),
     /// The chat panel's own messages (crates/xtime-ui)
     Chat(xtime_ui::chat::ChatMsg),
     /// Read the chat again (with your ROs; every 30 s while the panel is open)
@@ -321,6 +323,8 @@ pub enum Message {
     Diag(String, ford_ui::DiagMsg),
     /// Something in an RO's Labor Times tab
     Labor(String, ford_ui::LaborMsg),
+    /// Something in an RO's Wiring tab
+    Wiring(String, ford_ui::WiringMsg),
     /// One of an open vehicle's document tabs (its RO number, the tab's number): its own messages
     Doc(String, u32, ford_ui::DocTabMsg),
     /// Close a document tab of the vehicle showing (the tab's number)
@@ -882,6 +886,21 @@ impl App {
                 }
                 return Task::batch(tasks);
             }
+            Message::Wiring(ro, msg) => {
+                let env = self.ford_env_for(&ro);
+                let Some(ws) = self.open.iter_mut().find(|w| w.ro.ro == ro) else {
+                    return Task::none();
+                };
+                let (task, outs) = ws.wiring.update(msg, &env);
+                let mut tasks = vec![{
+                    let ro = ro.clone();
+                    task.map(move |m| Message::Wiring(ro.clone(), m))
+                }];
+                for out in outs {
+                    tasks.push(self.ford_out(&ro, out));
+                }
+                return Task::batch(tasks);
+            }
             Message::Diag(ro, msg) => {
                 let env = self.ford_env_for(&ro);
                 let Some(ws) = self.open.iter_mut().find(|w| w.ro.ro == ro) else {
@@ -955,9 +974,25 @@ impl App {
                         .map(|w| Task::done(Message::Wsm(w.ro.ro.clone(), ford_ui::ManualMsg::SetUp(r.clone()))))
                         .collect::<Vec<_>>(),
                 );
-                return Task::batch([Task::done(Message::Oasis(ro, ford_ui::OasisMsg::SetUp(r))), tsb, wsm]);
+                // the Wiring tab, when it was waiting on PTS too
+                let wiring = if ok {
+                    Task::done(Message::Wiring(ro.clone(), ford_ui::WiringMsg::SetUp))
+                } else {
+                    Task::none()
+                };
+                return Task::batch([Task::done(Message::Oasis(ro, ford_ui::OasisMsg::SetUp(r))), tsb, wsm, wiring]);
             }
             Message::ToggleSidebar => self.sidebar = !self.sidebar,
+            Message::ChatAbout(ro) => {
+                self.chat = true;
+                self.notes_open = false;
+                let load = if self.chat_panel.loaded_at.is_none() {
+                    self.refresh_chat()
+                } else {
+                    Task::none()
+                };
+                return Task::batch([load, Task::done(Message::Chat(xtime_ui::chat::ChatMsg::Start(ro)))]);
+            }
             Message::ToggleChat => {
                 self.chat = !self.chat;
                 if self.chat {
@@ -1349,6 +1384,10 @@ impl App {
             Message::MarkSpiffed(ro, on) => {
                 let spiff = on.then(|| self.spiff_record(&ro));
                 self.hours.set_spiffed(&ro, spiff);
+                // (to your other computers soon)
+                if !self.settings.sync_off {
+                    self.sync.changed();
+                }
                 self.notice = Some(match timecard::save(&self.hours) {
                     Ok(()) if on => format!("RO {ro} marked spiffed"),
                     Ok(()) => format!("RO {ro} no longer marked spiffed"),
@@ -1814,6 +1853,7 @@ impl App {
         ford_ui::Env {
             ford: self.ford.clone(),
             sample: self.open.iter().find(|w| w.ro.ro == ro).is_some_and(Workspace::is_sample),
+            dark: self.settings.theme.resolve(self.system_dark) == ThemeChoice::Dark,
         }
     }
 
@@ -1832,6 +1872,7 @@ impl App {
             ManualTab::Diagnostics if ws.diag.search.is_none() => ws.diag.focus().map(move |m| Message::Diag(ro.clone(), m)),
             // SLTS opened (the first time)
             ManualTab::Labor => ws.labor.load(&env).map(move |m| Message::Labor(ro.clone(), m)),
+            ManualTab::Wiring => ws.wiring.load(&env, false).map(move |m| Message::Wiring(ro.clone(), m)),
             _ => Task::none(),
         }
     }
@@ -1921,6 +1962,20 @@ impl App {
                     ws.tsb.open_article(&env, article).map(move |m| Message::Tsb(r2.clone(), m)),
                 ])
             }
+            // a wiring page from Diagnostics: in the Wiring tab
+            ford_ui::Out::OpenWiring(at) => {
+                let env = self.ford_env_for(ro);
+                let Some(ws) = self.open.iter_mut().find(|w| w.ro.ro == ro) else {
+                    return Task::none();
+                };
+                ws.tab = Tab::ServiceManual;
+                ws.manual = ManualTab::Wiring;
+                let (r, r2) = (ro.to_string(), ro.to_string());
+                Task::batch([
+                    ws.wiring.load(&env, false).map(move |m| Message::Wiring(r.clone(), m)),
+                    Task::done(Message::Wiring(r2, ford_ui::WiringMsg::Open(at))),
+                ])
+            }
             // opening the vehicle in PTS (unseen) to set it up: one window at a time
             ford_ui::Out::SetUpPts(vin) => {
                 let ro = ro.to_string();
@@ -1968,6 +2023,8 @@ impl App {
                 xtime_ui::Out::SignedOut => self.ros_error = Some(LoadError::SignedOut), // the bottom bar offers to sign in
                 xtime_ui::Out::Moved(mode) => self.watch.moved_here(ro, mode, timecard::now_ms()),
                 xtime_ui::Out::Read(view) => {
+                    // (it counts as this RO's minute check: so its sidebar status comes from here too)
+                    self.off_list_status(ro, &view);
                     let news = self.watch_lines(ro, &view);
                     tasks.push(self.notify(news));
                     let lines = timecard::lines_of(&view).into_iter().map(|(_, l)| l).collect();
@@ -1985,6 +2042,7 @@ impl App {
                     xtime_ui::Ask::PrintSpiff => Message::PrintSpiff,
                     xtime_ui::Ask::MarkSpiffed(on) => Message::MarkSpiffed(ro.to_string(), on),
                     xtime_ui::Ask::Copy(text, what) => Message::Copy(text, what),
+                    xtime_ui::Ask::Chat => Message::ChatAbout(ro.to_string()),
                 })),
             }
         }
@@ -2406,28 +2464,34 @@ impl App {
             let lines = timecard::lines_of(&v).into_iter().map(|(_, l)| l).collect();
             self.hours.update_lines(&ro, lines, &timecard::ymm(&v), timecard::now_ms());
             changed = true;
-            let on_list = self.my_ros.iter().any(|r| r.ro == ro);
-            if let Some(ws) = self.open.iter_mut().find(|w| w.ro.ro == ro).filter(|_| !on_list) {
-                let mut r = xtime_ui::my_ros::from_view(&v);
-                // (what Xtime left out, as it was)
-                for (new, old) in [
-                    (&mut r.vin, &ws.ro.vin),
-                    (&mut r.year, &ws.ro.year),
-                    (&mut r.make, &ws.ro.make),
-                    (&mut r.model, &ws.ro.model),
-                    (&mut r.tag, &ws.ro.tag),
-                ] {
-                    if new.is_empty() {
-                        *new = old.clone();
-                    }
-                }
-                ws.ro = r;
-            }
+            self.off_list_status(&ro, &v);
         }
         if changed {
             let _ = timecard::save(&self.hours);
         }
         self.notify(notes)
+    }
+
+    /// An open RO that isn't on your list (added by hand, or gone from it): its stage, parts status and waiting flags
+    /// from the RO just read (the dashboard keeps the ones on your list up to date)
+    fn off_list_status(&mut self, ro: &str, v: &xtime::ro::RoView) {
+        let on_list = self.my_ros.iter().any(|r| r.ro == ro);
+        if let Some(ws) = self.open.iter_mut().find(|w| w.ro.ro == ro).filter(|_| !on_list) {
+            let mut r = xtime_ui::my_ros::from_view(v);
+            // (what Xtime left out, as it was)
+            for (new, old) in [
+                (&mut r.vin, &ws.ro.vin),
+                (&mut r.year, &ws.ro.year),
+                (&mut r.make, &ws.ro.make),
+                (&mut r.model, &ws.ro.model),
+                (&mut r.tag, &ws.ro.tag),
+            ] {
+                if new.is_empty() {
+                    *new = old.clone();
+                }
+            }
+            ws.ro = r;
+        }
     }
 
     /// An RO's lines, for the notifications (approved / declined since the last look)

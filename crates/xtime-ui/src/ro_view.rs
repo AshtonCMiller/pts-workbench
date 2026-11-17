@@ -205,6 +205,8 @@ pub enum Ask {
     MarkSpiffed(bool),
     /// Copy something shown: the text, and what it is ("Part number")
     Copy(String, String),
+    /// Message about this RO: the chat panel, on its conversation (started if there's none)
+    Chat,
 }
 
 /// What the app does after an update

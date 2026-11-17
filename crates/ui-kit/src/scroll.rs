@@ -2,8 +2,9 @@
 //!
 //! [`scrollable`] is iced's own scrollable with one change. A turn of the mouse wheel isn't passed on at once: the
 //! distance is kept, and every frame a share of what's left is passed on (fast at first, easing off at the end), so a
-//! notch glides over about a fifth of a second and quick turns add up. A touchpad already scrolls smoothly (it sends
-//! pixels, not notches), so its scrolling is passed straight on. Everything else is iced's scrollable as it is.
+//! notch glides over about a fifth of a second and quick turns add up. A touchpad already scrolls smoothly, so its
+//! scrolling is passed straight on, gently: some send pixels; Windows' precision touchpads send small parts of a
+//! notch, many a second, which are told apart from a wheel's whole notches. Everything else is iced's scrollable.
 //!
 //! Used just like iced's: `scrollable(content).height(Length::Fill)`.
 //!
@@ -24,6 +25,9 @@ use iced::{Element, Length, Point, Rectangle, Renderer, Size, Task, Theme, Vecto
 
 /// How far one notch of the wheel goes (iced on its own goes 60 pixels a line)
 const LINE: f32 = 120.0;
+/// How far a touchpad's notch goes (its small parts of one are passed on at once): gentler than a wheel's, as a
+/// touchpad sends many of them
+const PAD_LINE: f32 = 36.0;
 /// How quickly what's left of a scroll is used up: about 63% of it every this many seconds
 const EASE: f32 = 0.075;
 
@@ -164,6 +168,27 @@ impl<'a, Message> Widget<Message, Theme, Renderer> for Glide<'a, Message> {
 
         match &event {
             // a notch of the mouse wheel over it: kept, to be passed on a little at a time
+            // a touchpad's part of a notch (not a whole one): passed on at once, gently (it's smooth already)
+            Event::Mouse(mouse::Event::WheelScrolled {
+                delta: mouse::ScrollDelta::Lines { x, y },
+            }) if cursor.is_over(bounds) && (x.fract().abs() > 1e-3 || y.fract().abs() > 1e-3) => {
+                let pad = Event::Mouse(mouse::Event::WheelScrolled {
+                    delta: mouse::ScrollDelta::Pixels {
+                        x: x * PAD_LINE,
+                        y: y * PAD_LINE,
+                    },
+                });
+                return self.inner.as_widget_mut().on_event(
+                    &mut tree.children[0],
+                    pad,
+                    child,
+                    cursor,
+                    renderer,
+                    clipboard,
+                    shell,
+                    viewport,
+                );
+            }
             Event::Mouse(mouse::Event::WheelScrolled {
                 delta: mouse::ScrollDelta::Lines { x, y },
             }) if cursor.is_over(bounds) => {

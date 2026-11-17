@@ -5,6 +5,10 @@
 //! A conversation has a message box at the bottom: Enter sends (Shift+Enter for a new line), and typing @ offers the
 //! people you can mention (↑ ↓ to choose, Enter or Tab to pick, Esc to close). Opening a conversation marks its
 //! messages read in Xtime too, as Xtime's page does. Each conversation keeps its unsent text while the app is open.
+//!
+//! An RO with no conversation yet can have one started (the RO tab's "Start a conversation", or the Xtime View's
+//! "Message about this RO"): the RO's chat channel is read from Xtime, and the first message sent there starts it, as
+//! Xtime's own RO page does.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -71,6 +75,11 @@ pub struct ChatPanel {
     pub marked: HashMap<String, i64>,
     /// The last outgoing message's number
     pub next_key: u64,
+    /// Conversations started here, not in the list yet (channel id → its RO)
+    pub starting: HashMap<String, String>,
+    /// An RO whose chat channel is being read from Xtime (to start its conversation), and why that didn't work
+    pub finding: Option<String>,
+    pub start_error: Option<String>,
 }
 
 /// A message you sent, on its way to Xtime
@@ -120,6 +129,9 @@ pub enum ChatMsg {
     Filter(Filter),
     /// The RO tab: that RO's conversation, straight away
     ThisRo(String),
+    /// Start an RO's conversation (or open it, when there's one): its chat channel read from Xtime
+    Start(String),
+    Found(String, Result<String, LoadError>),
     /// Open the conversation's RO in the Workbench
     OpenRo(String),
     /// Typing (and moving about) in the open conversation's message box
@@ -163,9 +175,24 @@ impl ChatPanel {
     }
 
     /// Conversations with something new (for the Chat button)
-    /// An RO's conversation (the newest, when there's more than one)
+    /// An RO's conversation (the newest, when there's more than one; or one started here)
     pub fn channel_for_ro(&self, ro: &str) -> Option<String> {
-        self.conversations().into_iter().find(|c| c.ro == ro).map(|c| c.channel_id)
+        self.conversations()
+            .into_iter()
+            .find(|c| c.ro == ro)
+            .map(|c| c.channel_id)
+            .or_else(|| self.starting.iter().find(|(_, r)| r.as_str() == ro).map(|(ch, _)| ch.clone()))
+    }
+
+    /// The RO a conversation's about (from the list, or one started here)
+    pub fn ro_of(&self, ch: &str) -> String {
+        self.conversations()
+            .into_iter()
+            .find(|c| c.channel_id == ch)
+            .map(|c| c.ro)
+            .filter(|r| !r.is_empty())
+            .or_else(|| self.starting.get(ch).cloned())
+            .unwrap_or_default()
     }
 
     pub fn unread(&self) -> usize {
@@ -335,6 +362,8 @@ impl ChatPanel {
                     Ok(list) => {
                         self.messages = list;
                         self.error = None;
+                        let listed: Vec<String> = self.messages.iter().map(|m| m.channel_id.clone()).collect();
+                        self.starting.retain(|ch, _| !listed.contains(ch));
                         self.loaded_at = Some(crate::now());
                         if let Some(c) = env.xtime.chat_config() {
                             outs.push(ChatOut::Learned(c));
@@ -387,6 +416,11 @@ impl ChatPanel {
                 if self.history_loading.as_ref() == Some(&ch) {
                     self.history_loading = None;
                 }
+                // a conversation started here has nothing to read yet (Xtime may not know it until its first message)
+                let r = match r {
+                    Err(e) if e != LoadError::SignedOut && self.starting.contains_key(&ch) => Ok(Vec::new()),
+                    r => r,
+                };
                 match r {
                     Ok(list) => {
                         let grew = self.history.get(&ch).map(Vec::len) != Some(list.len());
@@ -433,6 +467,49 @@ impl ChatPanel {
                     }
                 }
             }
+            ChatMsg::Start(ro) => {
+                self.filter = Filter::ThisRo;
+                self.this_ro = Some(ro.clone());
+                self.start_error = None;
+                if let Some(ch) = self.channel_for_ro(&ro) {
+                    return self.update(ChatMsg::Open(ch), env, ros);
+                }
+                if env.sample || self.finding.is_some() {
+                    return (Task::none(), outs);
+                }
+                self.open = None;
+                self.finding = Some(ro.clone());
+                let (x, store) = (env.xtime.clone(), env.store.clone());
+                Task::perform(
+                    async move {
+                        let r = x.ro_view(&store, &ro).await.map(|v| v.chat_channel).map_err(LoadError::from);
+                        (ro, r)
+                    },
+                    |(ro, r)| ChatMsg::Found(ro, r),
+                )
+            }
+            ChatMsg::Found(ro, r) => {
+                if self.finding.as_deref() == Some(ro.as_str()) {
+                    self.finding = None;
+                }
+                match r {
+                    Ok(ch) if !ch.is_empty() => {
+                        self.starting.insert(ch.clone(), ro.clone());
+                        // (still on this RO's tab: its new conversation, ready for the first message)
+                        if self.filter == Filter::ThisRo && self.this_ro.as_deref() == Some(ro.as_str()) {
+                            return self.update(ChatMsg::Open(ch), env, ros);
+                        }
+                    }
+                    Ok(_) => self.start_error = Some(format!("Xtime doesn't have chat for RO {ro}.")),
+                    Err(e) => {
+                        if e == LoadError::SignedOut {
+                            outs.push(ChatOut::SignedOut);
+                        }
+                        self.start_error = Some(format!("Couldn't start the conversation ({})", e.plain()));
+                    }
+                }
+                Task::none()
+            }
             ChatMsg::OpenRo(ro) => {
                 outs.push(ChatOut::OpenRo(ro));
                 Task::none()
@@ -456,12 +533,7 @@ impl ChatPanel {
                 if typed.is_empty() {
                     return (Task::none(), outs);
                 }
-                let ro = self
-                    .conversations()
-                    .into_iter()
-                    .find(|c| c.channel_id == ch)
-                    .map(|c| c.ro)
-                    .unwrap_or_default();
+                let ro = self.ro_of(&ch);
                 // in the conversation at once (marked as going), the box emptied for the next one
                 self.next_key += 1;
                 self.outbox.push(Outgoing {
@@ -732,16 +804,13 @@ pub fn panel<'a>(chat: &'a ChatPanel, shown: ChatShown<'a>) -> Element<'a, ChatM
     };
     let top: Element<'a, ChatMsg> = match (&chat.showing, ro_view && chat.open.is_none()) {
         // the RO tab, and no conversation on it yet
-        (_, true) => over(note(if shown.sample {
-            "Your Xtime conversations show here once you're signed in to Xtime.".to_string()
+        (_, true) => over(if shown.sample {
+            note("Your Xtime conversations show here once you're signed in to Xtime.")
         } else if chat.loaded_at.is_none() {
-            "Reading your chat…".to_string()
+            note("Reading your chat…")
         } else {
-            format!(
-                "No messages about RO {} yet. When someone starts one in Xtime, it shows here.",
-                shown.ro.unwrap_or("")
-            )
-        })),
+            start_card(chat, shown.ro.unwrap_or(""))
+        }),
         (Some(ch), false) => over(conversation(chat, ch, &shown, ro_view)),
         (None, false) => Space::new(Length::Fill, Length::Fill).into(),
     };
@@ -751,6 +820,32 @@ pub fn panel<'a>(chat: &'a ChatPanel, shown: ChatShown<'a>) -> Element<'a, ChatM
         .height(Length::Fill)
         .style(style::panel)
         .into()
+}
+
+/// An RO with no conversation yet: start one
+fn start_card<'a>(chat: &'a ChatPanel, ro: &'a str) -> Element<'a, ChatMsg> {
+    let finding = chat.finding.as_deref() == Some(ro);
+    let mut col = column![
+        text(format!("No messages about RO {ro} yet.")).size(14).font(style::BOLD),
+        text("Start a conversation about it in Xtime's Dealership chat. @mention someone so they're notified.")
+            .size(13)
+            .style(style::muted)
+            .align_x(Alignment::Center),
+        button(
+            text(if finding { "Getting it ready…" } else { "Start a conversation" })
+                .size(13)
+                .font(style::BOLD)
+        )
+        .padding([6, 16])
+        .style(button::primary)
+        .on_press_maybe((!finding).then(|| ChatMsg::Start(ro.to_string()))),
+    ]
+    .spacing(10)
+    .align_x(Alignment::Center);
+    if let Some(e) = &chat.start_error {
+        col = col.push(text(e.as_str()).size(12).style(text::danger));
+    }
+    container(col).width(Length::Fill).padding([24, 12]).center_x(Length::Fill).into()
 }
 
 fn list<'a>(chat: &'a ChatPanel, shown: &ChatShown<'a>) -> Element<'a, ChatMsg> {
@@ -822,7 +917,7 @@ fn conversation_item<'a>(c: ChatMessage, now: i64) -> Element<'a, ChatMsg> {
 fn conversation<'a>(chat: &'a ChatPanel, ch: &'a str, shown: &ChatShown<'a>, in_tab: bool) -> Element<'a, ChatMsg> {
     // its newest from the list says what it's about until its messages are read
     let about = chat.conversations().into_iter().find(|c| c.channel_id == ch);
-    let ro = about.as_ref().map(|c| c.ro.clone()).unwrap_or_default();
+    let ro = chat.ro_of(ch);
     let title = if !ro.is_empty() {
         format!("RO {ro}")
     } else {
@@ -867,6 +962,9 @@ fn conversation<'a>(chat: &'a ChatPanel, ch: &'a str, shown: &ChatShown<'a>, in_
             }
             scrollable(col).id(scroll_id()).height(Length::Fill).into()
         }
+        Some(_) if chat.starting.contains_key(ch) => note(format!(
+            "New conversation about RO {ro}. Your first message starts it in Xtime; @mention someone so they're notified."
+        )),
         Some(_) => note("No messages in this conversation."),
         None => match &chat.history_error {
             Some(LoadError::SignedOut) => note("Sign in to Xtime to see this conversation."),

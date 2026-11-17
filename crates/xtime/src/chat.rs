@@ -925,14 +925,16 @@ impl Xtime {
     }
 
     /// Sends a message to a conversation (its channel id; `ro`: its RO, "" to read it from the id). `text` may hold
-    /// @mentions as Xtime's markup ([`to_markup`]).
+    /// @mentions as Xtime's markup ([`to_markup`]). A new RO conversation starts the same way, as Xtime's page starts
+    /// one: the first message sent to the RO's channel ([`crate::ro::RoView::chat_channel`]), with the RO and dealer
+    /// code as its context.
     pub async fn chat_send(&self, store: &str, channel: &str, ro: &str, text: &str) -> Result<()> {
         let text = text.trim();
         if text.is_empty() {
             return Err(Error::Format("nothing to send".into()));
         }
         if channel.is_empty() {
-            return Err(Error::Format("start this conversation in Xtime first".into()));
+            return Err(Error::Format("Xtime has no chat for this RO".into()));
         }
         let (_, cfg) = self.chat_setup(store).await?;
         let dealer = cfg.dealer_code.clone();

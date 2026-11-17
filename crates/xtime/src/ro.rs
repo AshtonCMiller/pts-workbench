@@ -43,6 +43,9 @@ pub struct RoView {
     pub vehicle: Vehicle,
     /// In Xtime's order; deleted lines left out
     pub lines: Vec<Line>,
+    /// The RO's Dealership chat conversation (its channel id, which Xtime's server makes: "3590-821267-2611"); a
+    /// conversation is started by sending its first message there. Empty when Xtime has no chat for it.
+    pub chat_channel: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -579,6 +582,7 @@ pub fn parse_view(data: &Value, staff: &[Value]) -> Result<RoView> {
         waiting_customer: truthy(get(ro, "WaitingForCustomer")),
         waiting_warranty: truthy(get(ro, "WaitingForWarranty")),
         part_status: number(get(ro, "PartStatusID")).filter(|n| n.is_finite()).unwrap_or(0.0) as i64,
+        chat_channel: field(ro, "ChatChannelId"),
         promised_date: field(ro, "PromisedDate"),
         promised_time: field(ro, "PromisedTime"),
         opened: if opened.is_empty() { day(get(ro, "CreateDate")) } else { opened },
@@ -775,6 +779,7 @@ mod tests {
     fn sample() -> Value {
         json!({ "Data": {
             "RONumber": 820367, "TagNumber": "T12", "CurrentMode": "6", "ModeStartTime": "2026-11-15T09:05:00",
+            "ChatChannelId": "3590-820367-2611",
             "IsWaiter": true, "WaitingForParts": true, "PartsNumber": "55",
             "PromisedDate": "11/15/2026", "PromisedTime": "17:00",
             "AdvisorID": 9, "TechnicianID": 77, "Technician": null,
@@ -811,6 +816,7 @@ mod tests {
         assert_eq!(v.parts_employee, "Parts Guy (55)");
         assert_eq!(v.flags, vec!["Loaner"]);
         assert_eq!(v.vehicle.vin, "1FMEE2BP0TLA00000");
+        assert_eq!(v.chat_channel, "3590-820367-2611");
         assert_eq!(v.vehicle.mileage, Some(1234.0));
         assert_eq!(v.lines.iter().map(|l| l.key()).collect::<Vec<_>>(), ["1", "2", "3", "4"]);
         assert_eq!(v.lines.iter().map(|l| l.index).collect::<Vec<_>>(), [1, 2, 0, 3]); // where Xtime had them

@@ -25,6 +25,7 @@ pub mod manual;
 pub mod oasis;
 pub mod tsb;
 pub mod vehicle;
+pub mod wiring;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -211,6 +212,8 @@ pub struct Ford {
     /// Each VIN's copy of PTS's FeaturesAttributes cookie (its options, for the diagnostics search), and when it was
     /// looked for (none: PTS had none)
     features: Arc<Mutex<HashMap<String, (Instant, Option<String>)>>>,
+    /// Each VIN's wiring book, once read (see wiring.rs)
+    wiring: wiring::InfoCache,
 }
 
 impl Ford {
@@ -228,6 +231,7 @@ impl Ford {
             diag: Arc::default(),
             slts_codes: Arc::default(),
             features: Arc::default(),
+            wiring: Arc::default(),
         })
     }
 
@@ -262,6 +266,7 @@ impl Ford {
         self.books.lock().expect("books lock").clear();
         self.diag.lock().expect("diag lock").clear();
         self.features.lock().expect("features lock").clear();
+        self.wiring.lock().expect("wiring lock").clear();
     }
 
     pub(crate) fn url(&self, path: &str) -> Result<Url> {
