@@ -22,7 +22,10 @@
 //! Prints `{"ok":true,"cookies":[…]}` (each like `workbench_net::SiteCookie`), or `{"ok":false,"cancelled":true}` when
 //! the window is closed first (exit code 1). Only cookies of the `--domains` sites are printed, and only to the app
 //! that started it (its standard output); nothing is written here except the web view's own profile in `--data-dir`,
-//! which keeps "remember me" and saved passwords between sign-ins, as a browser does.
+//! which keeps "remember me" between sign-ins, as a browser does.
+//!
+//! Saved logins (logins.rs): the username and password typed are kept by the computer's keyring once the sign-in
+//! works, and filled in on that sign-in page the next time.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // no console window on Windows
 
 use std::collections::HashSet;
@@ -35,6 +38,8 @@ use tao::event::{Event, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
 use tao::window::{Icon, WindowBuilder};
 use wry::{PageLoadEvent, WebContext, WebViewBuilder};
+
+mod logins;
 
 /// Must match `workbench_net::SiteCookie` (the app reads these)
 #[derive(Serialize)]
@@ -183,6 +188,8 @@ fn wanted(domain: &str, domains: &[String]) -> bool {
 enum UserEvent {
     /// A page finished loading
     Loaded(String),
+    /// What a page's sign-in fields had (from logins::CAPTURE), as it sent it
+    Fields(String),
     /// Every 1.5 s: signed in yet? (Done only when it's so twice in a row: sites can load first and send you to sign
     /// in after.)
     Check,
@@ -254,12 +261,19 @@ fn main() {
     };
 
     let proxy = event_loop.create_proxy();
+    let fields_proxy = event_loop.create_proxy();
     let mut context = WebContext::new(Some(a.data_dir.clone()));
-    let builder = WebViewBuilder::with_web_context(&mut context).with_on_page_load_handler(move |event, url| {
-        if let PageLoadEvent::Finished = event {
-            let _ = proxy.send_event(UserEvent::Loaded(url));
-        }
-    });
+    let builder = WebViewBuilder::with_web_context(&mut context)
+        .with_on_page_load_handler(move |event, url| {
+            if let PageLoadEvent::Finished = event {
+                let _ = proxy.send_event(UserEvent::Loaded(url));
+            }
+        })
+        // saved logins: what's typed in the sign-in fields comes back here
+        .with_initialization_script(logins::CAPTURE)
+        .with_ipc_handler(move |req| {
+            let _ = fields_proxy.send_event(UserEvent::Fields(req.body().clone()));
+        });
     // Linux: the web view goes in the window's GTK box (works on Wayland and X11); elsewhere in the window itself
     #[cfg(target_os = "linux")]
     let webview = {
@@ -310,12 +324,28 @@ fn main() {
     // when a page on the site (not its /transport hand-over) last finished loading
     let mut site_loaded: Option<Instant> = None;
     let mut waiting_said = false;
+    let mut typed = logins::Typed::default();
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
         let _keep = (&window, &context); // the window and the web view's profile live as long as the web view
         match event {
+            Event::UserEvent(UserEvent::Fields(body)) => {
+                #[derive(serde::Deserialize)]
+                struct Sent {
+                    fields: logins::Login,
+                }
+                // (the site it's for: where the web view really is, not what the page says)
+                let here = host_of(&webview.url().unwrap_or_default());
+                if let Ok(s) = serde_json::from_str::<Sent>(&body) {
+                    typed.fields(&here, &s.fields.user, &s.fields.pass);
+                }
+            }
             Event::UserEvent(UserEvent::Loaded(url)) => {
                 log.page("loaded", &url);
+                // a sign-in page with a saved login: filled in (each field only while it's empty)
+                if let Some(saved) = logins::get(&host_of(&url)) {
+                    let _ = webview.evaluate_script(&logins::fill_script(&saved));
+                }
                 if host_of(&url) == a.done_host && !path_of(&url).starts_with("/transport") {
                     site_loaded = Some(Instant::now());
                 }
@@ -372,6 +402,12 @@ fn main() {
                     return;
                 }
                 log.page("signed in at", &here);
+                // it worked: the login typed is kept for next time (the site's name in the log, nothing else)
+                if let Some((host, login)) = typed.take() {
+                    if logins::save(&host, &login) {
+                        log.line(&format!("saved the login for {host}"));
+                    }
+                }
                 match webview.cookies() {
                     Ok(list) => {
                         let cookies: Vec<SiteCookie> = list

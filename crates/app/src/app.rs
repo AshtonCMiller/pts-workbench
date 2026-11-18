@@ -81,6 +81,14 @@ pub enum Overlay {
 }
 
 /// "Add an RO" in the sidebar: the RO number typed, a VIN (asked for when Xtime can't say), and how it's going
+/// From Diagnostics' self test: a code's pinpoint test to open in the vehicle's RO (or, none known, the Service
+/// Manual's search for the code)
+#[derive(Debug, Clone)]
+pub enum Pinpoint {
+    Open(ford::doc::ProcLink, String),
+    Search(String),
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct AddRo {
     pub ro: String,
@@ -127,7 +135,7 @@ pub struct App {
     pub notes_open: bool,
     pub toast: Option<(u64, Phase)>,
     /// Diagnostics: the VCI and the vehicle plugged into it
-    pub diag: crate::diag::Diag,
+    pub diag: diag_ui::Diag,
     /// The Dealership chat panel (crates/xtime-ui): your conversations, read from Xtime
     pub chat_panel: xtime_ui::chat::ChatPanel,
     /// Chat's settings as last kept in xtime-chat.json (written again only when Xtime says otherwise)
@@ -154,6 +162,15 @@ pub struct App {
     pub checking_spiffs: bool,
     /// "Add an RO" in the sidebar, while it's open
     pub add_ro: Option<AddRo>,
+    /// A pinpoint test waiting for its vehicle's RO to be opened (the VIN; added by hand: it wasn't one of yours)
+    pending_pinpoint: Option<(String, Pinpoint)>,
+    /// Websites inside the window (crates/webpane): the one showing, where each one's room was last, and why one
+    /// couldn't show
+    pane_shown: Option<String>,
+    pane_places: std::collections::HashMap<String, iced::Rectangle>,
+    pub pane_error: Option<String>,
+    /// How the window's drawn this time (a change in Settings is from the next start)
+    pub started_graphics: crate::settings::Graphics,
     /// ROs in Dispatch with no technician (the sidebar offers to accept them), the one Accept was pressed on (asking
     /// to be sure), and the one being accepted
     pub dispatch: Vec<AssignedRo>,
@@ -258,6 +275,24 @@ fn save_chat_config(c: &xtime::chat::ChatConfig) -> std::io::Result<()> {
     std::fs::write(chat_config_file(), text)
 }
 
+/// Xtime's own pages and PTS's, shown inside the app (crates/webpane)
+const XTIME_SITE: &str = "https://www.inspect.app.coxautoinc.com/";
+const XTIME_RO_PAGE: &str = "https://www.inspect.app.coxautoinc.com/RepairOrder/Details/{RO}";
+const PTS_VEHICLE_PAGE: &str = "https://www.fordtechservice.dealerconnection.com/transport?link=704&params={VIN}";
+
+/// A task whose result isn't needed
+fn quiet<T: Send + 'static>(t: Task<T>) -> Task<Message> {
+    t.then(|_| Task::none())
+}
+
+/// A website's name among the pages inside the app (one each per RO)
+pub fn pane_id(tab: Tab, ro: &str) -> String {
+    match tab {
+        Tab::PtsSite => format!("pts:{ro}"),
+        _ => format!("xtime-ro:{ro}"),
+    }
+}
+
 /// The sign-in windows' web profile ("remember me", saved passwords)
 fn web_dir() -> std::path::PathBuf {
     crate::settings::app_dir().join("web")
@@ -289,12 +324,18 @@ pub enum Message {
     SetSync(bool),
     SetMode(Mode),
     /// Diagnostics (the VCI and the vehicle plugged in): its own messages
-    Vci(crate::diag::DiagMsg),
+    Vci(diag_ui::DiagMsg),
     Search(String),
     /// Open (or show) a vehicle by RO number
     OpenRo(String),
     CloseRo(String),
     SetTab(Tab),
+    /// A website's room (crates/webpane): where it is now; how showing it went; reload it
+    PanePlace(String, iced::Rectangle),
+    PaneShown(Result<(), String>),
+    ReloadPane,
+    /// The Xtime page: Xtime's own dashboard (the website), or the app's
+    XtimeSite(bool),
     SetManualTab(ManualTab),
     ToggleSidebar,
     ToggleChat,
@@ -394,6 +435,7 @@ pub enum Message {
     CloseSettings,
     Edit(Field, String),
     SetTheme(ThemeChoice),
+    SetGraphics(crate::settings::Graphics),
     /// Every few seconds while the appearance is Auto: look at the system's setting again
     CheckSystemTheme,
     /// The system's setting: dark or not
@@ -437,6 +479,7 @@ pub enum Field {
 impl App {
     pub fn new() -> (Self, Task<Message>) {
         let settings = Settings::load();
+        let started_graphics = settings.graphics;
         // your hours (brought over from the Electron app the first time; a forgotten clock-out ended)
         // sync (on unless turned off): "forgot to clock out" waits until your other computers are heard from
         let sync_on = !settings.sync_off && crate::syncing::derive_keys(&settings.store_id, &settings.employee_number).is_some();
@@ -501,7 +544,7 @@ impl App {
             notes: crate::notes::Notes::load(crate::timecard::now_ms()),
             watch: Default::default(),
             notes_open: false,
-            diag: crate::diag::Diag::default(),
+            diag: diag_ui::Diag::default(),
             toast: None,
             chat_panel: xtime_ui::chat::ChatPanel::new(),
             chat_saved,
@@ -518,6 +561,11 @@ impl App {
             spiff_checked: Default::default(),
             checking_spiffs: false,
             add_ro: None,
+            pending_pinpoint: None,
+            pane_shown: None,
+            pane_places: std::collections::HashMap::new(),
+            pane_error: None,
+            started_graphics,
             dispatch: Vec::new(),
             accept_ask: None,
             show_dispatch: false,
@@ -628,6 +676,25 @@ impl App {
     }
 
     /// The vehicle showing
+    /// Diagnostics: your RO for the vehicle plugged in (one of yours, or one open in the Workbench)
+    pub fn diag_ro(&self) -> Option<diag_ui::RoInfo> {
+        let vin = self.diag.vin.as_deref()?;
+        let r = self
+            .my_ros
+            .iter()
+            .find(|r| r.vin.eq_ignore_ascii_case(vin))
+            .or_else(|| self.open.iter().map(|w| &w.ro).find(|r| r.vin.eq_ignore_ascii_case(vin)))?;
+        Some(diag_ui::RoInfo {
+            ro: r.ro.clone(),
+            tag: r.tag.clone(),
+            vehicle: [r.year.as_str(), r.make.as_str(), r.model.as_str()]
+                .into_iter()
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join(" "),
+        })
+    }
+
     pub fn workspace(&self) -> Option<&Workspace> {
         let ro = self.selected.as_ref()?;
         self.open.iter().find(|w| &w.ro.ro == ro)
@@ -665,7 +732,8 @@ impl App {
             other => self.apply(other),
         };
         self.remember_open();
-        Task::batch([task, self.start_transition()])
+        let pane = self.sync_pane();
+        Task::batch([task, self.start_transition(), pane])
     }
 
     /// After any change: when the page (or the vehicle's tab) changed, the shown one starts leaving; the new one is
@@ -718,6 +786,55 @@ impl App {
     }
 
     /// The open vehicles kept (workspaces.json) and, for sync, which ROs are open (the hours), when they've changed
+    /// The website that should be showing now (none: the app's own pages, or one of its cards is over them)
+    fn wanted_pane(&self) -> Option<webpane::Page> {
+        if self.screen != Screen::Main || self.overlay.is_some() {
+            return None;
+        }
+        let (url, id) = match self.mode {
+            Mode::Xtime if self.settings.xtime_site && !self.sample_data => (XTIME_SITE.to_string(), "xtime-dashboard".to_string()),
+            Mode::Workbench => {
+                let ws = self.workspace().filter(|w| !w.is_sample())?;
+                let url = match ws.tab {
+                    Tab::XtimeSite => XTIME_RO_PAGE.replace("{RO}", &ws.ro.ro),
+                    Tab::PtsSite => PTS_VEHICLE_PAGE.replace("{VIN}", &ws.ro.vin),
+                    _ => return None,
+                };
+                (url, pane_id(ws.tab, &ws.ro.ro))
+            }
+            _ => return None,
+        };
+        // signed in when it opens: the app's cookies for the site
+        let cookies = workbench_net::Url::parse(&url)
+            .map(|u| self.http.cookies_for(&u))
+            .unwrap_or_default();
+        Some(webpane::Page {
+            id,
+            url,
+            cookies,
+            data_dir: crate::settings::app_dir().join("pages"),
+        })
+    }
+
+    /// After any change: the website that should show is shown (where its room was last), the others hidden
+    fn sync_pane(&mut self) -> Task<Message> {
+        let wanted = self.wanted_pane();
+        let id = wanted.as_ref().map(|p| p.id.clone());
+        if id == self.pane_shown {
+            return Task::none();
+        }
+        self.pane_shown = id;
+        self.pane_error = None;
+        match wanted {
+            // (its room hasn't been drawn yet: it shows when it has, PanePlace)
+            Some(page) => match self.pane_places.get(&page.id).copied() {
+                Some(at) => webpane::show(page, at).map(Message::PaneShown),
+                None => quiet(webpane::hide_all()),
+            },
+            None => quiet(webpane::hide_all()),
+        }
+    }
+
     fn remember_open(&mut self) {
         let now = crate::vehicles::snapshot(&self.open, self.selected.as_deref());
         if now == self.open_saved {
@@ -772,9 +889,21 @@ impl App {
                 let (task, out) = self.diag.update(m);
                 let task = task.map(Message::Vci);
                 return match out {
-                    crate::diag::Out::None => task,
-                    crate::diag::Out::Copy(text) => Task::batch([task, iced::clipboard::write(text)]),
-                    crate::diag::Out::OpenRo(ro) => Task::batch([task, Task::done(Message::OpenRo(ro))]),
+                    diag_ui::Out::None => task,
+                    diag_ui::Out::Copy(text) => Task::batch([task, iced::clipboard::write(text)]),
+                    diag_ui::Out::OpenRo(ro) => Task::batch([task, Task::done(Message::OpenRo(ro))]),
+                    diag_ui::Out::LookUp { vin, key } => {
+                        let ford = self.ford.clone();
+                        let (v, k) = (vin.clone(), key.clone());
+                        Task::batch([
+                            task,
+                            Task::perform(diag_ui::look_up(ford, vin, key), move |r| {
+                                Message::Vci(diag_ui::DiagMsg::LookedUp(v.clone(), k.clone(), r))
+                            }),
+                        ])
+                    }
+                    diag_ui::Out::OpenPinpoint { vin, link, title } => Task::batch([task, self.pinpoint(vin, Pinpoint::Open(link, title))]),
+                    diag_ui::Out::SearchDtc { vin, query } => Task::batch([task, self.pinpoint(vin, Pinpoint::Search(query))]),
                 };
             }
             Message::Search(s) => self.search = s,
@@ -799,6 +928,12 @@ impl App {
                 }
             }
             Message::CloseRo(ro) => {
+                // its websites closed too
+                let ids = vec![pane_id(Tab::XtimeSite, &ro), pane_id(Tab::PtsSite, &ro)];
+                for id in &ids {
+                    self.pane_places.remove(id);
+                }
+                let closing = quiet(webpane::close(ids));
                 let at = self.open.iter().position(|w| w.ro.ro == ro);
                 self.open.retain(|w| w.ro.ro != ro);
                 if self.selected.as_deref() == Some(ro.as_str()) {
@@ -807,6 +942,24 @@ impl App {
                         .and_then(|i| self.open.get(i.min(self.open.len().saturating_sub(1))))
                         .map(|w| w.ro.ro.clone());
                 }
+                return closing;
+            }
+            Message::PanePlace(id, at) => {
+                self.pane_places.insert(id.clone(), at);
+                if let Some(page) = self.wanted_pane().filter(|p| p.id == id) {
+                    return webpane::show(page, at).map(Message::PaneShown);
+                }
+            }
+            Message::PaneShown(r) => self.pane_error = r.err(),
+            Message::ReloadPane => {
+                if let Some(id) = self.pane_shown.clone() {
+                    return quiet(webpane::reload(id));
+                }
+            }
+            Message::XtimeSite(on) => {
+                self.settings.xtime_site = on;
+                self.draft.xtime_site = on;
+                let _ = self.settings.save();
             }
             Message::SetTab(t) => {
                 if let Some(ws) = self.workspace_mut() {
@@ -1256,6 +1409,7 @@ impl App {
             }
             Message::AddRo(open) => {
                 self.add_ro = open.then(AddRo::default);
+                self.pending_pinpoint = None;
                 if open {
                     return iced::widget::text_input::focus(add_ro_id());
                 }
@@ -1473,6 +1627,7 @@ impl App {
                 };
                 *f = value;
             }
+            Message::SetGraphics(g) => self.draft.graphics = g,
             Message::SetTheme(t) => {
                 self.draft.theme = t;
                 self.settings.theme = t; // shown right away; kept with Save
@@ -2391,6 +2546,49 @@ impl App {
 
     /// "Add an RO": one already open or on your list just opens; with a VIN typed it opens straight away; otherwise
     /// Xtime is asked for it (its VIN, vehicle, stage and lines)
+    /// A pinpoint test (or the search for a code) in the Workbench: in the vehicle's RO, opened if it's one of yours.
+    /// Not one of yours: Add an RO, with the VIN filled in, and it opens once the RO number's typed.
+    fn pinpoint(&mut self, vin: String, what: Pinpoint) -> Task<Message> {
+        let same = |v: &str| v.eq_ignore_ascii_case(&vin);
+        let ro = self
+            .open
+            .iter()
+            .map(|w| &w.ro)
+            .find(|r| same(&r.vin))
+            .or_else(|| self.my_ros.iter().find(|r| same(&r.vin)))
+            .map(|r| r.ro.clone());
+        let Some(ro) = ro else {
+            self.mode = Mode::Workbench;
+            self.add_ro = Some(AddRo {
+                vin: vin.clone(),
+                ask_vin: true,
+                error: Some("This vehicle isn't one of your ROs. Type its RO number to open the pinpoint test there.".into()),
+                ..Default::default()
+            });
+            self.pending_pinpoint = Some((vin, what));
+            return iced::widget::text_input::focus(add_ro_id());
+        };
+        let opened = self.update(Message::OpenRo(ro.clone()));
+        let shown = self.show_pinpoint(&ro, what);
+        Task::batch([opened, shown])
+    }
+
+    /// The pinpoint test (or the code's search) in an open RO's Service Manual
+    fn show_pinpoint(&mut self, ro: &str, what: Pinpoint) -> Task<Message> {
+        match what {
+            Pinpoint::Open(link, title) => self.ford_out(ro, ford_ui::Out::OpenProcedure { link, title }),
+            Pinpoint::Search(query) => {
+                if let Some(ws) = self.open.iter_mut().find(|w| w.ro.ro == ro) {
+                    ws.tab = Tab::ServiceManual;
+                    ws.manual = ManualTab::Diagnostics;
+                }
+                let first = self.update(Message::Diag(ro.to_string(), ford_ui::DiagMsg::Query(query)));
+                let search = self.update(Message::Diag(ro.to_string(), ford_ui::DiagMsg::Search));
+                Task::batch([first, search])
+            }
+        }
+    }
+
     fn submit_add_ro(&mut self) -> Task<Message> {
         let Some(a) = &mut self.add_ro else { return Task::none() };
         let ro = a.ro.trim().to_string();
@@ -2431,6 +2629,7 @@ impl App {
     fn open_added(&mut self, r: AssignedRo, view: Option<xtime::ro::RoView>) -> Task<Message> {
         self.add_ro = None;
         let ro = r.ro.clone();
+        let r_vin = r.vin.clone();
         if !self.open.iter().any(|w| w.ro.ro == ro) {
             self.open.push(Workspace::new(r));
         }
@@ -2444,7 +2643,16 @@ impl App {
             None => Task::none(),
         };
         let ahead = self.load_ahead(&ro);
-        Task::batch([self.update(Message::OpenRo(ro)), ahead, read])
+        let opened = self.update(Message::OpenRo(ro.clone()));
+        // a pinpoint test from Diagnostics waiting for this vehicle
+        let pinpoint = match self.pending_pinpoint.take() {
+            Some((vin, what)) if vin.eq_ignore_ascii_case(&r_vin) => self.show_pinpoint(&ro, what),
+            other => {
+                self.pending_pinpoint = other;
+                Task::none()
+            }
+        };
+        Task::batch([opened, ahead, read, pinpoint])
     }
 
     /// ROs just read from Xtime: their spiff totals, their lines in your hours (to flag, approvals as they come in),
@@ -2715,7 +2923,7 @@ impl App {
             },
             // Diagnostics, connected: the battery's voltage every 5 s
             if self.diag.connected() {
-                iced::time::every(std::time::Duration::from_secs(5)).map(|_| Message::Vci(crate::diag::DiagMsg::ReadVolts))
+                iced::time::every(std::time::Duration::from_secs(5)).map(|_| Message::Vci(diag_ui::DiagMsg::ReadVolts))
             } else {
                 Subscription::none()
             },

@@ -75,16 +75,22 @@ impl Workspace {
 pub enum Tab {
     /// The app's own Xtime RO page
     XtimeView,
+    /// Xtime's own RO page (the website, inside the app: crates/webpane)
+    XtimeSite,
     /// The app's Service Manual (its own tabs below)
     ServiceManual,
+    /// PTS itself, opened on the vehicle (the website, inside the app)
+    PtsSite,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 2] = [Tab::XtimeView, Tab::ServiceManual];
+    pub const ALL: [Tab; 4] = [Tab::XtimeView, Tab::XtimeSite, Tab::ServiceManual, Tab::PtsSite];
     pub fn label(self) -> &'static str {
         match self {
             Tab::XtimeView => "Xtime View",
+            Tab::XtimeSite => "Xtime RO Page",
             Tab::ServiceManual => "Service Manual",
+            Tab::PtsSite => "PTS",
         }
     }
 }

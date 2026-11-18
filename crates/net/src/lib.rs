@@ -252,6 +252,33 @@ impl Http {
         gone.into_iter().map(|(n, _, _)| n).collect()
     }
 
+    /// The cookies sent to an address, to hand to a web view (the pages inside the app's window, crates/webpane):
+    /// never logged
+    pub fn cookies_for(&self, url: &Url) -> Vec<SiteCookie> {
+        let store = self.jar.lock().expect("cookie store lock");
+        let host = url.host_str().unwrap_or_default().to_string();
+        store
+            .matches(url)
+            .into_iter()
+            .map(|c| SiteCookie {
+                name: c.name().to_string(),
+                value: c.value().to_string(),
+                // (a cookie for the site and the places under it: ".coxautoinc.com"; else just this host)
+                domain: c
+                    .domain()
+                    .map(|d| format!(".{}", d.trim_start_matches('.')))
+                    .unwrap_or_else(|| host.clone()),
+                path: c.path().unwrap_or("/").to_string(),
+                secure: c.secure().unwrap_or(false),
+                http_only: c.http_only().unwrap_or(false),
+                expires: match c.expires {
+                    cookie_store::CookieExpiration::AtUtc(t) => Some(t.unix_timestamp()),
+                    cookie_store::CookieExpiration::SessionEnd => None,
+                },
+            })
+            .collect()
+    }
+
     /// Whether there are any cookies for an address (a sign-in, as far as the app can tell without asking)
     pub fn has_cookies(&self, url: &Url) -> bool {
         let store = self.jar.lock().expect("cookie store lock");

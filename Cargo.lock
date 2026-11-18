@@ -1262,6 +1262,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "21d8ad60dd5b13a4ee6bd8fa2d5d88965c597c67bce32b5fc49c94f55cb50810"
 
 [[package]]
+name = "diag-ui"
+version = "0.5.0"
+dependencies = [
+ "chrono",
+ "ford",
+ "iced",
+ "ui-kit",
+ "vci",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4538,6 +4549,7 @@ name = "pts-workbench"
 version = "0.5.0"
 dependencies = [
  "chrono",
+ "diag-ui",
  "feedback",
  "flate2",
  "ford",
@@ -4555,7 +4567,7 @@ dependencies = [
  "tokio",
  "ui-kit",
  "ureq",
- "vci",
+ "webpane",
  "windows-sys 0.59.0",
  "winresource",
  "workbench-net",
@@ -5374,6 +5386,7 @@ dependencies = [
 name = "signin"
 version = "0.5.0"
 dependencies = [
+ "keyring",
  "serde",
  "serde_json",
  "tao",
@@ -6841,6 +6854,20 @@ dependencies = [
  "pkg-config",
  "soup3-sys",
  "system-deps",
+]
+
+[[package]]
+name = "webpane"
+version = "0.5.0"
+dependencies = [
+ "iced",
+ "keyring",
+ "serde",
+ "serde_json",
+ "webview2-com",
+ "windows 0.58.0",
+ "workbench-net",
+ "wry",
 ]
 
 [[package]]

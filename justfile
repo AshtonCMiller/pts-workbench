@@ -11,3 +11,6 @@ dev:
 # Build the optimized application.
 build:
     cargo build --workspace --release
+
+vci:
+    cargo build -p vci-bridge --target i686-pc-windows-msvc

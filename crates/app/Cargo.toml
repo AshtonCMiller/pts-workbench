@@ -34,7 +34,9 @@ xtime-ui.workspace = true
 hours-ui.workspace = true
 ford-ui.workspace = true
 # Diagnostics: talking to the vehicle through Ford's VCI
-vci = { path = "../vci", features = ["client"]}
+diag-ui = { path = "../diag-ui" }
+# Web views for XTime & PTS Pages.
+webpane = { path = "../webpane" }
 keyring.workspace = true
 iced.workspace = true
 tokio.workspace = true

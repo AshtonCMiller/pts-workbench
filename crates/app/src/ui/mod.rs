@@ -6,7 +6,6 @@
 //!   sidebar.rs    open vehicles and your ROs
 //!   notes.rs      Notifications: the list, and the pop-up for a new one
 //!   workbench.rs  one vehicle: its tabs and the Service Manual's tabs
-//!   diag.rs       Diagnostics: the VCI, the vehicle plugged in, the network test
 //!   settings.rs   first setup and Settings
 //!   feedback.rs   Feedback: send a bug or an idea, your reports, everyone's (the admin)
 //!   print_window.rs  the app's Print window: a preview of every page, the printer, copies
@@ -19,7 +18,6 @@
 pub use ui_kit::{anim, pill, style};
 
 mod bottombar;
-mod diag;
 mod feedback;
 pub mod lines;
 mod notes;
@@ -32,7 +30,7 @@ mod workbench;
 
 pub use settings::focus_first_field;
 
-use iced::widget::{column, container, row, text};
+use iced::widget::{button, column, container, row, text};
 use iced::{Element, Length};
 
 use crate::app::{App, Message, Mode, Overlay, Screen};
@@ -46,9 +44,9 @@ pub fn view(app: &App) -> Element<'_, Message> {
         Screen::Main => {
             let main: Element<'_, Message> = match mode {
                 // your ROs as Xtime's dashboard has them (crates/xtime-ui)
-                Mode::Xtime => anim::page(xtime_ui::my_ros::dashboard(&app.my_ros, &app.search).map(Message::from), phase).into(),
+                Mode::Xtime => anim::page(xtime_page(app), phase).into(),
                 Mode::Workbench => anim::page(workbench::view(app), phase).into(),
-                Mode::Diagnostics => anim::page(diag::view(app), phase).into(),
+                Mode::Diagnostics => anim::page(diag_ui::view(&app.diag, app.diag_ro()).map(Message::Vci), phase).into(),
             };
             // My ROs and Chat slide in and out of their sides
             row![
@@ -119,6 +117,44 @@ fn chat(app: &App) -> Element<'_, Message> {
     };
     container(xtime_ui::chat::panel(&app.chat_panel, shown).map(Message::Chat))
         .width(CHAT_WIDTH)
+        .height(Length::Fill)
+        .into()
+}
+
+/// The Xtime page: the app's dashboard of your ROs (crates/xtime-ui), or Xtime's own dashboard (the website, inside
+/// the app), switched at the top
+fn xtime_page(app: &App) -> Element<'_, Message> {
+    let site = app.settings.xtime_site;
+    let pick = row![
+        button(text("My ROs").size(12))
+            .padding([4, 12])
+            .style(style::toggle(!site))
+            .on_press(Message::XtimeSite(false)),
+        button(text("Xtime's dashboard").size(12))
+            .padding([4, 12])
+            .style(style::toggle(site))
+            .on_press(Message::XtimeSite(true)),
+    ]
+    .spacing(4);
+    let mut bar = iced::widget::Row::new()
+        .spacing(8)
+        .align_y(iced::Alignment::Center)
+        .push(pick)
+        .push(iced::widget::horizontal_space());
+    if site {
+        bar = bar.push(
+            button(text("Reload").size(12))
+                .padding([4, 10])
+                .style(style::ghost)
+                .on_press(Message::ReloadPane),
+        );
+    }
+    let body: Element<'_, Message> = if site {
+        workbench::site_room(app, "xtime-dashboard".into(), app.sample_data)
+    } else {
+        xtime_ui::my_ros::dashboard(&app.my_ros, &app.search).map(Message::from)
+    };
+    column![container(bar).padding([6, 12]).width(Length::Fill), body]
         .height(Length::Fill)
         .into()
 }

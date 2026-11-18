@@ -117,8 +117,46 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 .into()
         }
         Tab::ServiceManual => container(manual(ws, manual_tab)).width(Length::Fill).height(Length::Fill).into(),
+        // the websites themselves (crates/webpane: a web view over this room)
+        Tab::XtimeSite | Tab::PtsSite => site(app, tab, &ws.ro.ro, ws.is_sample()),
     };
     page.push(anim::page(content, app.inner.phase)).into()
+}
+
+/// Xtime's own RO page or PTS: a bar to reload it, then the room the page shows in
+fn site<'a>(app: &'a App, tab: Tab, ro: &str, sample: bool) -> Element<'a, Message> {
+    let what = if tab == Tab::PtsSite {
+        "PTS, opened on this vehicle"
+    } else {
+        "Xtime's own RO page"
+    };
+    let bar = row![
+        text(what).size(12).style(style::muted),
+        horizontal_space(),
+        button(text("Reload").size(12))
+            .padding([3, 10])
+            .style(style::ghost)
+            .on_press(Message::ReloadPane),
+    ]
+    .align_y(Alignment::Center)
+    .padding([4, 10]);
+    column![bar, site_room(app, crate::app::pane_id(tab, ro), sample)].into()
+}
+
+/// The room a website shows in (what's drawn there: until it's over it, or why it can't be)
+pub fn site_room<'a>(app: &'a App, id: String, sample: bool) -> Element<'a, Message> {
+    let note = if sample {
+        "The sample ROs aren't real: connect Xtime to see its pages.".to_string()
+    } else {
+        app.pane_error.clone().unwrap_or_else(|| "Opening…".into())
+    };
+    webpane::hole(
+        id,
+        container(text(note).style(style::muted))
+            .center_x(Length::Fill)
+            .center_y(Length::Fill),
+        Message::PanePlace,
+    )
 }
 
 /// One label / value line of a card

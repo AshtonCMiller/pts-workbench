@@ -1,0 +1,14 @@
+[package]
+name = "diag-ui"
+description = "Diagnostics mode: Basic vehicle communications"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+vci = { path = "../vci", features = ["client"] }
+ford.workspace = true
+ui-kit.workspace = true
+iced.workspace = true
+chrono.workspace = true

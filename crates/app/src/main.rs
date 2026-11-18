@@ -21,7 +21,6 @@
 
 mod app;
 mod clock;
-mod diag;
 mod notes;
 mod print;
 mod reports;
@@ -39,6 +38,10 @@ mod whats_new;
 mod workspace;
 
 fn main() -> iced::Result {
+    // how the window's drawn (Settings → Graphics), before it opens
+    settings::Settings::load().graphics.apply();
+    // Diagnostics' log (what happened, without the VIN) in the app's folder
+    diag_ui::set_log_dir(settings::app_dir());
     let ran = iced::application(app::App::title, app::App::update, app::App::view)
         .theme(app::App::theme)
         .subscription(app::App::subscription)

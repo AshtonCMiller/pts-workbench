@@ -1,0 +1,23 @@
+[package]
+name = "webpane"
+description = "Websites inside the app's window"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+iced.workspace = true
+wry.workspace = true
+# the sign-ins the app has (handed to a page when it opens)
+workbench-net.workspace = true
+# saved logins (the sign-in window's logins.rs): kept by Windows Credential Manager
+keyring.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+# Windows: the web view (WebView2) handed the app's sign-in cookies (wry has no way to yet). The same versions wry 0.47
+# uses, so the types match.
+[target.'cfg(windows)'.dependencies]
+webview2-com = "0.33"
+windows = { version = "0.58", features = ["Win32_Foundation"] }

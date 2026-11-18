@@ -1,19 +1,19 @@
-//! Diagnostics: the VCI and the vehicle plugged into it (crates/app/src/diag.rs has the steps), in tabs:
+//! What Diagnostics looks like (lib.rs has the steps), in tabs:
 //!
 //!   Vehicle ID   the VCI (connect), the vehicle (its VIN, and your RO for it), the communication log
 //!   Dashboard    once it's identified: its modules by network (a list, or the network's layout) on the left, the
 //!                applications on the right
 //!   Self Test    an application, in its own tab (every module, or one): its trouble codes, and clearing them
 
-use iced::widget::{Column, Row, Space, button, column, container, horizontal_space, pick_list, progress_bar, row, text};
+use iced::widget::{Column, Row, Space, button, column, container, horizontal_space, pick_list, progress_bar, row, text, text_input};
 use iced::{Alignment, Color, Element, Length};
 use ui_kit::scroll::scrollable;
 use vci::modules::Bus;
 use vci::scan::{Module, Status};
 
-use super::{anim, pill, style};
-use crate::app::{App, Message};
-use crate::diag::{Diag, DiagMsg, LOW_MV, Link, SelfTestApp, Tab, tag};
+use ui_kit::{anim, pill, style};
+
+use crate::{Diag, DiagMsg, LOW_MV, Link, Lookup, SelfTestApp, Tab, dtc_key, tag};
 
 const GREEN: [u8; 3] = [0x2e, 0xa0, 0x43];
 const AMBER: [u8; 3] = [0xd2, 0x99, 0x22];
@@ -27,11 +27,23 @@ fn rgb(c: [u8; 3]) -> Color {
     Color::from_rgb8(c[0], c[1], c[2])
 }
 
+/// (the screen's messages are Diagnostics' own: the app passes them on)
+type Message = DiagMsg;
+
 fn msg(m: DiagMsg) -> Message {
-    Message::Vci(m)
+    m
 }
 
-fn card<'a>(
+/// Your RO for the vehicle plugged in (the app finds it: one of yours, or one open in the Workbench)
+#[derive(Debug, Clone)]
+pub struct RoInfo {
+    pub ro: String,
+    pub tag: String,
+    /// "2017 Ford F-150"
+    pub vehicle: String,
+}
+
+pub(crate) fn card<'a>(
     title: impl iced::widget::text::IntoFragment<'a>,
     right: Element<'a, Message>,
     body: Element<'a, Message>,
@@ -51,7 +63,7 @@ fn card<'a>(
     .into()
 }
 
-fn primary<'a>(label: &'a str, on: Option<DiagMsg>) -> Element<'a, Message> {
+pub(crate) fn primary<'a>(label: &'a str, on: Option<DiagMsg>) -> Element<'a, Message> {
     button(text(label).font(style::BOLD))
         .padding([7, 16])
         .style(button::primary)
@@ -59,7 +71,7 @@ fn primary<'a>(label: &'a str, on: Option<DiagMsg>) -> Element<'a, Message> {
         .into()
 }
 
-fn ghost<'a>(label: &'a str, on: Option<DiagMsg>) -> Element<'a, Message> {
+pub(crate) fn ghost<'a>(label: &'a str, on: Option<DiagMsg>) -> Element<'a, Message> {
     button(text(label))
         .padding([6, 12])
         .style(style::ghost)
@@ -81,26 +93,27 @@ fn wire<'a>(width: impl Into<Length>, height: impl Into<Length>) -> Element<'a, 
         .into()
 }
 
-pub fn view(app: &App) -> Element<'_, Message> {
-    let d = &app.diag;
+/// Diagnostics, and your RO for the vehicle (when it's one of yours)
+pub fn view(d: &Diag, ro: Option<RoInfo>) -> Element<'_, Message> {
     let mut page = Column::new().height(Length::Fill);
     page = page.push(container(tab_strip(d).padding([6, 10])).width(Length::Fill).style(style::panel));
     if let Some(e) = &d.error {
         page = page.push(container(error_banner(e)).padding([12, 24]).center_x(Length::Fill));
     }
     let content: Element<'_, Message> = match d.tab {
-        Tab::Id => id_page(app),
+        Tab::Id => id_page(d, ro),
         Tab::Dashboard => dashboard(d),
-        Tab::App(id) => match d.app(id) {
-            Some(a) => selftest_page(d, a),
-            None => id_page(app),
+        Tab::App(id) => match (d.app(id), d.live(id)) {
+            (Some(a), _) => selftest_page(d, a),
+            (_, Some(l)) => crate::live::page(d, l),
+            _ => id_page(d, ro),
         },
     };
     page.push(anim::page(content, anim::Phase::Entering(d.tab_since))).into()
 }
 
 /// A page that scrolls, its cards centred
-fn scrolling<'a>(body: impl Into<Element<'a, Message>>, max_width: f32) -> Element<'a, Message> {
+pub(crate) fn scrolling<'a>(body: impl Into<Element<'a, Message>>, max_width: f32) -> Element<'a, Message> {
     container(scrollable(
         container(container(body).max_width(max_width)).padding(24).center_x(Length::Fill),
     ))
@@ -153,13 +166,13 @@ fn tab_strip(d: &Diag) -> Row<'_, Message> {
         items.push(tab_button("Dashboard", Tab::Dashboard, d.tab));
         tabs.push(Tab::Dashboard);
     }
-    for a in &d.apps {
-        let t = Tab::App(a.id);
+    for (id, title, working) in d.app_tabs() {
+        let t = Tab::App(id);
         let mut label = row![].spacing(6).align_y(Alignment::Center);
-        if d.testing == Some(a.id) {
+        if working {
             label = label.push(anim::dot(rgb(AMBER), true));
         }
-        label = label.push(text(a.title()));
+        label = label.push(text(title));
         items.push(
             row![
                 button(label)
@@ -169,7 +182,7 @@ fn tab_strip(d: &Diag) -> Row<'_, Message> {
                 button(text("×"))
                     .padding([6, 8])
                     .style(style::tab(d.tab == t))
-                    .on_press(msg(DiagMsg::CloseApp(a.id))),
+                    .on_press(msg(DiagMsg::CloseApp(id))),
             ]
             .align_y(Alignment::Center)
             .into(),
@@ -206,12 +219,11 @@ fn tab_strip(d: &Diag) -> Row<'_, Message> {
 
 // ---------- Vehicle ID ----------
 
-fn id_page(app: &App) -> Element<'_, Message> {
-    let d = &app.diag;
+fn id_page(d: &Diag, ro: Option<RoInfo>) -> Element<'_, Message> {
     let mut page = Column::new().spacing(16);
     page = page.push(vci_card(d));
     if d.connected() || d.vin.is_some() {
-        page = page.push(vehicle_card(app));
+        page = page.push(vehicle_card(d, ro));
     }
     page = page.push(log_card(d));
     scrolling(page, 880.0)
@@ -316,8 +328,7 @@ fn vci_card(d: &Diag) -> Element<'_, Message> {
 
 // ---------- the vehicle ----------
 
-fn vehicle_card(app: &App) -> Element<'_, Message> {
-    let d = &app.diag;
+fn vehicle_card(d: &Diag, ro: Option<RoInfo>) -> Element<'_, Message> {
     let idle = d.connected() && !d.busy();
     let mut right = row![ghost("Identify again", idle.then_some(DiagMsg::Identify))]
         .spacing(6)
@@ -338,19 +349,9 @@ fn vehicle_card(app: &App) -> Element<'_, Message> {
         ]
         .spacing(10);
         // your RO for it (one of yours, or a vehicle open in the Workbench)
-        let ro = app
-            .my_ros
-            .iter()
-            .find(|r| r.vin.eq_ignore_ascii_case(vin))
-            .or_else(|| app.open.iter().map(|w| &w.ro).find(|r| r.vin.eq_ignore_ascii_case(vin)));
         let mine: Element<'_, Message> = match ro {
             Some(r) => {
-                let what = [r.year.as_str(), r.make.as_str(), r.model.as_str()]
-                    .iter()
-                    .filter(|s| !s.is_empty())
-                    .copied()
-                    .collect::<Vec<_>>()
-                    .join(" ");
+                let what = r.vehicle;
                 let tag = if r.tag.is_empty() {
                     String::new()
                 } else {
@@ -390,36 +391,126 @@ fn vehicle_card(app: &App) -> Element<'_, Message> {
 }
 
 // ---------- the Dashboard ----------
+//
+// Laid out like FDRS's Toolbox: the network test on the left (each network a box of module tiles, colored by what
+// was found), the applications on the right (a list to search; a module picked: just its own).
 
 fn dashboard(d: &Diag) -> Element<'_, Message> {
-    let right = column![selected_card(d), applications_card(d)].spacing(16).width(320);
-    scrolling(row![modules_card(d), right].spacing(16), 1200.0)
+    scrolling(
+        row![
+            container(network_card(d)).width(Length::FillPortion(5)),
+            container(applications_card(d)).width(Length::FillPortion(6)),
+        ]
+        .spacing(16),
+        1500.0,
+    )
 }
 
-/// The codes the latest self test found in a module (none: it hasn't been read)
-fn codes_in(d: &Diag, address: u32, bus: Bus) -> Option<usize> {
-    d.apps.iter().rev().filter_map(|a| a.test.as_ref()).find_map(|t| {
-        t.modules
-            .iter()
-            .find(|m| m.address == address && m.bus == bus && m.present())
-            .map(|m| m.codes().len())
-    })
+/// The network as FDRS names it: "HS1", "HS2", "MS1", "HS3"
+fn net_name(bus: Bus) -> &'static str {
+    match bus {
+        Bus::Hs => "HS1",
+        Bus::Hs2 | Bus::Hs2b => "HS2",
+        Bus::Ms => "MS1",
+        Bus::Hs3 => "HS3",
+    }
 }
 
-fn the_selected(d: &Diag) -> Option<&Module> {
-    let (a, bus) = d.selected?;
-    d.scan.as_ref()?.modules.iter().find(|m| m.address == a && m.bus == bus)
+/// What a module's tile shows: it answered (and its codes, once a self test's read them)
+#[derive(Clone, Copy, PartialEq)]
+enum TileState {
+    Answered,
+    NoCodes,
+    Stored,
+    Current,
 }
 
-fn modules_card(d: &Diag) -> Element<'_, Message> {
-    // List | Network
+impl TileState {
+    fn color(self) -> [u8; 3] {
+        match self {
+            TileState::Answered | TileState::NoCodes => GREEN,
+            TileState::Stored => AMBER,
+            TileState::Current => RED,
+        }
+    }
+}
+
+fn tile_state(d: &Diag, address: u32, bus: Bus) -> TileState {
+    let latest = d
+        .apps
+        .iter()
+        .rev()
+        .filter_map(|a| a.test.as_ref())
+        .find_map(|t| t.modules.iter().find(|m| m.address == address && m.bus == bus && m.present()));
+    match latest.map(|m| m.codes()) {
+        None => TileState::Answered,
+        Some([]) => TileState::NoCodes,
+        Some(c) if c.iter().any(|c| c.current()) => TileState::Current,
+        Some(_) => TileState::Stored,
+    }
+}
+
+/// A module's tile: its border colored by what was found, filled when it's picked
+fn tile_style(state: TileState, selected: bool) -> impl Fn(&iced::Theme, button::Status) -> button::Style {
+    move |theme, status| {
+        let c = style::colors(theme);
+        let edge = rgb(state.color());
+        let hover = matches!(status, button::Status::Hovered | button::Status::Pressed);
+        button::Style {
+            background: Some(
+                if selected {
+                    c.sel
+                } else if hover {
+                    c.hover
+                } else {
+                    c.panel
+                }
+                .into(),
+            ),
+            text_color: theme.palette().text,
+            border: iced::Border {
+                color: if selected { c.accent } else { edge },
+                width: if selected { 2.0 } else { 1.5 },
+                radius: 6.0.into(),
+            },
+            shadow: iced::Shadow {
+                color: Color {
+                    a: if hover { 0.18 } else { 0.08 },
+                    ..Color::BLACK
+                },
+                offset: iced::Vector::new(0.0, if hover { 2.0 } else { 1.0 }),
+                blur_radius: if hover { 6.0 } else { 2.0 },
+            },
+        }
+    }
+}
+
+/// The legend: a swatch and what it means
+fn swatch<'a>(color: [u8; 3], label: &'a str) -> Element<'a, Message> {
+    row![
+        container(Space::new(10, 10)).style(move |_: &iced::Theme| container::Style {
+            background: Some(rgb(color).into()),
+            border: iced::Border {
+                radius: 3.0.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }),
+        text(label).size(11).style(style::muted),
+    ]
+    .spacing(5)
+    .align_y(Alignment::Center)
+    .into()
+}
+
+fn network_card(d: &Diag) -> Element<'_, Message> {
     let view_pick = row![
-        button(text("List").size(13))
-            .padding([5, 12])
+        button(text("Grid").size(12))
+            .padding([4, 10])
             .style(style::toggle(!d.topology))
             .on_press(msg(DiagMsg::Topology(false))),
-        button(text("Network").size(13))
-            .padding([5, 12])
+        button(text("Layout").size(12))
+            .padding([4, 10])
             .style(style::toggle(d.topology))
             .on_press(msg(DiagMsg::Topology(true))),
     ]
@@ -431,7 +522,11 @@ fn modules_card(d: &Diag) -> Element<'_, Message> {
         )
     } else {
         ghost(
-            if d.scan.is_some() { "Find again" } else { "Find modules" },
+            if d.scan.is_some() {
+                "Rerun Network Test"
+            } else {
+                "Run Network Test"
+            },
             (d.connected() && !d.busy()).then_some(DiagMsg::RunScan),
         )
     };
@@ -439,7 +534,7 @@ fn modules_card(d: &Diag) -> Element<'_, Message> {
 
     let Some(scan) = &d.scan else {
         return card(
-            "Modules",
+            "Network Test",
             right.into(),
             text(if d.connected() {
                 "Finding the vehicle's modules…"
@@ -453,12 +548,12 @@ fn modules_card(d: &Diag) -> Element<'_, Message> {
     };
     let (asked, total, on) = scan.progress();
     let mut body = column![].spacing(12);
+    // the legend (FDRS's "Network Test Results"), or how far it's got
     if d.scanning {
         let now = on
             .map(|m| match (m.listed, m.bus) {
-                (false, b) => format!("Full search: {:03X} on {}…", m.address, b.label()),
-                (true, Bus::Hs) => format!("Asking the {} ({})…", m.short, m.name),
-                (true, b) => format!("Asking the {} on {} (pins {})…", m.short, b.label(), b.pins_label()),
+                (false, b) => format!("Full search: {:03X} on {}…", m.address, net_name(b)),
+                (true, b) => format!("Asking the {} on {}…", m.short, net_name(b)),
             })
             .unwrap_or_default();
         body = body.push(
@@ -474,17 +569,26 @@ fn modules_card(d: &Diag) -> Element<'_, Message> {
         );
     } else {
         body = body.push(
-            text(format!(
-                "{} module{} found{}",
-                scan.found(),
-                plural(scan.found()),
-                if asked < total {
-                    format!(" (stopped after {asked} of {total})")
-                } else {
-                    String::new()
-                }
-            ))
-            .font(style::BOLD),
+            row![
+                text(format!(
+                    "{} module{} responded{}",
+                    scan.found(),
+                    plural(scan.found()),
+                    if asked < total {
+                        format!(" (stopped after {asked} of {total})")
+                    } else {
+                        String::new()
+                    }
+                ))
+                .size(13)
+                .font(style::BOLD),
+                horizontal_space(),
+                swatch(GREEN, "Responded"),
+                swatch(RED, "Current DTCs"),
+                swatch(AMBER, "Stored DTCs"),
+            ]
+            .spacing(12)
+            .align_y(Alignment::Center),
         );
     }
 
@@ -497,8 +601,41 @@ fn modules_card(d: &Diag) -> Element<'_, Message> {
         body = body.push(if d.topology {
             topology(d, &networks)
         } else {
-            module_list(d, &networks)
+            module_grid(d, &networks)
         });
+    }
+
+    // the module picked: what it is
+    if let Some(m) = the_selected(d) {
+        let mut info = column![
+            row![
+                text(tag(m.short, m.address)).font(style::BOLD),
+                text(m.name).size(13),
+                horizontal_space(),
+                text(format!("{:03X} on {}", m.address, net_name(m.bus)))
+                    .size(11)
+                    .font(style::MONO)
+                    .style(style::muted),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center)
+        ]
+        .spacing(4);
+        for (label, value) in [("Part", &m.part), ("Software", &m.software)] {
+            if !value.is_empty() {
+                info = info.push(
+                    row![
+                        text(label).size(12).style(style::muted).width(64),
+                        text(value.as_str()).size(12).font(style::MONO)
+                    ]
+                    .align_y(Alignment::Center),
+                );
+            }
+        }
+        if let Status::Refused(_) = m.status {
+            info = info.push(status_pill(m));
+        }
+        body = body.push(container(info).padding([10, 12]).width(Length::Fill).style(style::card_highlight));
     }
 
     // what didn't answer, and why a network's missing
@@ -509,7 +646,7 @@ fn modules_card(d: &Diag) -> Element<'_, Message> {
         .map(|m| m.short)
         .collect();
     if !silent.is_empty() && !d.scanning {
-        body = body.push(text(format!("No answer: {}", silent.join(", "))).size(12).style(style::muted));
+        body = body.push(text(format!("Not responding: {}", silent.join(", "))).size(12).style(style::muted));
     }
     if !d.scanning {
         for bus in Bus::OTHERS {
@@ -546,66 +683,212 @@ fn modules_card(d: &Diag) -> Element<'_, Message> {
             .align_y(Alignment::Center),
         );
     }
-    card("Modules", right.into(), body.into())
+    card("Network Test", right.into(), body.into())
 }
 
-/// Codes found in a module: a small count (red), or a tick when it had none
-fn codes_badge<'a>(n: Option<usize>) -> Option<Element<'a, Message>> {
-    match n {
-        Some(0) => Some(pill("No codes", GREEN)),
-        Some(n) => Some(pill(format!("{n} code{}", plural(n)), RED)),
-        None => None,
-    }
-}
-
-/// The modules under their networks, each one a row (click to select it)
-fn module_list<'a>(d: &'a Diag, networks: &[(Bus, Vec<&'a Module>)]) -> Element<'a, Message> {
-    let mut c = column![].spacing(14);
+/// Each network a box of module tiles (FDRS's layout): click one to pick it
+fn module_grid<'a>(d: &'a Diag, networks: &[(Bus, Vec<&'a Module>)]) -> Element<'a, Message> {
+    let mut c = column![].spacing(12);
     for (bus, list) in networks {
-        let mut rows = Column::new().spacing(2);
+        let mut tiles = Row::new().spacing(8);
         for m in list {
             let selected = d.selected == Some((m.address, m.bus));
-            let mut r = row![
-                text(tag(m.short, m.address)).font(style::BOLD).width(64),
-                text(m.name).size(13).width(Length::Fill),
-                text(format!("{:03X}", m.address)).size(11).font(style::MONO).style(style::muted),
-            ]
-            .spacing(10)
-            .align_y(Alignment::Center);
-            if let Some(b) = codes_badge(codes_in(d, m.address, m.bus)) {
-                r = r.push(b);
-            }
-            if let Status::Refused(_) = m.status {
-                r = r.push(status_pill(m));
-            }
-            rows = rows.push(
-                button(r)
-                    .padding([7, 10])
-                    .width(Length::Fill)
-                    .style(style::list_item(selected))
-                    .on_press(msg(DiagMsg::Select(m.address, m.bus))),
+            tiles = tiles.push(
+                button(
+                    container(text(tag(m.short, m.address)).size(13).font(style::BOLD))
+                        .center_x(Length::Fill)
+                        .center_y(Length::Fill),
+                )
+                .width(84)
+                .height(38)
+                .padding(0)
+                .style(tile_style(tile_state(d, m.address, m.bus), selected))
+                .on_press(msg(DiagMsg::Select(m.address, m.bus))),
             );
         }
         c = c.push(
             column![
                 row![
-                    text(bus.label()).size(13).font(style::BOLD),
+                    text(net_name(*bus)).size(13).font(style::BOLD),
                     text(format!("pins {}  ·  {} kbit/s", bus.pins_label(), bus.baud() / 1000))
-                        .size(12)
-                        .style(style::muted),
-                    horizontal_space(),
-                    text(format!("{} module{}", list.len(), plural(list.len())))
-                        .size(12)
+                        .size(11)
                         .style(style::muted),
                 ]
                 .spacing(8)
                 .align_y(Alignment::Center),
-                container(rows).padding(4).width(Length::Fill).style(style::panel),
+                container(tiles.wrap())
+                    .padding(10)
+                    .width(Length::Fill)
+                    .style(|t: &iced::Theme| container::Style {
+                        border: iced::Border {
+                            color: style::colors(t).line,
+                            width: 1.0,
+                            radius: 8.0.into(),
+                        },
+                        ..Default::default()
+                    }),
             ]
             .spacing(6),
         );
     }
     c.into()
+}
+
+/// One of the applications: what it does, and the module it's for (none: every module)
+struct Application {
+    name: String,
+    target: Option<(vci::modules::Entry, Bus)>,
+    open: DiagMsg,
+}
+
+fn applications(d: &Diag) -> Vec<Application> {
+    let mut list = vec![
+        Application {
+            name: "All Modules - Self Test (read and clear DTCs)".into(),
+            target: None,
+            open: DiagMsg::OpenSelfTest(None),
+        },
+        Application {
+            name: "DataLogger (live PIDs from up to 5 modules)".into(),
+            target: None,
+            open: DiagMsg::OpenLogger,
+        },
+    ];
+    if let Some(scan) = &d.scan {
+        for m in scan.modules.iter().filter(|m| m.present()) {
+            let who = format!("{} - {}", tag(m.short, m.address), m.name);
+            list.push(Application {
+                name: format!("{who} - Self Test"),
+                target: Some(m.entry()),
+                open: DiagMsg::OpenSelfTest(Some(m.entry())),
+            });
+        }
+    }
+    list
+}
+
+/// The applications (FDRS's list on the right): searched, and a module picked shows just its own. Each opens in its
+/// own tab.
+fn applications_card(d: &Diag) -> Element<'_, Message> {
+    let search = text_input("Search", &d.app_search)
+        .on_input(|s| msg(DiagMsg::AppSearch(s)))
+        .size(13)
+        .padding([5, 10])
+        .width(200);
+
+    // All | the module picked
+    let picked = the_selected(d);
+    let mut filters = row![
+        button(text("All").size(12))
+            .padding([4, 12])
+            .style(style::toggle(picked.is_none()))
+            .on_press_maybe(picked.map(|m| msg(DiagMsg::Select(m.address, m.bus)))),
+    ]
+    .spacing(4)
+    .align_y(Alignment::Center);
+    if let Some(m) = picked {
+        filters = filters.push(
+            button(
+                row![text(tag(m.short, m.address)).size(12).font(style::BOLD), text("×").size(12)]
+                    .spacing(6)
+                    .align_y(Alignment::Center),
+            )
+            .padding([4, 12])
+            .style(style::toggle(true))
+            .on_press(msg(DiagMsg::Select(m.address, m.bus))),
+        );
+    }
+
+    let words = d.app_search.trim().to_lowercase();
+    let shown: Vec<Application> = applications(d)
+        .into_iter()
+        .filter(|a| match (picked, a.target) {
+            (Some(m), Some(((addr, _, _), bus))) => addr == m.address && bus == m.bus,
+            (Some(_), None) => false,
+            (None, _) => true,
+        })
+        .filter(|a| words.is_empty() || a.name.to_lowercase().contains(&words))
+        .collect();
+
+    let mut rows = Column::new();
+    if shown.is_empty() {
+        rows = rows.push(container(text("No applications match.").size(13).style(style::muted)).padding([12, 14]));
+    }
+    for (i, a) in shown.into_iter().enumerate() {
+        let open = d.connected().then(|| msg(a.open));
+        rows = rows.push(
+            button(
+                row![
+                    text(a.name).size(13).width(Length::Fill),
+                    text("Open")
+                        .size(12)
+                        .font(style::BOLD)
+                        .style(|t: &iced::Theme| iced::widget::text::Style {
+                            color: Some(style::colors(t).accent),
+                        }),
+                ]
+                .spacing(10)
+                .align_y(Alignment::Center),
+            )
+            .padding([9, 14])
+            .width(Length::Fill)
+            .style(move |t: &iced::Theme, s: button::Status| {
+                let c = style::colors(t);
+                let hover = matches!(s, button::Status::Hovered | button::Status::Pressed);
+                button::Style {
+                    background: Some(
+                        if hover {
+                            c.sel
+                        } else if i % 2 == 1 {
+                            c.hover
+                        } else {
+                            c.panel
+                        }
+                        .into(),
+                    ),
+                    text_color: if matches!(s, button::Status::Disabled) {
+                        c.muted
+                    } else {
+                        t.palette().text
+                    },
+                    ..Default::default()
+                }
+            })
+            .on_press_maybe(open),
+        );
+    }
+    let table = container(rows)
+        .width(Length::Fill)
+        .clip(true)
+        .style(|t: &iced::Theme| container::Style {
+            border: iced::Border {
+                color: style::colors(t).line,
+                width: 1.0,
+                radius: 8.0.into(),
+            },
+            ..Default::default()
+        });
+
+    let mut body = column![filters, table].spacing(10);
+    if !d.connected() {
+        body = body.push(text("Connect to the vehicle to open one.").size(12).style(style::muted));
+    }
+    card("Applications", search.into(), body.into())
+}
+
+/// The codes the latest self test found in a module (none: it hasn't been read)
+fn codes_in(d: &Diag, address: u32, bus: Bus) -> Option<usize> {
+    d.apps.iter().rev().filter_map(|a| a.test.as_ref()).find_map(|t| {
+        t.modules
+            .iter()
+            .find(|m| m.address == address && m.bus == bus && m.present())
+            .map(|m| m.codes().len())
+    })
+}
+
+fn the_selected(d: &Diag) -> Option<&Module> {
+    let (a, bus) = d.selected?;
+    d.scan.as_ref()?.modules.iter().find(|m| m.address == a && m.bus == bus)
 }
 
 /// The network's layout: from the DLC's pins, a wire to each network, its modules along it
@@ -670,127 +953,6 @@ fn topology<'a>(d: &'a Diag, networks: &[(Bus, Vec<&'a Module>)]) -> Element<'a,
         );
     }
     container(c).padding(12).width(Length::Fill).style(style::panel).into()
-}
-
-/// The module clicked: what it is, and its self test
-fn selected_card(d: &Diag) -> Element<'_, Message> {
-    let Some(m) = the_selected(d) else {
-        return card(
-            "Module",
-            Space::with_width(0).into(),
-            text("Click a module to see its part number and software, and to self test just that one.")
-                .size(13)
-                .style(style::muted)
-                .into(),
-        );
-    };
-    let mut c = column![
-        text(m.name).size(14),
-        text(format!("{:03X} on {}", m.address, m.bus.full_label()))
-            .size(12)
-            .font(style::MONO)
-            .style(style::muted),
-    ]
-    .spacing(6);
-    if !m.part.is_empty() {
-        c = c.push(
-            row![
-                text("Part").size(12).style(style::muted).width(64),
-                text(m.part.as_str()).size(13).font(style::MONO)
-            ]
-            .align_y(Alignment::Center),
-        );
-    }
-    if !m.software.is_empty() {
-        c = c.push(
-            row![
-                text("Software").size(12).style(style::muted).width(64),
-                text(m.software.as_str()).size(13).font(style::MONO)
-            ]
-            .align_y(Alignment::Center),
-        );
-    }
-    if let Status::Refused(code) = m.status {
-        c = c.push(
-            text(format!("Wouldn't say who it is: {}", vci::uds::refusal(code)))
-                .size(12)
-                .style(style::muted),
-        );
-    }
-    if let Some(b) = codes_badge(codes_in(d, m.address, m.bus)) {
-        c = c.push(b);
-    }
-    let what = format!("Self test the {}", tag(m.short, m.address));
-    c = c.push(
-        button(text(what).font(style::BOLD))
-            .padding([7, 16])
-            .width(Length::Fill)
-            .style(button::primary)
-            .on_press(msg(DiagMsg::OpenSelfTest(Some(m.entry())))),
-    );
-    container(
-        column![
-            row![
-                text(tag(m.short, m.address)).size(16).font(style::BOLD),
-                horizontal_space(),
-                button(text("×"))
-                    .padding([2, 8])
-                    .style(style::ghost)
-                    .on_press(msg(DiagMsg::Select(m.address, m.bus)))
-            ]
-            .align_y(Alignment::Center),
-            c
-        ]
-        .spacing(10),
-    )
-    .padding(18)
-    .width(Length::Fill)
-    .style(style::card)
-    .into()
-}
-
-/// An application on the Dashboard's list
-fn app_row<'a>(title: &'a str, about: String, on: DiagMsg) -> Element<'a, Message> {
-    button(
-        row![
-            column![text(title).font(style::BOLD), text(about).size(12).style(style::muted)]
-                .spacing(2)
-                .width(Length::Fill),
-            text("›").size(20).style(style::muted),
-        ]
-        .spacing(8)
-        .align_y(Alignment::Center),
-    )
-    .padding([10, 12])
-    .width(Length::Fill)
-    .style(style::list_item(false))
-    .on_press(msg(on))
-    .into()
-}
-
-/// What can be done with the vehicle: each opens in its own tab
-fn applications_card(d: &Diag) -> Element<'_, Message> {
-    let found = d.scan.as_ref().filter(|s| s.done()).map(|s| s.found()).unwrap_or(0);
-    let list = column![app_row(
-        "Self Test",
-        if found > 0 {
-            format!("Read and clear the trouble codes in all {found} modules")
-        } else {
-            "Read and clear every module's trouble codes".into()
-        },
-        DiagMsg::OpenSelfTest(None),
-    )]
-    .spacing(2);
-    card(
-        "Applications",
-        Space::with_width(0).into(),
-        column![
-            container(list).padding(4).width(Length::Fill).style(style::panel),
-            text("Each opens in its own tab.").size(12).style(style::muted)
-        ]
-        .spacing(8)
-        .into(),
-    )
 }
 
 // ---------- Self Test ----------
@@ -904,6 +1066,30 @@ fn selftest_page<'a>(d: &'a Diag, app: &'a SelfTestApp) -> Element<'a, Message> 
             )
         };
         body = body.push(text(summary).font(style::BOLD));
+        // what the codes mean comes from Ford's search: why it couldn't say
+        let failed = t
+            .modules
+            .iter()
+            .flat_map(|m| m.codes().iter().map(|c| dtc_key(c, m.short)))
+            .find_map(|k| match d.dtcs.get(&k) {
+                Some(Lookup::Failed(e)) => Some(e.clone()),
+                _ => None,
+            });
+        if let Some(e) = failed {
+            body = body.push(
+                text(format!(
+                    "Couldn't look up what the codes mean ({e}). Find Pinpoint Test still searches the Service Manual."
+                ))
+                .size(12)
+                .style(style::muted),
+            );
+        } else if d.vin.is_none() && t.total_codes() > 0 {
+            body = body.push(
+                text("Without the VIN, the codes can't be looked up in the Service Manual.")
+                    .size(12)
+                    .style(style::muted),
+            );
+        }
     }
     // each module with codes, its codes under it
     for m in t.modules.iter().filter(|m| !m.codes().is_empty()) {
@@ -922,7 +1108,7 @@ fn selftest_page<'a>(d: &'a Diag, app: &'a SelfTestApp) -> Element<'a, Message> 
         ]
         .spacing(6);
         for c in m.codes() {
-            list = list.push(code_row(c));
+            list = list.push(code_row(d, c, m.short));
         }
         body = body.push(container(list).padding([10, 12]).width(Length::Fill).style(style::panel));
     }
@@ -958,7 +1144,9 @@ fn selftest_page<'a>(d: &'a Diag, app: &'a SelfTestApp) -> Element<'a, Message> 
 
 // ---------- shared ----------
 
-fn code_row(c: &vci::dtc::Dtc) -> Element<'_, Message> {
+/// A code: what it means (Ford's description, or its failure type until that's in), its status, and its pinpoint test
+fn code_row<'a>(d: &'a Diag, c: &'a vci::dtc::Dtc, short: &str) -> Element<'a, Message> {
+    let key = dtc_key(c, short);
     let mut tags = row![].spacing(6).align_y(Alignment::Center);
     for w in c.status_words() {
         let color = match w {
@@ -968,13 +1156,38 @@ fn code_row(c: &vci::dtc::Dtc) -> Element<'_, Message> {
         };
         tags = tags.push(pill(w, color));
     }
+    let ft = vci::dtc::failure_type(c.ft).map(|f| f.to_string()).unwrap_or_default();
+    let lookup = d.dtcs.get(&key);
+    let mut about = column![].spacing(2).width(Length::Fill);
+    match lookup {
+        Some(Lookup::Found(l)) if !l.description.is_empty() => {
+            about = about.push(text(l.description.clone()).size(13));
+            if let Some((_, title)) = &l.pinpoint {
+                about = about.push(text(title.clone()).size(11).style(style::muted));
+            } else if !ft.is_empty() && !l.description.to_lowercase().contains(&ft) {
+                about = about.push(text(ft).size(11).style(style::muted));
+            }
+        }
+        Some(Lookup::Asking) => {
+            about = about.push(
+                row![anim::dot(rgb(GREY), true), text("Looking it up…").size(13).style(style::muted)]
+                    .spacing(6)
+                    .align_y(Alignment::Center),
+            );
+        }
+        _ => {
+            about = about.push(text(ft).size(13).style(style::muted));
+        }
+    }
+    let can_find = d.vin.is_some() && !matches!(lookup, Some(Lookup::Asking));
     row![
         text(c.full()).font(style::MONO).width(110),
-        text(vci::dtc::failure_type(c.ft).map(|f| f.to_string()).unwrap_or_default())
-            .size(13)
-            .style(style::muted)
-            .width(Length::Fill),
+        about,
         tags,
+        button(text("Find Pinpoint Test").size(12))
+            .padding([5, 10])
+            .style(style::ghost)
+            .on_press_maybe(can_find.then(|| msg(DiagMsg::FindPinpoint(key)))),
     ]
     .spacing(10)
     .align_y(Alignment::Center)

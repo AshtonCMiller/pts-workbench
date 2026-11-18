@@ -70,7 +70,9 @@ pub struct Saved {
 fn tab_kind(t: Tab) -> &'static str {
     match t {
         Tab::XtimeView => "xview",
+        Tab::XtimeSite => "xtime",
         Tab::ServiceManual => "service",
+        Tab::PtsSite => "pts",
     }
 }
 
@@ -112,9 +114,12 @@ fn read_entry(e: &Value) -> Option<SavedVehicle> {
     }
     let (mut tab, mut manual) = (Tab::XtimeView, ManualTab::Oasis);
     if let Some(rs) = e.get("rs").filter(|v| v.is_object()) {
-        if s(&rs["tab"]) == "service" {
-            tab = Tab::ServiceManual;
-        }
+        tab = match s(&rs["tab"]).as_str() {
+            "service" => Tab::ServiceManual,
+            "xtime" => Tab::XtimeSite,
+            "pts" => Tab::PtsSite,
+            _ => Tab::XtimeView,
+        };
         manual = manual_of(&s(&rs["manual"])).unwrap_or(ManualTab::Oasis);
     } else if let Some(tabs) = e["tabs"].as_array() {
         // the Electron app's: the tab it showed, and the Service Manual's tab it was on
@@ -126,6 +131,10 @@ fn read_entry(e: &Value) -> Option<SavedVehicle> {
         }
         if active == "service" || manual_of(&active).is_some() {
             tab = Tab::ServiceManual;
+        } else if active == "xtime" {
+            tab = Tab::XtimeSite;
+        } else if active == "pts" {
+            tab = Tab::PtsSite;
         }
     }
     Some(SavedVehicle {

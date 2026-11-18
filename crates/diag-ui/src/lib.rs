@@ -1,4 +1,10 @@
-//! Diagnostics: the vehicle plugged in through Ford's VCI (VCM 3, or the VCMM), the way IDS / FDRS reach it.
+//! Diagnostics (the app's mode next to Workbench): the vehicle plugged in through Ford's VCI (VCM 3, or the VCMM), the
+//! way IDS / FDRS reach it. Its own crate: the app shows [`view`], passes its messages to [`Diag::update`], and does
+//! what comes back as [`Out`] (open an RO, copy, ask Ford's search about a code).
+//!
+//!   lib.rs   the steps (below), the tabs and the Self Test
+//!   live.rs  DataLogger: live PIDs from up to five modules
+//!   view.rs  what it looks like
 //!
 //!   1. Find the VCI: the J2534 interfaces Windows has (Ford's VCI Software installs them), the VCM 3 picked first.
 //!   2. Connect: the VCI opened, the battery voltage read, the high-speed CAN bus joined (OBD pins 6 / 14).
@@ -8,10 +14,11 @@
 //!      gateway, on its other networks' pins too (MS-CAN 3 / 11, HS-CAN2 8 / 12, HS-CAN3 1 / 9). The full search
 //!      asks every other diagnostic address as well.
 //!   5. Self test: each module's trouble codes; and clearing them, when you ask (crates/vci/dtc.rs).
+//!   6. DataLogger: live PIDs (OBD-II's: engine speed, temperatures, fuel trims…) from up to five modules, graphed.
 //!
 //! Its tabs: Vehicle ID (connect, the VIN), the Dashboard once the vehicle's identified (its modules by network,
 //! or as a drawing of the networks; the applications), and each application opened (Self Test, for every module or
-//! one).
+//! one; the DataLogger).
 //!
 //! All of it through the 32-bit helper (crates/vci-bridge), asked one thing at a time. Only reads, and clearing codes
 //! after you confirm: nothing on the vehicle is written or programmed.
@@ -19,16 +26,32 @@
 //! The communication log (each request and answer) has the VIN in it, so it stays in the app: shown here, copied
 //! only when asked. diagnostics.log gets what happened, without the VIN.
 
+mod live;
+mod view;
+
+use std::collections::{HashMap, VecDeque};
 use std::io::Write;
+use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::time::Instant;
 
 use iced::Task;
 use vci::client::Bridge;
-use vci::dtc::SelfTest;
+use vci::dtc::{Dtc, SelfTest};
 use vci::modules::{self, Bus};
 use vci::proto::{Device, Reply, Request};
 use vci::scan::Scan;
 use vci::uds;
+
+pub use live::{DataLogger, LiveMsg};
+pub use view::{RoInfo, view};
+
+/// Where diagnostics.log goes (the app's folder: set once, when the app starts)
+static LOG_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+pub fn set_log_dir(dir: PathBuf) {
+    let _ = LOG_DIR.set(dir);
+}
 
 /// Run from source (a debug build): the demo vehicle is offered beside the real VCIs
 pub const DEMO: bool = cfg!(debug_assertions);
@@ -77,9 +100,19 @@ pub struct Diag {
     next_app: u64,
     /// The application tab whose self test is running
     pub testing: Option<u64>,
+    /// The Live Data tabs, and the one reading
+    pub lives: Vec<DataLogger>,
+    pub live_running: Option<u64>,
     /// The Dashboard: the networks drawn (rather than listed); the module picked
     pub topology: bool,
     pub selected: Option<(u32, Bus)>,
+    /// The Dashboard's applications: what's typed in their search
+    pub app_search: String,
+    /// What Ford's search says about each code found (by [`dtc_key`]): its description and pinpoint test. Asked one
+    /// at a time, after a self test.
+    pub dtcs: HashMap<String, Lookup>,
+    lookups: VecDeque<String>,
+    looking_up: bool,
     /// Stop asked for: stops after the request it's on
     pub stopping: bool,
     pub error: Option<String>,
@@ -110,8 +143,14 @@ impl Default for Diag {
             apps: Vec::new(),
             next_app: 1,
             testing: None,
+            lives: Vec::new(),
+            live_running: None,
             topology: false,
             selected: None,
+            app_search: String::new(),
+            dtcs: HashMap::new(),
+            lookups: VecDeque::new(),
+            looking_up: false,
             stopping: false,
             error: None,
             log: Vec::new(),
@@ -149,6 +188,70 @@ pub fn tag(short: &str, address: u32) -> String {
     } else {
         short.to_string()
     }
+}
+
+/// What Ford's search says about a trouble code: what it means, and its pinpoint test (where it is, its title)
+#[derive(Debug, Clone)]
+pub struct DtcLookup {
+    pub description: String,
+    pub pinpoint: Option<(ford::doc::ProcLink, String)>,
+}
+
+#[derive(Debug, Clone)]
+pub enum Lookup {
+    Asking,
+    Found(DtcLookup),
+    Failed(String),
+}
+
+/// A code as Ford's search reads it, with the module it's in: "B10D7:15:BCM", "P0420:PCM" (Ford's descriptions and
+/// pinpoint tests differ by module: a U-code means something else in each). A module that's not on the app's list:
+/// just the code.
+pub fn dtc_key(c: &Dtc, short: &str) -> String {
+    let module =
+        (short != modules::UNLISTED.0 && (2..=12).contains(&short.len()) && short.bytes().all(|b| b.is_ascii_uppercase())).then_some(short);
+    match (c.ft, module) {
+        (0, Some(m)) => format!("{}:{m}", c.code),
+        (0, None) => c.code.clone(),
+        (ft, Some(m)) => format!("{}:{ft:02X}:{m}", c.code),
+        (ft, None) => format!("{}:{ft:02X}", c.code),
+    }
+}
+
+/// Ford's search for one code (pinpoint tests only): its description, and the pinpoint test that comes first. Asked
+/// with its module first; then without it, if Ford had nothing.
+pub async fn look_up(ford: ford::Ford, vin: String, key: String) -> Result<DtcLookup, String> {
+    use ford::diagnostics::DiagRequest;
+    let ask = |dtc: &str| DiagRequest {
+        dtcs: vec![dtc.to_string()],
+        sources: vec!["wsmppt".into()],
+        rows: 5,
+        ..Default::default()
+    };
+    let mut page = ford.diag_search(&vin, &ask(&key)).await.map_err(|e| e.to_string())?;
+    let code = key.split(':').next().unwrap_or_default().to_string();
+    // (the module's the part in letters: "BCM")
+    let without_module = key
+        .split(':')
+        .filter(|p| !(p.len() > 2 && p.bytes().all(|b| b.is_ascii_uppercase())))
+        .collect::<Vec<_>>()
+        .join(":");
+    if page.dtc_info.iter().all(|i| i.description.is_empty()) && page.results.is_empty() && without_module != key {
+        page = ford.diag_search(&vin, &ask(&without_module)).await.map_err(|e| e.to_string())?;
+    }
+    let description = page
+        .dtc_info
+        .iter()
+        .find(|i| i.name.to_ascii_uppercase().starts_with(&code) && !i.description.is_empty())
+        .or_else(|| page.dtc_info.iter().find(|i| !i.description.is_empty()))
+        .map(|i| i.description.clone())
+        .unwrap_or_default();
+    let pinpoint = page
+        .results
+        .iter()
+        .find(|r| r.source == "wsmppt" && r.proc.is_some())
+        .and_then(|r| Some((r.proc.clone()?, r.title.clone())));
+    Ok(DtcLookup { description, pinpoint })
 }
 
 impl SelfTestApp {
@@ -202,8 +305,13 @@ pub enum DiagMsg {
     /// The Dashboard: networks drawn or listed; a module picked (again: let go)
     Topology(bool),
     Select(u32, Bus),
+    /// The applications' search
+    AppSearch(String),
     /// A Self Test tab opened: every module, or one (read straight away)
     OpenSelfTest(Option<(modules::Entry, Bus)>),
+    /// The DataLogger's tab opened (the Dashboard's module picked in it, the first time), and its own messages
+    OpenLogger,
+    Live(u64, LiveMsg),
     /// Self test (in its tab): read the codes; stop; clear them (asks first); one module's answer
     RunSelfTest(u64),
     StopSelfTest,
@@ -213,6 +321,10 @@ pub enum DiagMsg {
     SelfTested(u64, vci::scan::Ask, Result<Option<Vec<u8>>, String>),
     /// The codes found, as text (for the RO's story)
     CopyCodes(u64),
+    /// Ford's search about a code (the VIN it was for, its key, what it said)
+    LookedUp(String, String, Result<DtcLookup, String>),
+    /// "Find Pinpoint Test" (a code's key): its pinpoint test in the Workbench (or the Service Manual's search for it)
+    FindPinpoint(String),
     ToggleLog,
     CopyLog,
     ClearLog,
@@ -226,6 +338,22 @@ pub enum Out {
     None,
     OpenRo(String),
     Copy(String),
+    /// Ask Ford's search about a code (the VIN, its key): answered with [`DiagMsg::LookedUp`]
+    LookUp {
+        vin: String,
+        key: String,
+    },
+    /// A pinpoint test, in the Workbench (the vehicle's RO)
+    OpenPinpoint {
+        vin: String,
+        link: ford::doc::ProcLink,
+        title: String,
+    },
+    /// No pinpoint test known: the Service Manual's Diagnostics search for the code
+    SearchDtc {
+        vin: String,
+        query: String,
+    },
 }
 
 /// The helper's own errors as errors
@@ -241,7 +369,8 @@ fn note(line: &str) {
     if cfg!(test) {
         return;
     }
-    let path = crate::settings::app_dir().join("diagnostics.log");
+    let Some(dir) = LOG_DIR.get() else { return };
+    let path = dir.join("diagnostics.log");
     // kept short: started again past 1 MB
     if std::fs::metadata(&path).is_ok_and(|m| m.len() > 1_000_000) {
         let _ = std::fs::remove_file(&path);
@@ -324,7 +453,12 @@ impl Diag {
 
     /// Busy with something that has to finish before the next thing
     pub fn busy(&self) -> bool {
-        self.looking || self.link == Link::Connecting || self.identifying || self.scanning || self.testing.is_some()
+        self.looking
+            || self.link == Link::Connecting
+            || self.identifying
+            || self.scanning
+            || self.testing.is_some()
+            || self.live_running.is_some()
     }
 
     /// The chosen interface
@@ -362,6 +496,22 @@ impl Diag {
 
     pub fn app(&self, id: u64) -> Option<&SelfTestApp> {
         self.apps.iter().find(|a| a.id == id)
+    }
+
+    pub fn live(&self, id: u64) -> Option<&DataLogger> {
+        self.lives.iter().find(|a| a.id == id)
+    }
+
+    /// Every application's tab, in the order opened: its ID, title, and whether it's working now
+    pub fn app_tabs(&self) -> Vec<(u64, String, bool)> {
+        let mut tabs: Vec<(u64, String, bool)> = self
+            .apps
+            .iter()
+            .map(|a| (a.id, a.title(), self.testing == Some(a.id)))
+            .chain(self.lives.iter().map(|l| (l.id, l.title(), self.live_running == Some(l.id))))
+            .collect();
+        tabs.sort_by_key(|t| t.0);
+        tabs
     }
 
     /// The modules found (by the network test), in order
@@ -458,7 +608,12 @@ impl Diag {
                 self.millivolts = None;
                 // (a new vehicle: its tabs start again)
                 self.apps.clear();
+                self.lives.clear();
+                self.live_running = None;
                 self.selected = None;
+                self.dtcs.clear();
+                self.lookups.clear();
+                self.looking_up = false;
                 self.go(Tab::Id);
                 let t0 = self.t0();
                 self.push_log(format!("{}  ··  Opening {} ({})", stamp(t0), d.name, d.dll));
@@ -502,7 +657,7 @@ impl Diag {
                 }
             },
             DiagMsg::Disconnect => {
-                self.stopping = self.scanning || self.testing.is_some();
+                self.stopping = self.scanning || self.testing.is_some() || self.live_running.is_some();
                 let b = self.bridge.clone();
                 none(Task::perform(
                     async move {
@@ -523,6 +678,7 @@ impl Diag {
                 self.identifying = false;
                 self.scanning = false;
                 self.testing = None;
+                self.live_running = None;
                 for a in &mut self.apps {
                     a.confirm_clear = false;
                 }
@@ -721,26 +877,52 @@ impl Diag {
                 if self.testing == Some(id) {
                     self.stopping = true;
                 }
-                if let Some(i) = self.apps.iter().position(|a| a.id == id) {
-                    self.apps.remove(i);
+                if self.live_running == Some(id) {
+                    // (what it's asking now comes back to no one)
+                    self.live_running = None;
+                    self.stopping = false;
+                }
+                let tabs = self.app_tabs();
+                if let Some(i) = tabs.iter().position(|t| t.0 == id) {
+                    self.apps.retain(|a| a.id != id);
+                    self.lives.retain(|a| a.id != id);
                     if self.tab == Tab::App(id) {
                         // the tab beside it, else the Dashboard
-                        let next = self
-                            .apps
-                            .get(i)
-                            .or_else(|| self.apps.get(i.wrapping_sub(1)))
-                            .map(|a| Tab::App(a.id));
+                        let next = tabs.get(i + 1).or_else(|| tabs.get(i.wrapping_sub(1))).map(|t| Tab::App(t.0));
                         self.go(next.unwrap_or(Tab::Dashboard));
                     }
                 }
                 none(Task::none())
             }
+            DiagMsg::OpenLogger => {
+                // (one DataLogger: its tab, if it's open)
+                let id = match self.lives.first() {
+                    Some(l) => l.id,
+                    None => {
+                        let id = self.next_app;
+                        self.next_app += 1;
+                        let mut l = DataLogger::new(id);
+                        if let Some((a, bus)) = self.selected {
+                            l.update(LiveMsg::ToggleModule(a, bus));
+                        }
+                        self.lives.push(l);
+                        id
+                    }
+                };
+                self.go(Tab::App(id));
+                none(Task::none())
+            }
+            DiagMsg::Live(id, m) => self.live_update(id, m),
             DiagMsg::Topology(on) => {
                 self.topology = on;
                 none(Task::none())
             }
             DiagMsg::Select(a, bus) => {
                 self.selected = if self.selected == Some((a, bus)) { None } else { Some((a, bus)) };
+                none(Task::none())
+            }
+            DiagMsg::AppSearch(t) => {
+                self.app_search = t;
                 none(Task::none())
             }
             DiagMsg::OpenSelfTest(target) => {
@@ -862,7 +1044,7 @@ impl Diag {
                                 ));
                                 self.testing = None;
                                 self.stopping = false;
-                                none(Task::none())
+                                (Task::none(), self.look_up_codes(id))
                             }
                         }
                     }
@@ -897,6 +1079,45 @@ impl Diag {
                     .join("\n");
                 (Task::none(), Out::Copy(if text.is_empty() { "No codes".into() } else { text }))
             }
+            DiagMsg::LookedUp(vin, key, r) => {
+                if self.vin.as_deref() != Some(vin.as_str()) {
+                    return none(Task::none()); // (another vehicle's)
+                }
+                self.looking_up = false;
+                match r {
+                    Ok(l) => {
+                        self.dtcs.insert(key, Lookup::Found(l));
+                    }
+                    Err(e) => {
+                        note(&format!("Code lookup: {e}"));
+                        // signed out (or Ford's search not answering): the rest would go the same way
+                        for k in self.lookups.drain(..) {
+                            self.dtcs.insert(k, Lookup::Failed(e.clone()));
+                        }
+                        self.dtcs.insert(key, Lookup::Failed(e));
+                    }
+                }
+                (Task::none(), self.next_lookup())
+            }
+            DiagMsg::FindPinpoint(key) => {
+                let Some(vin) = self.vin.clone() else {
+                    return none(Task::none());
+                };
+                match self.dtcs.get(&key) {
+                    Some(Lookup::Found(DtcLookup {
+                        pinpoint: Some((link, title)),
+                        ..
+                    })) => (
+                        Task::none(),
+                        Out::OpenPinpoint {
+                            vin,
+                            link: link.clone(),
+                            title: title.clone(),
+                        },
+                    ),
+                    _ => (Task::none(), Out::SearchDtc { vin, query: key }),
+                }
+            }
             DiagMsg::ToggleLog => {
                 self.show_log = !self.show_log;
                 none(Task::none())
@@ -916,6 +1137,40 @@ impl Diag {
                 none(Task::none())
             }
         }
+    }
+
+    /// Asks Ford's search about the codes a self test found (the ones not asked yet), one at a time
+    fn look_up_codes(&mut self, id: u64) -> Out {
+        if self.vin.is_none() {
+            return Out::None;
+        }
+        let Some(t) = self.app(id).and_then(|a| a.test.as_ref()) else {
+            return Out::None;
+        };
+        let keys: Vec<String> = t
+            .modules
+            .iter()
+            .flat_map(|m| m.codes().iter().map(|c| dtc_key(c, m.short)))
+            .collect();
+        for k in keys {
+            let again = matches!(self.dtcs.get(&k), None | Some(Lookup::Failed(_)));
+            if again && !self.lookups.contains(&k) {
+                self.dtcs.insert(k.clone(), Lookup::Asking);
+                self.lookups.push_back(k);
+            }
+        }
+        self.next_lookup()
+    }
+
+    fn next_lookup(&mut self) -> Out {
+        if self.looking_up {
+            return Out::None;
+        }
+        let (Some(vin), Some(key)) = (self.vin.clone(), self.lookups.pop_front()) else {
+            return Out::None;
+        };
+        self.looking_up = true;
+        Out::LookUp { vin, key }
     }
 
     fn start_test(&mut self, id: u64, what: &str, first: vci::scan::Ask) -> (Task<DiagMsg>, Out) {
@@ -955,6 +1210,115 @@ impl Diag {
     fn ask_next(&mut self, a: vci::scan::Ask) -> Task<(vci::scan::Ask, Result<Option<Vec<u8>>, String>)> {
         let t0 = self.t0();
         self.push_log(line(t0, "→", a.tx, &a.data));
+        self.ask_quiet(a)
+    }
+
+    /// The DataLogger's messages
+    fn live_update(&mut self, id: u64, m: LiveMsg) -> (Task<DiagMsg>, Out) {
+        let none = |t| (t, Out::None);
+        match m {
+            LiveMsg::Step(step) => {
+                let running = self.live_running == Some(id);
+                let can_start = self.connected() && !self.busy();
+                let Some(l) = self.lives.iter_mut().find(|l| l.id == id) else {
+                    return none(Task::none());
+                };
+                l.go(step);
+                // the PIDs: the modules not asked yet are asked which they have; the Live View: reading starts
+                let start = match step {
+                    live::Step::Pids if l.needs_finding() => {
+                        if running {
+                            l.start(); // (asked before the next reading)
+                            false
+                        } else {
+                            true
+                        }
+                    }
+                    live::Step::Live => !running && !l.picked().is_empty(),
+                    _ => false,
+                };
+                if start && can_start {
+                    return self.live_update(id, LiveMsg::Start);
+                }
+                none(Task::none())
+            }
+            LiveMsg::Start => {
+                if !self.connected() || self.busy() {
+                    return none(Task::none());
+                }
+                let Some(l) = self.lives.iter_mut().find(|l| l.id == id) else {
+                    return none(Task::none());
+                };
+                l.start();
+                let finding = l.finding();
+                let Some(first) = l.next() else { return none(Task::none()) };
+                let title = l.title();
+                self.live_running = Some(id);
+                self.stopping = false;
+                self.error = None;
+                let t0 = self.t0();
+                self.push_log(format!(
+                    "{}  ··  {title}{}",
+                    stamp(t0),
+                    if finding { ": which PIDs each module has" } else { ": recording" }
+                ));
+                note("Live data: started");
+                none(self.ask_quiet(first).map(move |(a, got)| DiagMsg::Live(id, LiveMsg::Asked(a, got))))
+            }
+            LiveMsg::Stop => {
+                if self.live_running == Some(id) {
+                    self.stopping = true;
+                }
+                none(Task::none())
+            }
+            LiveMsg::Asked(asked, r) => {
+                if self.live_running != Some(id) {
+                    return none(Task::none());
+                }
+                let stopping = self.stopping;
+                let t0 = self.t0();
+                let Some(l) = self.lives.iter_mut().find(|l| l.id == id) else {
+                    self.live_running = None;
+                    return none(Task::none());
+                };
+                match r {
+                    Ok(answer) => {
+                        let said = l.answer(&asked, answer.as_deref());
+                        let next = l.next();
+                        if let Some(said) = said {
+                            self.push_log(format!("{}  ··  {said}", stamp(t0)));
+                        }
+                        match next {
+                            Some(a) if !stopping => none(self.ask_quiet(a).map(move |(a, got)| DiagMsg::Live(id, LiveMsg::Asked(a, got)))),
+                            _ => {
+                                note("Live data: stopped");
+                                self.live_running = None;
+                                self.stopping = false;
+                                none(Task::none())
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        note(&format!("Live data stopped: {e}"));
+                        self.push_log(format!("{}  ··  {e}", stamp(t0)));
+                        self.error = Some(e);
+                        self.live_running = None;
+                        self.stopping = false;
+                        none(Task::none())
+                    }
+                }
+            }
+            other => {
+                if let Some(l) = self.lives.iter_mut().find(|l| l.id == id) {
+                    l.update(other);
+                }
+                none(Task::none())
+            }
+        }
+    }
+
+    /// A request, not written in the communication log (Live Data's: too many)
+    fn ask_quiet(&mut self, a: vci::scan::Ask) -> Task<(vci::scan::Ask, Result<Option<Vec<u8>>, String>)> {
         let b = self.bridge.clone();
         Task::perform(
             async move {

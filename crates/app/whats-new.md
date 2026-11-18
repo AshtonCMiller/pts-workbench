@@ -12,7 +12,6 @@
 
 # Improvements
 - **A brand new app:** PTS Workbench has been rebuilt from the ground up. It starts quicker, is lighter on the computer, and everything (Xtime, the Service Manual, your hours) is drawn by the app itself.
-
 - **New Diagnostics Interface:** Designed as a stand-in replacement for IDS and FDRS where available - it communicates on the standard J2534 communication bus that modern VCIs operate under (including Fords VCM3 and VCMM). Adds a helper build next to the app executable for this 64-bit app to communicate with fords 32-bit VCI Drivers. **DIAGNOSTICS MODE IS VERY EXPERIMENTAL. USE AT YOUR OWN RISK. NO INFORMATION IS SHARED WITH FORD SERVERS - NO LOGGING FOR WARRANTY PURPOSES AT THIS TIME.**
 - **Diagnostic networks** have been expanded to implement networks aside from just HS-CAN, as well as DIAG networks used by the gateway module on newer vehicles.
 - **Your lines in the sidebar:** the vehicle you're on shows its lines under it. Flag each one, click its hours to set what it really pays, and click the date under a flagged line to move it to the day you really flagged it. **Lines** folds them away.
@@ -27,3 +26,4 @@
 - **Add an RO** has been added back in as a much-needed tool for working on repair orders from other technicians.
 - **RO Status** has been updated, so the sidebar will now show the current status of each RO.
 - **Accept new ROs from Dispatch:** Finally, through the built-in XTime display, we can finally accept new ROs from dispatch.
+- **Backup PTS & XTime Interface:** For those of us that are not yet ready to embrace what technology has to offer, the normal XTime & PTS websites are available as a built-in tool. Web pages will not hold the same performance advantages the rest of the app has.

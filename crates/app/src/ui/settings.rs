@@ -8,7 +8,7 @@ use ui_kit::scroll::scrollable;
 
 use super::style;
 use crate::app::{App, Field, Message};
-use crate::settings::ThemeChoice;
+use crate::settings::{Graphics, ThemeChoice};
 use crate::signin::Site;
 use crate::updates::State;
 
@@ -230,6 +230,18 @@ pub fn card(app: &App) -> Element<'_, Message> {
                 column![
                     text("Appearance").font(style::BOLD),
                     pick_list(&ThemeChoice::ALL[..], Some(app.draft.theme), Message::SetTheme).padding(6),
+                ]
+                .spacing(4),
+                column![
+                    text("Graphics").font(style::BOLD),
+                    pick_list(&Graphics::ALL[..], Some(app.draft.graphics), Message::SetGraphics).padding(6),
+                    text(if app.draft.graphics != app.started_graphics {
+                        "Changes when the app starts again (save, then close and open it)."
+                    } else {
+                        "If the whole window flickers, pick Compatible: it draws without the graphics card."
+                    })
+                    .size(12)
+                    .style(style::muted),
                 ]
                 .spacing(4),
                 sync(app),

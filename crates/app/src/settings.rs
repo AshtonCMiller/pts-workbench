@@ -22,6 +22,52 @@ pub struct Settings {
     pub theme: ThemeChoice,
     /// Sync between your computers turned off (it's on unless you turn it off)
     pub sync_off: bool,
+    /// How the window's drawn (from the next start)
+    pub graphics: Graphics,
+    /// The Xtime page shows Xtime's own dashboard (the website), not the app's
+    pub xtime_site: bool,
+}
+
+/// How the app draws its window. Standard: the graphics card, through DirectX 12 on Windows (the way Windows' own apps
+/// draw; Intel's integrated graphics can flicker the whole window through Vulkan, which is what's picked otherwise).
+/// Compatible: without the graphics card at all (slower, never flickers): for a computer where Standard does.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Graphics {
+    #[default]
+    Standard,
+    Compatible,
+}
+
+impl Graphics {
+    pub const ALL: [Graphics; 2] = [Graphics::Standard, Graphics::Compatible];
+
+    /// Set before the window opens (iced reads these when it starts). Ones already set (by hand, to try something)
+    /// are left as they are.
+    pub fn apply(self) {
+        let set = |k: &str, v: &str| {
+            if std::env::var_os(k).is_none() {
+                // SAFETY: at the very start of main, before any other thread exists
+                unsafe { std::env::set_var(k, v) }
+            }
+        };
+        match self {
+            Graphics::Standard => {
+                if cfg!(windows) {
+                    set("WGPU_BACKEND", "dx12");
+                }
+            }
+            Graphics::Compatible => set("ICED_BACKEND", "tiny-skia"),
+        }
+    }
+}
+
+impl std::fmt::Display for Graphics {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Graphics::Standard => "Standard",
+            Graphics::Compatible => "Compatible (if the window flickers)",
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
