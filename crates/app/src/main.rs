@@ -7,6 +7,7 @@
 //!   updates.rs    the app updating itself from GitHub releases (Beta updates too), for the launcher to start
 //!   timecard.rs   your hours (crates/hours) in the app: the file, bringing over the old app's, an RO's lines
 //!   settings.rs   saved settings (first setup asks for the store ID and dealer code)
+//!   profiles.rs   profiles: people sharing a computer, each with their own folder (Main Shop or Quick Lane)
 //!   signin.rs     signing in to Xtime and Ford PTS (the sign-in window, crates/signin)
 //!   system_theme.rs  whether Windows is set to dark (the Auto appearance)
 //!   workspace.rs  open vehicles and their tabs
@@ -23,6 +24,7 @@ mod app;
 mod clock;
 mod notes;
 mod print;
+mod profiles;
 mod reports;
 mod ros;
 mod sample;
@@ -38,10 +40,12 @@ mod whats_new;
 mod workspace;
 
 fn main() -> iced::Result {
+    // the profile in use (its folder: everything the app reads and keeps)
+    profiles::Profiles::start();
     // how the window's drawn (Settings → Graphics), before it opens
     settings::Settings::load().graphics.apply();
-    // Diagnostics' log (what happened, without the VIN) in the app's folder
-    diag_ui::set_log_dir(settings::app_dir());
+    // Diagnostics' log (what happened, without the VIN) in the app's own folder (the computer's: not a profile's)
+    diag_ui::set_log_dir(launcher::app_dir());
     let ran = iced::application(app::App::title, app::App::update, app::App::view)
         .theme(app::App::theme)
         .subscription(app::App::subscription)

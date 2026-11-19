@@ -155,6 +155,8 @@ pub async fn set_up_pts(vin: String, web_dir: PathBuf) -> Outcome {
 async fn window(args: Vec<String>) -> Outcome {
     let out = tokio::process::Command::new(program())
         .args(&args)
+        // whose saved logins (the profile in use)
+        .env("PTS_PROFILE", crate::profiles::scope())
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .output()

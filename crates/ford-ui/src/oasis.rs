@@ -8,8 +8,10 @@
 //!   Warning messages
 //!   Warranty coverage     each coverage checked against the warranty start and the odometer (typed in here)
 //!
-//! Read when the tab is first shown, and again with Refresh. (The vehicle's picture, its connected vehicle data and
-//! Retrieve SVC come with later stages.)
+//!   Connected vehicle data   the vehicle's latest status (crate::connected), its odometer used for the warranty
+//!                            when none is typed in
+//!
+//! Read when the tab is first shown, and again with Refresh. (The vehicle's picture and Retrieve SVC come later.)
 
 use chrono::NaiveDate;
 use ford::oasis::{self, Coverage, Field, Oasis, Standing};
@@ -18,6 +20,7 @@ use iced::{Alignment, Color, Element, Length, Task};
 use ui_kit::scroll::scrollable;
 use ui_kit::{pill, style};
 
+use crate::connected::{ConnectedMsg, ConnectedView};
 use crate::{Env, FordError, Out};
 
 /// OASIS's own address (FSA documents' addresses are read from its page)
@@ -50,6 +53,8 @@ pub enum OasisMsg {
     /// Open an FSA (its place in the list), or one of Ford's notices, in a tab of its own
     OpenFsa(usize),
     OpenNotice(usize),
+    /// The connected vehicle data shown here (the app hands it to the Connected Vehicle tab's own state)
+    Cv(ConnectedMsg),
 }
 
 impl OasisView {
@@ -131,6 +136,8 @@ impl OasisView {
                 }
                 Task::none()
             }
+            // (the app handles these: they're the Connected Vehicle tab's)
+            OasisMsg::Cv(_) => Task::none(),
             OasisMsg::OpenNotice(i) => {
                 let notice = self.data.as_ref().and_then(|d| d.fsa.notices.get(i)).cloned();
                 if let Some((t, url)) = notice.and_then(|(t, u)| ford::doc::resolve(OASIS_PAGE, &u).map(|u| (t, u))) {
@@ -186,13 +193,13 @@ fn copyable<'a>(value: &'a str, what: &str, mono: bool) -> Element<'a, OasisMsg>
 
 /// What's showing: OASIS, or why it isn't (loading, signed out, a problem)
 /// OASIS (scrolling on its own)
-pub fn view<'a>(o: &'a OasisView, sample: bool, today: NaiveDate) -> Element<'a, OasisMsg> {
-    scrollable(container(page(o, sample, today)).padding(16).width(Length::Fill))
+pub fn view<'a>(o: &'a OasisView, cv: &'a ConnectedView, sample: bool, today: NaiveDate) -> Element<'a, OasisMsg> {
+    scrollable(container(page(o, cv, sample, today)).padding(16).width(Length::Fill))
         .height(Length::Fill)
         .into()
 }
 
-fn page<'a>(o: &'a OasisView, sample: bool, today: NaiveDate) -> Element<'a, OasisMsg> {
+fn page<'a>(o: &'a OasisView, cv: &'a ConnectedView, sample: bool, today: NaiveDate) -> Element<'a, OasisMsg> {
     let state = |title: &'a str, why: String, button_: Option<(&'a str, OasisMsg)>| -> Element<'a, OasisMsg> {
         let mut c = column![text(title).size(18).font(style::BOLD), text(why).style(style::muted)].spacing(8);
         if let Some((label, msg)) = button_ {
@@ -231,6 +238,8 @@ fn page<'a>(o: &'a OasisView, sample: bool, today: NaiveDate) -> Element<'a, Oas
     if let Some(e) = &o.error {
         page = page.push(text(format!("Couldn't refresh OASIS ({})", e.text())).size(13).style(text::danger));
     }
+    // what the vehicle last reported (its odometer counts for the warranty)
+    page = page.push(crate::connected::oasis_card(cv).map(OasisMsg::Cv));
     // the vehicle's information
     page = page.push(h2("Vehicle information"));
     if data.groups.is_empty() {
@@ -246,7 +255,7 @@ fn page<'a>(o: &'a OasisView, sample: bool, today: NaiveDate) -> Element<'a, Oas
         });
         page = page.push(Row::with_children(cards).spacing(12).wrap());
     }
-    page = page.push(fsa(data)).push(warnings(data)).push(warranty(o, data, today));
+    page = page.push(fsa(data)).push(warnings(data)).push(warranty(o, cv, data, today));
     page.into()
 }
 
@@ -368,7 +377,7 @@ fn warnings(d: &Oasis) -> Element<'_, OasisMsg> {
     c.push(card(rows)).into()
 }
 
-fn warranty<'a>(o: &'a OasisView, d: &'a Oasis, today: NaiveDate) -> Element<'a, OasisMsg> {
+fn warranty<'a>(o: &'a OasisView, cv: &'a ConnectedView, d: &'a Oasis, today: NaiveDate) -> Element<'a, OasisMsg> {
     let w = &d.warranty;
     let mut c = column![h2("Warranty coverage")].spacing(10);
     let date = |d: Option<NaiveDate>, raw: &str| {
@@ -389,14 +398,28 @@ fn warranty<'a>(o: &'a OasisView, d: &'a Oasis, today: NaiveDate) -> Element<'a,
     if let Some(m) = w.months_in_service {
         facts = facts.push(fact("In service", format!("{m} months")));
     }
-    facts = facts.push(
-        row![
-            text("Odometer").size(13).style(style::muted),
-            text_input("miles", &o.odometer).on_input(OasisMsg::Odometer).width(110).padding(5),
-        ]
-        .spacing(6)
-        .align_y(Alignment::Center),
-    );
+    // the odometer: typed in here, else what the vehicle last reported
+    let reported = cv.odometer();
+    let hint = match reported {
+        Some((m, _)) => oasis::thousands(m as i64),
+        None => "miles".to_string(),
+    };
+    let mut odo = row![
+        text("Odometer").size(13).style(style::muted),
+        text_input(&hint, &o.odometer).on_input(OasisMsg::Odometer).width(110).padding(5),
+    ]
+    .spacing(6)
+    .align_y(Alignment::Center);
+    if o.odometer_miles().is_none() {
+        if let Some((_, when)) = reported {
+            let from = match when {
+                Some(_) => format!("from the connected vehicle, {}", crate::connected::fmt_time(when)),
+                None => "from the connected vehicle".to_string(),
+            };
+            odo = odo.push(text(from).size(12).style(style::muted));
+        }
+    }
+    facts = facts.push(odo);
     c = c.push(facts.wrap());
     if w.start.is_none() && w.build.is_some() {
         c = c.push(note("No warranty start date in OASIS: time is counted from the build date.", false));
@@ -405,7 +428,7 @@ fn warranty<'a>(o: &'a OasisView, d: &'a Oasis, today: NaiveDate) -> Element<'a,
         return c.push(note("OASIS listed no warranty coverage for this VIN.", false)).into();
     }
     let start = w.start.or(w.build);
-    let odo = o.odometer_miles();
+    let odo = o.odometer_miles().or(reported.map(|(m, _)| m));
     let rows = Column::with_children(w.coverages.iter().map(|cov| coverage(cov, start, odo, today))).spacing(14);
     c.push(card(rows)).into()
 }

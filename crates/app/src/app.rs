@@ -78,9 +78,42 @@ pub enum Overlay {
     Service,
     /// What's new (after an update, when one's waiting, from Settings)
     WhatsNew,
+    /// A profile's kind: Main Shop or Quick Lane (asked once, when it's first used)
+    ProfileKind,
+    /// Admin mode: the Feedback password, then every profile (delete one, reset its PIN)
+    Admin,
 }
 
-/// "Add an RO" in the sidebar: the RO number typed, a VIN (asked for when Xtime can't say), and how it's going
+/// Admin mode (the Feedback password, checked by the feedback server; unlocked until it's locked, the app closes or
+/// the profile's switched)
+#[derive(Debug, Clone, Default)]
+pub struct Admin {
+    pub unlocked: bool,
+    pub key: String,
+    pub checking: bool,
+    pub error: Option<String>,
+    /// The profile whose Delete was pressed once (pressed again: deleted)
+    pub confirm_delete: Option<String>,
+    /// What was last done ("Rachel's PIN reset")
+    pub note: Option<String>,
+}
+
+/// The profile switcher's questions: a profile's PIN (switching to it), or a new profile's name and PIN
+#[derive(Debug, Clone, PartialEq)]
+pub enum ProfileAsk {
+    Pin {
+        id: String,
+        typed: String,
+        wrong: bool,
+    },
+    Add {
+        name: String,
+        number: String,
+        pin: String,
+        error: Option<String>,
+    },
+}
+
 /// From Diagnostics' self test: a code's pinpoint test to open in the vehicle's RO (or, none known, the Service
 /// Manual's search for the code)
 #[derive(Debug, Clone)]
@@ -89,6 +122,7 @@ pub enum Pinpoint {
     Search(String),
 }
 
+/// "Add an RO" in the sidebar: the RO number typed, a VIN (asked for when Xtime can't say), and how it's going
 #[derive(Debug, Clone, Default)]
 pub struct AddRo {
     pub ro: String,
@@ -168,7 +202,13 @@ pub struct App {
     /// couldn't show
     pane_shown: Option<String>,
     pane_places: std::collections::HashMap<String, iced::Rectangle>,
+    /// The Service Manual's Diagnostics menu is open (a page under it is hidden, its picture shown)
+    pub diag_menu: bool,
+    /// The page whose picture is being taken before it's hidden (it's still on top of everything until then)
+    pane_hiding: Option<String>,
     pub pane_error: Option<String>,
+    /// The picture of the page a card's covering (its name, the picture)
+    pub pane_picture: Option<(String, iced::widget::image::Handle)>,
     /// How the window's drawn this time (a change in Settings is from the next start)
     pub started_graphics: crate::settings::Graphics,
     /// ROs in Dispatch with no technician (the sidebar offers to accept them), the one Accept was pressed on (asking
@@ -206,6 +246,16 @@ pub struct App {
     whats_new_for: Option<String>,
     /// Sync between your computers
     pub sync: crate::syncing::Syncing,
+    /// Profiles (crate::profiles): the list, the switcher open, what it's asking; Settings' PIN and name typed
+    pub profiles: crate::profiles::Profiles,
+    pub profile_menu: bool,
+    pub profile_since: std::time::Instant,
+    pub profile_ask: Option<ProfileAsk>,
+    pub pin_draft: String,
+    pub profile_name: String,
+    /// Every task started (stopped when switching profiles: nothing of one profile's lands in another's)
+    tasks: Vec<iced::task::Handle>,
+    pub admin: Admin,
 }
 
 /// The dashboard's and My ROs' messages (crates/xtime-ui) are the app's own
@@ -279,6 +329,18 @@ fn save_chat_config(c: &xtime::chat::ChatConfig) -> std::io::Result<()> {
 const XTIME_SITE: &str = "https://www.inspect.app.coxautoinc.com/";
 const XTIME_RO_PAGE: &str = "https://www.inspect.app.coxautoinc.com/RepairOrder/Details/{RO}";
 const PTS_VEHICLE_PAGE: &str = "https://www.fordtechservice.dealerconnection.com/transport?link=704&params={VIN}";
+/// PTS's Vehicle History (Diagnostics › Vehicle History): every PTS / FDRS session recorded for the VIN
+const VEHICLE_HISTORY_PAGE: &str = "https://www.fordtechservice.dealerconnection.com/Diagnostics/EventsDisplay?vin={VIN}";
+
+/// The profile switcher's field (a PIN, a new profile's name): typed into straight away
+pub fn profile_field_id() -> iced::widget::text_input::Id {
+    iced::widget::text_input::Id::new("profile-field")
+}
+
+/// Admin mode's password field
+pub fn admin_field_id() -> iced::widget::text_input::Id {
+    iced::widget::text_input::Id::new("admin-key")
+}
 
 /// A task whose result isn't needed
 fn quiet<T: Send + 'static>(t: Task<T>) -> Task<Message> {
@@ -291,6 +353,11 @@ pub fn pane_id(tab: Tab, ro: &str) -> String {
         Tab::PtsSite => format!("pts:{ro}"),
         _ => format!("xtime-ro:{ro}"),
     }
+}
+
+/// The Service Manual's Vehicle History page's name among them
+pub fn history_pane_id(ro: &str) -> String {
+    format!("pts-history:{ro}")
 }
 
 /// The sign-in windows' web profile ("remember me", saved passwords)
@@ -333,6 +400,10 @@ pub enum Message {
     /// A website's room (crates/webpane): where it is now; how showing it went; reload it
     PanePlace(String, iced::Rectangle),
     PaneShown(Result<(), String>),
+    /// A picture of a page (a PNG), taken as a card covered it: drawn in its room meanwhile
+    PanePicture(String, Option<Vec<u8>>),
+    /// A click in the app (not the page showing): the keyboard back to the app
+    PaneLeft,
     ReloadPane,
     /// The Xtime page: Xtime's own dashboard (the website), or the app's
     XtimeSite(bool),
@@ -356,6 +427,10 @@ pub enum Message {
     XvDragEnd(bool),
     /// An open vehicle's OASIS tab (its RO number): its own messages (crates/ford-ui)
     Oasis(String, ford_ui::OasisMsg),
+    /// An open vehicle's Connected Vehicle tab (and its status on OASIS)
+    Cv(String, ford_ui::ConnectedMsg),
+    /// The Service Manual's Diagnostics menu opened or closed (the mouse over its tab)
+    DiagMenu(bool),
     /// An open vehicle's TSBs tab (its RO number): its own messages (crates/ford-ui)
     Tsb(String, ford_ui::TsbMsg),
     /// Something in an RO's Workshop Manual tab
@@ -432,6 +507,40 @@ pub enum Message {
     /// The Add / Edit Service window's own messages
     Svc(xtime_ui::service::SvcMsg),
     OpenSettings,
+    /// Profiles: the switcher opened / closed; one picked; its PIN typed and tried; adding one (its name, its PIN,
+    /// added); the question put away; the kind picked; Settings' PIN (typed, saved, taken off), name, and removing one
+    ToggleProfiles,
+    PickProfile(String),
+    ProfilePin(String),
+    SubmitProfilePin,
+    AddProfileStart,
+    AddProfileName(String),
+    AddProfileNumber(String),
+    AddProfilePin(String),
+    SubmitAddProfile,
+    CancelProfileAsk,
+    SetProfileKind(crate::profiles::Kind),
+    SettingsPin(String),
+    SaveSettingsPin,
+    ClearSettingsPin,
+    ProfileName(String),
+    RemoveProfile(String),
+    /// Nothing (a card that can't be put away by clicking beside it)
+    Ignore,
+    /// Admin mode: opened (from Settings), put away; its password typed, tried, checked; a profile's PIN reset; a
+    /// profile deleted (pressed twice); locked
+    OpenAdmin,
+    CloseAdmin,
+    AdminKey(String),
+    AdminUnlock,
+    AdminChecked(Result<(), String>),
+    AdminResetPin(String),
+    AdminDelete(String),
+    AdminLock,
+    /// A Quick Lane's Maintenance tab: its specs read (or not); read again; one's whole page opened
+    MaintRead(String, Result<Vec<ford::specs::SpecGroup>, String>),
+    MaintRetry(String),
+    OpenSpec(String, ford::doc::ProcLink, String),
     CloseSettings,
     Edit(Field, String),
     SetTheme(ThemeChoice),
@@ -564,7 +673,10 @@ impl App {
             pending_pinpoint: None,
             pane_shown: None,
             pane_places: std::collections::HashMap::new(),
+            diag_menu: false,
+            pane_hiding: None,
             pane_error: None,
+            pane_picture: None,
             started_graphics,
             dispatch: Vec::new(),
             accept_ask: None,
@@ -587,6 +699,14 @@ impl App {
             whats_new: None,
             whats_new_for: None,
             sync: crate::syncing::Syncing::load(sync_on),
+            profiles: crate::profiles::Profiles::load(),
+            profile_menu: false,
+            profile_since: std::time::Instant::now(),
+            profile_ask: None,
+            pin_draft: String::new(),
+            profile_name: String::new(),
+            tasks: Vec::new(),
+            admin: Admin::default(),
         };
         // (straight onto the vehicle showing, no transition in)
         app.outer = Transition::new(app.outer_key());
@@ -675,7 +795,6 @@ impl App {
         }
     }
 
-    /// The vehicle showing
     /// Diagnostics: your RO for the vehicle plugged in (one of yours, or one open in the Workbench)
     pub fn diag_ro(&self) -> Option<diag_ui::RoInfo> {
         let vin = self.diag.vin.as_deref()?;
@@ -695,6 +814,7 @@ impl App {
         })
     }
 
+    /// The vehicle showing
     pub fn workspace(&self) -> Option<&Workspace> {
         let ro = self.selected.as_ref()?;
         self.open.iter().find(|w| &w.ro.ro == ro)
@@ -732,8 +852,76 @@ impl App {
             other => self.apply(other),
         };
         self.remember_open();
+        self.ask_profile_kind();
+        // the Diagnostics menu went with its tab (it can't say it closed)
+        if self.diag_menu && (self.mode != Mode::Workbench || !self.workspace().is_some_and(|w| w.tab == Tab::ServiceManual)) {
+            self.diag_menu = false;
+        }
         let pane = self.sync_pane();
-        Task::batch([task, self.start_transition(), pane])
+        let task = Task::batch([task, self.start_transition(), pane]);
+        // (kept, to stop if the profile's switched; the oldest let go of: long done)
+        let (task, handle) = task.abortable();
+        self.tasks.push(handle);
+        if self.tasks.len() > 4000 {
+            self.tasks.drain(..2000);
+        }
+        task
+    }
+
+    /// A Quick Lane profile (no Diagnostics or wiring; vehicles open on their maintenance specs)
+    pub fn quick(&self) -> bool {
+        self.profiles.active().kind == Some(crate::profiles::Kind::Quick)
+    }
+
+    /// A vehicle's tabs, for this profile's kind
+    pub fn vehicle_tabs(&self) -> &'static [Tab] {
+        if self.quick() { &Tab::QUICK } else { &Tab::ALL }
+    }
+
+    /// The Service Manual's tabs, for this profile's kind (a Quick Lane's: no wiring)
+    pub fn manual_tabs(&self) -> Vec<ManualTab> {
+        ManualTab::ALL
+            .into_iter()
+            .filter(|t| !(self.quick() && *t == ManualTab::Wiring))
+            .collect()
+    }
+
+    /// A vehicle opened: on its maintenance specs for a Quick Lane
+    fn new_workspace(&self, ro: AssignedRo) -> Workspace {
+        let mut ws = Workspace::new(ro);
+        if self.quick() {
+            ws.tab = Tab::Maintenance;
+        }
+        ws
+    }
+
+    /// A profile whose kind isn't known yet: asked (once nothing else is up); a Quick Lane's out of Diagnostics
+    fn ask_profile_kind(&mut self) {
+        if self.screen == Screen::Main && self.overlay.is_none() && self.profiles.active().kind.is_none() {
+            self.profile_menu = false;
+            self.show_overlay(Overlay::ProfileKind);
+        }
+        if self.quick() && self.mode == Mode::Diagnostics {
+            self.mode = Mode::Workbench;
+        }
+    }
+
+    /// Switches to another profile: everything of this one's stopped and let go of, and the app started again on
+    /// the other's folder (its settings, hours, ROs, sign-ins); the window, updates and what's been seen stay
+    fn switch_profile(&mut self, id: String) -> Task<Message> {
+        for h in self.tasks.drain(..) {
+            h.abort();
+        }
+        let mut profiles = self.profiles.clone();
+        profiles.activate(&id);
+        let name = profiles.active().name.clone();
+        let updates = std::mem::take(&mut self.updates);
+        let (mut next, start) = App::new();
+        next.updates = updates;
+        next.updates.checked_at = None;
+        next.notice = Some(format!("Switched to {name}"));
+        *self = next;
+        Task::batch([quiet(webpane::close_all()), start])
     }
 
     /// After any change: when the page (or the vehicle's tab) changed, the shown one starts leaving; the new one is
@@ -762,7 +950,10 @@ impl App {
         if !self.updates.on() || self.updates.busy() {
             return Task::none();
         }
-        self.updates.state = crate::updates::State::Checking;
+        // (one waiting for a restart stays waiting while it looks: it's still what a restart starts)
+        if !matches!(self.updates.state, crate::updates::State::Ready(_)) {
+            self.updates.state = crate::updates::State::Checking;
+        }
         self.updates.checked_at = Some(self.now);
         Task::perform(
             crate::updates::check(self.http.clone(), self.updates.beta, self.updates.running.clone()),
@@ -785,22 +976,24 @@ impl App {
         }
     }
 
-    /// The open vehicles kept (workspaces.json) and, for sync, which ROs are open (the hours), when they've changed
     /// The website that should be showing now (none: the app's own pages, or one of its cards is over them)
     fn wanted_pane(&self) -> Option<webpane::Page> {
-        if self.screen != Screen::Main || self.overlay.is_some() {
+        if self.screen != Screen::Main {
             return None;
         }
         let (url, id) = match self.mode {
             Mode::Xtime if self.settings.xtime_site && !self.sample_data => (XTIME_SITE.to_string(), "xtime-dashboard".to_string()),
             Mode::Workbench => {
                 let ws = self.workspace().filter(|w| !w.is_sample())?;
-                let url = match ws.tab {
-                    Tab::XtimeSite => XTIME_RO_PAGE.replace("{RO}", &ws.ro.ro),
-                    Tab::PtsSite => PTS_VEHICLE_PAGE.replace("{VIN}", &ws.ro.vin),
+                match ws.tab {
+                    Tab::XtimeSite => (XTIME_RO_PAGE.replace("{RO}", &ws.ro.ro), pane_id(ws.tab, &ws.ro.ro)),
+                    Tab::PtsSite => (PTS_VEHICLE_PAGE.replace("{VIN}", &ws.ro.vin), pane_id(ws.tab, &ws.ro.ro)),
+                    // the Service Manual's Vehicle History: PTS's own page
+                    Tab::ServiceManual if ws.manual == ManualTab::History => {
+                        (VEHICLE_HISTORY_PAGE.replace("{VIN}", &ws.ro.vin), history_pane_id(&ws.ro.ro))
+                    }
                     _ => return None,
-                };
-                (url, pane_id(ws.tab, &ws.ro.ro))
+                }
             }
             _ => return None,
         };
@@ -813,28 +1006,50 @@ impl App {
             url,
             cookies,
             data_dir: crate::settings::app_dir().join("pages"),
+            scope: crate::profiles::scope(),
         })
     }
 
-    /// After any change: the website that should show is shown (where its room was last), the others hidden
+    /// No web page is on top of the window (none showing, and none still being hidden): what the app draws over the
+    /// page's room can be seen (the Diagnostics menu waits for this)
+    pub fn page_clear(&self) -> bool {
+        self.pane_shown.is_none() && self.pane_hiding.is_none()
+    }
+
+    /// One of the app's cards (Settings, Feedback…) or the profile menu over the page: a web view would sit on top of
+    /// it, so the page is hidden (its picture shown in its place)
+    fn pane_covered(&self) -> bool {
+        self.overlay.is_some() || self.profile_menu || self.diag_menu
+    }
+
+    /// After any change: the website that should show is shown (where its room was last), the others hidden. Covered
+    /// by a card: a picture of it is taken first, and drawn in its room while it's hidden (it seems to stay there).
     fn sync_pane(&mut self) -> Task<Message> {
-        let wanted = self.wanted_pane();
-        let id = wanted.as_ref().map(|p| p.id.clone());
+        let page = self.wanted_pane();
+        let covered = self.pane_covered();
+        let id = page.as_ref().filter(|_| !covered).map(|p| p.id.clone());
         if id == self.pane_shown {
             return Task::none();
         }
-        self.pane_shown = id;
+        let was = std::mem::replace(&mut self.pane_shown, id);
         self.pane_error = None;
-        match wanted {
+        match page {
             // (its room hasn't been drawn yet: it shows when it has, PanePlace)
-            Some(page) => match self.pane_places.get(&page.id).copied() {
+            Some(page) if !covered => match self.pane_places.get(&page.id).copied() {
                 Some(at) => webpane::show(page, at).map(Message::PaneShown),
                 None => quiet(webpane::hide_all()),
             },
-            None => quiet(webpane::hide_all()),
+            // the page that was showing, covered: its picture, then hidden
+            Some(page) if was.as_deref() == Some(page.id.as_str()) => {
+                let id = page.id.clone();
+                self.pane_hiding = Some(id.clone());
+                webpane::picture_and_hide(page.id).map(move |png| Message::PanePicture(id.clone(), png))
+            }
+            _ => quiet(webpane::hide_all()),
         }
     }
 
+    /// The open vehicles kept (workspaces.json) and, for sync, which ROs are open (the hours), when they've changed
     fn remember_open(&mut self) {
         let now = crate::vehicles::snapshot(&self.open, self.selected.as_deref());
         if now == self.open_saved {
@@ -880,6 +1095,9 @@ impl App {
     fn apply(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::SetMode(m) => {
+                if self.quick() && m == Mode::Diagnostics {
+                    return Task::none();
+                }
                 self.mode = m;
                 if m == Mode::Diagnostics {
                     return self.diag.shown().map(Message::Vci);
@@ -914,7 +1132,10 @@ impl App {
                 let mut ahead = Task::none();
                 if !self.open.iter().any(|w| w.ro.ro == ro) {
                     if let Some(r) = self.my_ros.iter().find(|r| r.ro == ro) {
-                        self.open.push(Workspace::new(r.clone()));
+                        {
+                            let ws = self.new_workspace(r.clone());
+                            self.open.push(ws);
+                        }
                         ahead = self.load_ahead(&ro);
                     }
                 }
@@ -929,7 +1150,7 @@ impl App {
             }
             Message::CloseRo(ro) => {
                 // its websites closed too
-                let ids = vec![pane_id(Tab::XtimeSite, &ro), pane_id(Tab::PtsSite, &ro)];
+                let ids = vec![pane_id(Tab::XtimeSite, &ro), pane_id(Tab::PtsSite, &ro), history_pane_id(&ro)];
                 for id in &ids {
                     self.pane_places.remove(id);
                 }
@@ -946,11 +1167,24 @@ impl App {
             }
             Message::PanePlace(id, at) => {
                 self.pane_places.insert(id.clone(), at);
-                if let Some(page) = self.wanted_pane().filter(|p| p.id == id) {
+                if let Some(page) = self.wanted_pane().filter(|p| p.id == id && !self.pane_covered()) {
                     return webpane::show(page, at).map(Message::PaneShown);
                 }
             }
             Message::PaneShown(r) => self.pane_error = r.err(),
+            Message::PanePicture(id, png) => {
+                if self.pane_hiding.as_deref() == Some(id.as_str()) {
+                    self.pane_hiding = None;
+                }
+                self.pane_picture = png.map(|p| (id.clone(), iced::widget::image::Handle::from_bytes(p)));
+                // uncovered again before the picture was done (it hid the page once it was): shown again
+                if self.pane_shown.as_deref() == Some(id.as_str()) {
+                    if let (Some(page), Some(at)) = (self.wanted_pane(), self.pane_places.get(&id).copied()) {
+                        return webpane::show(page, at).map(Message::PaneShown);
+                    }
+                }
+            }
+            Message::PaneLeft => return quiet(webpane::focus_app()),
             Message::ReloadPane => {
                 if let Some(id) = self.pane_shown.clone() {
                     return quiet(webpane::reload(id));
@@ -979,21 +1213,48 @@ impl App {
                 }
                 return self.load_manual();
             }
+            // (OASIS's connected vehicle data is the Connected Vehicle tab's)
+            Message::Oasis(ro, ford_ui::OasisMsg::Cv(m)) => return self.update(Message::Cv(ro, m)),
             Message::Oasis(ro, msg) => {
                 let env = self.ford_env_for(&ro);
                 let Some(ws) = self.open.iter_mut().find(|w| w.ro.ro == ro) else {
                     return Task::none();
                 };
+                let read = matches!(msg, ford_ui::OasisMsg::Loaded(Ok(_)));
                 let (task, outs) = ws.oasis.update(msg, &env);
                 let mut tasks = vec![{
                     let ro = ro.clone();
                     task.map(move |m| Message::Oasis(ro.clone(), m))
+                }];
+                // OASIS read: the connected vehicle data too (its request is built from OASIS's page)
+                if read {
+                    if let Some(d) = &ws.oasis.data {
+                        ws.cv.set_vars(d.cv.clone());
+                        let r = ro.clone();
+                        tasks.push(ws.cv.load(&env, false).map(move |m| Message::Cv(r.clone(), m)));
+                    }
+                }
+                for out in outs {
+                    tasks.push(self.ford_out(&ro, out));
+                }
+                return Task::batch(tasks);
+            }
+            Message::Cv(ro, msg) => {
+                let env = self.ford_env_for(&ro);
+                let Some(ws) = self.open.iter_mut().find(|w| w.ro.ro == ro) else {
+                    return Task::none();
+                };
+                let (task, outs) = ws.cv.update(msg, &env);
+                let mut tasks = vec![{
+                    let ro = ro.clone();
+                    task.map(move |m| Message::Cv(ro.clone(), m))
                 }];
                 for out in outs {
                     tasks.push(self.ford_out(&ro, out));
                 }
                 return Task::batch(tasks);
             }
+            Message::DiagMenu(open) => self.diag_menu = open,
             Message::Tsb(ro, msg) => {
                 let env = self.ford_env_for(&ro);
                 let Some(ws) = self.open.iter_mut().find(|w| w.ro.ro == ro) else {
@@ -1401,7 +1662,10 @@ impl App {
                     if self.sync.waiting.remove(ro).is_none() || self.sample_data || self.open.iter().any(|w| &w.ro.ro == ro) {
                         continue;
                     }
-                    self.open.push(Workspace::new(xtime_ui::my_ros::from_view(v)));
+                    {
+                        let ws = self.new_workspace(xtime_ui::my_ros::from_view(v));
+                        self.open.push(ws);
+                    }
                     tasks.push(self.load_ahead(ro));
                 }
                 tasks.push(self.took_views(found));
@@ -1610,8 +1874,230 @@ impl App {
                     return iced::clipboard::write(vin);
                 }
             }
+            Message::ToggleProfiles => {
+                self.profile_menu = !self.profile_menu;
+                self.profile_since = std::time::Instant::now();
+                self.profile_ask = None;
+                self.notes_open = false;
+            }
+            Message::PickProfile(id) => {
+                if id == self.profiles.active {
+                    self.profile_menu = false;
+                    return Task::none();
+                }
+                if self.profiles.get(&id).is_some_and(|p| p.pin.is_some()) {
+                    self.profile_ask = Some(ProfileAsk::Pin {
+                        id,
+                        typed: String::new(),
+                        wrong: false,
+                    });
+                    return iced::widget::text_input::focus(profile_field_id());
+                }
+                return self.switch_profile(id);
+            }
+            Message::ProfilePin(t) => {
+                let t: String = t.chars().filter(char::is_ascii_digit).take(4).collect();
+                let done = t.len() == 4;
+                if let Some(ProfileAsk::Pin { typed, wrong, .. }) = &mut self.profile_ask {
+                    *typed = t;
+                    *wrong = false;
+                }
+                // (four digits: tried straight away)
+                if done {
+                    return self.update(Message::SubmitProfilePin);
+                }
+            }
+            Message::SubmitProfilePin => {
+                if let Some(ProfileAsk::Pin { id, typed, wrong }) = &mut self.profile_ask {
+                    if self.profiles.pin_ok(id, typed) {
+                        let id = id.clone();
+                        return self.switch_profile(id);
+                    }
+                    *wrong = true;
+                    typed.clear();
+                }
+            }
+            Message::AddProfileStart => {
+                self.profile_ask = Some(ProfileAsk::Add {
+                    name: String::new(),
+                    number: String::new(),
+                    pin: String::new(),
+                    error: None,
+                });
+                return iced::widget::text_input::focus(profile_field_id());
+            }
+            Message::AddProfileName(t) => {
+                if let Some(ProfileAsk::Add { name, error, .. }) = &mut self.profile_ask {
+                    *name = t;
+                    *error = None;
+                }
+            }
+            Message::AddProfileNumber(t) => {
+                if let Some(ProfileAsk::Add { number, error, .. }) = &mut self.profile_ask {
+                    *number = t.trim().to_string();
+                    *error = None;
+                }
+            }
+            Message::AddProfilePin(t) => {
+                if let Some(ProfileAsk::Add { pin, error, .. }) = &mut self.profile_ask {
+                    *pin = t.chars().filter(char::is_ascii_digit).take(4).collect();
+                    *error = None;
+                }
+            }
+            Message::SubmitAddProfile => {
+                if let Some(ProfileAsk::Add { name, number, pin, error }) = &mut self.profile_ask {
+                    if name.trim().is_empty() {
+                        *error = Some("Type a name for it".into());
+                        return Task::none();
+                    }
+                    if !pin.is_empty() && !crate::profiles::valid_pin(pin) {
+                        *error = Some("A PIN is four digits (or leave it empty)".into());
+                        return Task::none();
+                    }
+                    let (name, number, pin) = (name.clone(), number.clone(), pin.clone());
+                    let id = self
+                        .profiles
+                        .add(&name, &number, Some(pin.as_str()).filter(|p| !p.is_empty()), &self.settings);
+                    return self.switch_profile(id);
+                }
+            }
+            Message::CancelProfileAsk => self.profile_ask = None,
+            Message::SetProfileKind(kind) => {
+                self.profiles.active_mut().kind = Some(kind);
+                self.profiles.save();
+                // what this kind doesn't have, put away
+                for ws in &mut self.open {
+                    match kind {
+                        crate::profiles::Kind::Quick if ws.manual == ManualTab::Wiring => ws.manual = ManualTab::Oasis,
+                        _ => {}
+                    }
+                }
+                if self.overlay.is_some_and(|(o, _)| o == Overlay::ProfileKind) {
+                    return self.close_overlay();
+                }
+                return self.load_manual();
+            }
+            Message::SettingsPin(t) => self.pin_draft = t.chars().filter(char::is_ascii_digit).take(4).collect(),
+            Message::SaveSettingsPin => {
+                if crate::profiles::valid_pin(&self.pin_draft) {
+                    let id = self.profiles.active.clone();
+                    self.profiles.set_pin(&id, Some(&self.pin_draft));
+                    self.pin_draft.clear();
+                    self.notice = Some("PIN set: switching to this profile asks for it".into());
+                } else {
+                    self.notice = Some("A PIN is four digits".into());
+                }
+            }
+            Message::ClearSettingsPin => {
+                let id = self.profiles.active.clone();
+                self.profiles.set_pin(&id, None);
+                self.notice = Some("PIN taken off".into());
+            }
+            Message::ProfileName(t) => self.profile_name = t,
+            Message::RemoveProfile(id) => self.profiles.remove(&id),
+            Message::Ignore => {}
+            Message::OpenAdmin => {
+                self.admin.key.clear();
+                self.admin.error = None;
+                self.admin.confirm_delete = None;
+                self.admin.note = None;
+                self.show_overlay(Overlay::Admin);
+                if !self.admin.unlocked {
+                    return iced::widget::text_input::focus(admin_field_id());
+                }
+            }
+            Message::CloseAdmin => {
+                self.admin.key.clear();
+                return self.close_overlay();
+            }
+            Message::AdminKey(t) => {
+                self.admin.key = t;
+                self.admin.error = None;
+            }
+            Message::AdminUnlock => {
+                let key = self.admin.key.trim().to_string();
+                if key.is_empty() || self.admin.checking {
+                    return Task::none();
+                }
+                self.admin.checking = true;
+                // (the feedback server knows the password: asking for everyone's reports with it says whether it's right)
+                let client = self.reports.client();
+                return Task::perform(
+                    async move {
+                        match client.all(&key).await {
+                            Ok(_) => {
+                                crate::reports::Reports::keep_key(&key);
+                                Ok(())
+                            }
+                            Err(e) => Err(e.to_string()),
+                        }
+                    },
+                    Message::AdminChecked,
+                );
+            }
+            Message::AdminChecked(r) => {
+                self.admin.checking = false;
+                self.admin.key.clear();
+                match r {
+                    Ok(()) => {
+                        self.admin.unlocked = true;
+                        self.admin.error = None;
+                    }
+                    Err(e) => self.admin.error = Some(e),
+                }
+            }
+            Message::AdminResetPin(id) => {
+                if self.admin.unlocked {
+                    self.profiles.set_pin(&id, None);
+                    let name = self.profiles.get(&id).map(|p| p.name.clone()).unwrap_or_default();
+                    self.admin.note = Some(format!("{name}'s PIN is off: they can set a new one in Settings"));
+                }
+            }
+            Message::AdminDelete(id) => {
+                if !self.admin.unlocked {
+                    return Task::none();
+                }
+                if self.admin.confirm_delete.as_deref() != Some(id.as_str()) {
+                    self.admin.confirm_delete = Some(id);
+                    return Task::none();
+                }
+                self.admin.confirm_delete = None;
+                let name = self.profiles.get(&id).map(|p| p.name.clone()).unwrap_or_default();
+                self.admin.note = Some(match self.profiles.delete(&id) {
+                    Ok(()) => format!("{name}'s profile and its files are deleted"),
+                    Err(e) => format!("{name}: {e}"),
+                });
+            }
+            Message::AdminLock => {
+                self.admin = Admin::default();
+                return self.close_overlay();
+            }
+            Message::MaintRead(ro, r) => {
+                if let Some(ws) = self.open.iter_mut().find(|w| w.ro.ro == ro) {
+                    ws.maint = match r {
+                        Ok(groups) => crate::workspace::Maint::Read(groups),
+                        Err(e) => crate::workspace::Maint::Failed(e),
+                    };
+                }
+            }
+            Message::MaintRetry(ro) => {
+                if let Some(ws) = self.open.iter_mut().find(|w| w.ro.ro == ro) {
+                    ws.maint = crate::workspace::Maint::NotRead;
+                }
+                return self.load_manual();
+            }
+            Message::OpenSpec(ro, link, title) => {
+                if let Some(ws) = self.open.iter_mut().find(|w| w.ro.ro == ro) {
+                    ws.tab = Tab::ServiceManual;
+                }
+                let shown = self.ford_out(&ro, ford_ui::Out::OpenProcedure { link, title });
+                return Task::batch([shown, self.load_manual()]);
+            }
             Message::OpenSettings => {
                 self.draft = self.settings.clone();
+                self.profile_menu = false;
+                self.pin_draft.clear();
+                self.profile_name = self.profiles.active().name.clone();
                 self.show_overlay(Overlay::Settings);
                 return ui::focus_first_field();
             }
@@ -1643,6 +2129,12 @@ impl App {
             }
             Message::SystemTheme(dark) => self.system_dark = dark,
             Message::SaveSettings => {
+                // the profile's name (shown in the switcher)
+                let name = self.profile_name.trim().to_string();
+                if !name.is_empty() && name != self.profiles.active().name {
+                    self.profiles.active_mut().name = name;
+                    self.profiles.save();
+                }
                 let mut next = self.draft.clone().cleaned();
                 if next.needs_setup() {
                     self.notice = Some("The store ID and dealer code are needed".into());
@@ -1893,9 +2385,16 @@ impl App {
                     // (already downloaded and waiting for a restart)
                     Ok(Some(f)) if matches!(&self.updates.state, State::Ready(r) if r.version == f.manifest.version) => {}
                     Ok(Some(f)) => {
+                        // a beta replaced by a regular version: back to regular updates
+                        if f.leave_beta {
+                            self.updates.set_beta(false);
+                            self.notice = Some(format!("v{} is out: going to it, and Beta updates are off", f.manifest.version));
+                        }
                         self.updates.state = State::Downloading(f.manifest.version.clone());
                         return Task::perform(crate::updates::download(self.http.clone(), f), Message::UpdateDownloaded);
                     }
+                    // (one waiting for a restart: still waiting)
+                    _ if matches!(self.updates.state, State::Ready(_)) => {}
                     Ok(None) => self.updates.state = State::Current(None),
                     Err(e) => self.updates.state = State::Failed(e),
                 }
@@ -2014,6 +2513,19 @@ impl App {
 
     /// Reads the Service Manual tab showing, when it hasn't been read yet
     fn load_manual(&mut self) -> Task<Message> {
+        // a Quick Lane's Maintenance tab: its specs read from the Workshop Manual (once)
+        let ford = self.ford.clone();
+        if let Some(ws) = self
+            .workspace_mut()
+            .filter(|w| w.tab == Tab::Maintenance && !w.is_sample() && matches!(w.maint, crate::workspace::Maint::NotRead))
+        {
+            ws.maint = crate::workspace::Maint::Reading;
+            let (ro, vin) = (ws.ro.ro.clone(), ws.ro.vin.clone());
+            return Task::perform(
+                async move { ford.maintenance_specs(&vin).await.map_err(|e| e.to_string()) },
+                move |r| Message::MaintRead(ro.clone(), r),
+            );
+        }
         let env = self.ford_env_for(self.selected.as_deref().unwrap_or(""));
         let Some(ws) = self.workspace_mut().filter(|w| w.tab == Tab::ServiceManual) else {
             return Task::none();
@@ -2021,6 +2533,10 @@ impl App {
         let ro = ws.ro.ro.clone();
         match ws.manual {
             ManualTab::Oasis => ws.oasis.load(&env, false).map(move |m| Message::Oasis(ro.clone(), m)),
+            ManualTab::ConnectedVehicle => {
+                let part = ws.cv.part;
+                ws.cv.show(part, &env).map(move |m| Message::Cv(ro.clone(), m))
+            }
             ManualTab::Tsbs => ws.tsb.load(&env, false).map(move |m| Message::Tsb(ro.clone(), m)),
             ManualTab::Workshop => ws.wsm.load(&env, false).map(move |m| Message::Wsm(ro.clone(), m)),
             // ready to type in (nothing to read until something's searched)
@@ -2057,6 +2573,16 @@ impl App {
     fn ford_out(&mut self, ro: &str, out: ford_ui::Out) -> Task<Message> {
         match out {
             ford_ui::Out::Copy(text, what) => Task::done(Message::Copy(text, what)),
+            // from Connected Vehicle: DTCs searched in the Diagnostics tab
+            ford_ui::Out::SearchDiagnostics(q) => self.show_pinpoint(ro, Pinpoint::Search(q)),
+            // from OASIS: the Connected Vehicle tab
+            ford_ui::Out::ShowConnected => {
+                if let Some(ws) = self.open.iter_mut().find(|w| w.ro.ro == ro) {
+                    ws.tab = Tab::ServiceManual;
+                    ws.manual = ManualTab::ConnectedVehicle;
+                }
+                self.load_manual()
+            }
             ford_ui::Out::SignIn => Task::done(Message::SignIn(Site::Ford)),
             // one of Ford's documents: a Service Manual tab of its own (the one already open for it, if any)
             ford_ui::Out::OpenDoc { kind, id, title, url } => {
@@ -2396,7 +2922,8 @@ impl App {
                 continue;
             }
             let ro = r.ro.clone();
-            self.open.push(Workspace::new(r));
+            let ws = self.new_workspace(r);
+            self.open.push(ws);
             tasks.push(self.load_ahead(&ro));
         }
         // the rest aren't on your list (added by hand there): asked of Xtime, each at most every 10 minutes
@@ -2631,7 +3158,8 @@ impl App {
         let ro = r.ro.clone();
         let r_vin = r.vin.clone();
         if !self.open.iter().any(|w| w.ro.ro == ro) {
-            self.open.push(Workspace::new(r));
+            let ws = self.new_workspace(r);
+            self.open.push(ws);
         }
         let read = match view {
             Some(v) => self.took_views(vec![(ro.clone(), Some(v))]),
@@ -2916,6 +3444,16 @@ impl App {
                         key: Key::Named(Named::Escape),
                         ..
                     }) => Some(Message::XvDragEnd(false)),
+                    _ => None,
+                })
+            } else {
+                Subscription::none()
+            },
+            // a website showing (crates/webpane): a click anywhere in the app (outside the page: the page's own clicks
+            // don't come here) gives the keyboard back to the app
+            if self.pane_shown.is_some() {
+                iced::event::listen_with(|event, _, _| match event {
+                    iced::Event::Mouse(iced::mouse::Event::ButtonPressed(_)) => Some(Message::PaneLeft),
                     _ => None,
                 })
             } else {

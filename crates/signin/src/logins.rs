@@ -2,7 +2,7 @@
 //! sign-in worked, and filled in on that site's sign-in page the next time.
 //!
 //! Kept by the computer's own keyring (Windows Credential Manager; the Secret Service on Linux), one entry per site
-//! (by the sign-in page's host), never in a file of the app's and never written to its logs. Filled in only on a page
+//! (by the sign-in page's host) and per profile of the app's (`PTS_PROFILE`: each person's own), never in a file of the app's and never written to its logs. Filled in only on a page
 //! of the same host (the address the web view is really on, not what a page says it is), and never sent anywhere
 //! else; "Sign in" is still yours to press.
 //!
@@ -21,25 +21,31 @@ pub struct Login {
     pub pass: String,
 }
 
-fn entry(host: &str) -> Option<keyring::Entry> {
-    keyring::Entry::new(SERVICE, host).ok()
+/// `scope`: the app's profile (each person's logins their own: none for the first profile, kept as before)
+fn entry(scope: &str, host: &str) -> Option<keyring::Entry> {
+    let service = if scope.is_empty() {
+        SERVICE.to_string()
+    } else {
+        format!("{SERVICE} ({scope})")
+    };
+    keyring::Entry::new(&service, host).ok()
 }
 
 /// The login saved for a sign-in page's host
-pub fn get(host: &str) -> Option<Login> {
-    let text = entry(host)?.get_password().ok()?;
+pub fn get(scope: &str, host: &str) -> Option<Login> {
+    let text = entry(scope, host)?.get_password().ok()?;
     serde_json::from_str::<Login>(&text)
         .ok()
         .filter(|l| !l.pass.is_empty() || !l.user.is_empty())
 }
 
 /// Saves it (when it's new or changed). Whether it was saved.
-pub fn save(host: &str, login: &Login) -> bool {
-    if host.is_empty() || login.pass.is_empty() || get(host).as_ref() == Some(login) {
+pub fn save(scope: &str, host: &str, login: &Login) -> bool {
+    if host.is_empty() || login.pass.is_empty() || get(scope, host).as_ref() == Some(login) {
         return false;
     }
     let Ok(text) = serde_json::to_string(login) else { return false };
-    entry(host).is_some_and(|e| e.set_password(&text).is_ok())
+    entry(scope, host).is_some_and(|e| e.set_password(&text).is_ok())
 }
 
 /// What's been typed on this sign-in, so far

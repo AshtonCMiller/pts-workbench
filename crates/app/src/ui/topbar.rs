@@ -1,4 +1,5 @@
-//! The top bar: getting around (Xtime / Workbench / Diagnostics, Chat, My ROs, Settings). What's going on is in the bottom bar.
+//! The top bar: getting around (Xtime / Workbench / Diagnostics, Chat, My ROs, Settings), and whose profile it is.
+//! What's going on is in the bottom bar.
 
 use iced::widget::{button, container, horizontal_space, row, text};
 use iced::{Alignment, Element, Length};
@@ -25,17 +26,18 @@ pub fn view(app: &App) -> Element<'_, Message> {
     } else {
         "Diagnostics".to_string()
     };
+    // (a Quick Lane profile has no Diagnostics)
+    let mut items: Vec<Element<'_, Message>> = vec![mode("Xtime".into(), Mode::Xtime).into(), mode(workbench, Mode::Workbench).into()];
+    if !app.quick() {
+        items.push(mode(diagnostics, Mode::Diagnostics).into());
+    }
     let modes = anim::tabs(
         match app.mode {
             Mode::Xtime => 0,
             Mode::Workbench => 1,
             Mode::Diagnostics => 2,
         },
-        vec![
-            mode("Xtime".into(), Mode::Xtime).into(),
-            mode(workbench, Mode::Workbench).into(),
-            mode(diagnostics, Mode::Diagnostics).into(),
-        ],
+        items,
     );
     let mut bar = row![modes, horizontal_space()].spacing(6).align_y(Alignment::Center);
     let toggle = |label: String, on: bool, msg: Message| button(text(label)).padding([5, 10]).style(style::toggle(on)).on_press(msg);
@@ -59,6 +61,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
         n => format!("Notifications  {n}"),
     };
     bar = bar
+        .push(super::profiles::switcher(app))
         .push(toggle(notes, app.notes_open, Message::ToggleNotes))
         .push(toggle(chat, app.chat, Message::ToggleChat))
         .push(toggle("My ROs".into(), app.sidebar, Message::ToggleSidebar))

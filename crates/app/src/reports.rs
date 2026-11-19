@@ -168,6 +168,18 @@ pub struct Reports {
 }
 
 impl Reports {
+    /// The feedback server's client (the app's admin mode checks its password with it)
+    pub fn client(&self) -> Client {
+        self.client.clone()
+    }
+
+    /// Keeps the admin's password (typed in admin mode: the Feedback list opens with it too)
+    pub fn keep_key(key: &str) {
+        if let Some(e) = key_entry() {
+            let _ = e.set_password(key);
+        }
+    }
+
     pub fn new(client: Client, reporter: String) -> Self {
         Self {
             client,

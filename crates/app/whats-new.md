@@ -12,6 +12,10 @@
 
 # Improvements
 - **A brand new app:** PTS Workbench has been rebuilt from the ground up. It starts quicker, is lighter on the computer, and everything (Xtime, the Service Manual, your hours) is drawn by the app itself.
+- **Beta Updates** automatically disable once the latest full-release has been released. So, for anyone running the beta build of this Rust app, you will automatically go to the next full-release version as soon as it is ready.
+- **App Profiles:** For shared computers, technicians can now switch between different profiles within the app and track their own hours, spiffs, and ROs separately from everyone else. Profiles can optionally be secured with a 4-digit pin (set in Settings, under Profile). Each new profile asks once whether it's for the **Main Shop** or **Quick Lane**, customizing the experience to better suit techician workloads.
+- **Vehicle History** now has its own built-in rendering under the Diagnostics tab.
+- **Connected Vehicle Data** has now been fully integrated into the new redesigned app.
 - **New Diagnostics Interface:** Designed as a stand-in replacement for IDS and FDRS where available - it communicates on the standard J2534 communication bus that modern VCIs operate under (including Fords VCM3 and VCMM). Adds a helper build next to the app executable for this 64-bit app to communicate with fords 32-bit VCI Drivers. **DIAGNOSTICS MODE IS VERY EXPERIMENTAL. USE AT YOUR OWN RISK. NO INFORMATION IS SHARED WITH FORD SERVERS - NO LOGGING FOR WARRANTY PURPOSES AT THIS TIME.**
 - **Diagnostic networks** have been expanded to implement networks aside from just HS-CAN, as well as DIAG networks used by the gateway module on newer vehicles.
 - **Your lines in the sidebar:** the vehicle you're on shows its lines under it. Flag each one, click its hours to set what it really pays, and click the date under a flagged line to move it to the day you really flagged it. **Lines** folds them away.
@@ -27,3 +31,7 @@
 - **RO Status** has been updated, so the sidebar will now show the current status of each RO.
 - **Accept new ROs from Dispatch:** Finally, through the built-in XTime display, we can finally accept new ROs from dispatch.
 - **Backup PTS & XTime Interface:** For those of us that are not yet ready to embrace what technology has to offer, the normal XTime & PTS websites are available as a built-in tool. Web pages will not hold the same performance advantages the rest of the app has.
+
+# Bug Fixes
+
+- Corrected an issue with webviews that led to the webview holding keyboard focus even after leaving the webview, leading to an inability to control certain functions of the app.

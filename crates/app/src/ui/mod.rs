@@ -9,6 +9,7 @@
 //!   settings.rs   first setup and Settings
 //!   feedback.rs   Feedback: send a bug or an idea, your reports, everyone's (the admin)
 //!   print_window.rs  the app's Print window: a preview of every page, the printer, copies
+//!   profiles.rs   the profile switcher (top right), a new profile's kind, Settings' Profile part
 //!
 //! The colours, styles, animations and pills are in crates/ui-kit (`ui::style`, `ui::anim` and `ui::pill` here); the
 //! Xtime View, its inspection form, the Add / Edit Service window, the dashboard and My ROs in crates/xtime-ui; the
@@ -22,6 +23,7 @@ mod feedback;
 pub mod lines;
 mod notes;
 mod print_window;
+mod profiles;
 mod settings;
 mod sidebar;
 mod topbar;
@@ -68,6 +70,12 @@ pub fn view(app: &App) -> Element<'_, Message> {
         Some(t) => iced::widget::stack![page, t].into(),
         None => page.into(),
     };
+    // the profile switcher's menu, dropped from the top right
+    let base: Element<'_, Message> = if app.profile_menu && app.overlay.is_none() {
+        iced::widget::stack![base, profiles::menu(app)].into()
+    } else {
+        base
+    };
     // Settings, Feedback, Print, Hours or Service: a card over everything, the page frosted behind it
     match app.overlay {
         Some((which, phase)) => {
@@ -76,6 +84,9 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 Overlay::Feedback => (feedback::card(app), Message::CloseFeedback),
                 Overlay::Print => (print_window::card(app), Message::ClosePrint),
                 Overlay::WhatsNew => (whats_new::card(app), Message::CloseWhatsNew),
+                // (answered, not put away)
+                Overlay::ProfileKind => (profiles::kind_card(app), Message::Ignore),
+                Overlay::Admin => (profiles::admin_card(app), Message::CloseAdmin),
                 Overlay::Hours => (
                     hours_ui::card(
                         &app.hours_view,

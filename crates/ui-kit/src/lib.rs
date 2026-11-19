@@ -5,8 +5,10 @@
 //!   style.rs  colours, fonts and the shared styles (cards, tabs, buttons, pills…)
 //!   anim.rs   the animated widgets: tabs, page, side, modal
 //!   scroll.rs a scrollable whose mouse wheel glides instead of jumping (use it in place of iced's)
+//!   menu.rs   a menu that drops down under something while the mouse is over it
 
 pub mod anim;
+pub mod menu;
 pub mod scroll;
 pub mod style;
 

@@ -2,7 +2,9 @@
 //! Service Manual's tabs, one module each.
 //!
 //!   oasis.rs     OASIS: the vehicle's information, field service actions (each opens its document), warnings and
-//!                warranty coverage
+//!                warranty coverage (checked against the connected vehicle's odometer)
+//!   connected.rs Connected Vehicle: the vehicle's status, health history and DTCs (with their TSBs), over-the-air
+//!                updates, software subscriptions
 //!   doc_tab.rs   a tab of its own for one of Ford's documents (an FSA: its dealer bulletin, instructions…)
 //!   pdf.rs       PDFs drawn as pages (with PDFium, when it's beside the app)
 //!   tsb.rs       TSBs: the VIN's TSBs, GSBs and SSMs, with a filter, categories and kinds
@@ -15,6 +17,7 @@
 //! signing in to PTS, the bottom bar's notice) goes back to it as [`Out`]s.
 
 pub mod article;
+pub mod connected;
 pub mod diagnostics;
 pub mod doc_tab;
 pub mod document;
@@ -27,6 +30,7 @@ pub mod pinpoint;
 pub mod tsb;
 pub mod wiring;
 
+pub use connected::{ConnectedMsg, ConnectedView};
 pub use diagnostics::{DiagMsg, DiagView};
 pub use doc_tab::{DocMsg as DocTabMsg, DocTab};
 pub use labor::{LaborMsg, LaborView};
@@ -69,6 +73,10 @@ pub enum Out {
     Print(labor::LaborPrint),
     /// Open a wiring page in the Wiring tab (from Diagnostics)
     OpenWiring(wiring::At),
+    /// Search DTCs (or words) in the Diagnostics tab ("U2100:00 B1081")
+    SearchDiagnostics(String),
+    /// Show the Connected Vehicle tab (from OASIS)
+    ShowConnected,
     /// Open a bulletin (`kind`: "TSB", "GSB", "SSM") in the TSBs tab
     OpenBulletin {
         kind: String,

@@ -21,6 +21,8 @@ pub struct Oasis {
     pub fsa: Fsa,
     pub warnings: Warnings,
     pub warranty: Warranty,
+    /// What its page sets for the connected vehicle request (crate::connected)
+    pub cv: crate::connected::CvVars,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -214,6 +216,7 @@ pub fn read(page: &str) -> Oasis {
     o.fsa = read_fsa(&doc);
     o.warnings = read_warnings(&doc);
     o.warranty = read_warranty(&doc);
+    o.cv = crate::connected::read_vars(page, &get("MODEM"));
     o
 }
 

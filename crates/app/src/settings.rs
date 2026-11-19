@@ -138,8 +138,9 @@ impl Settings {
 }
 
 /// The app's own folder (shared with the launcher, which keeps downloaded versions there)
+/// Where the app keeps everything: the profile in use's folder (crate::profiles)
 pub fn app_dir() -> PathBuf {
-    launcher::app_dir()
+    crate::profiles::dir()
 }
 
 fn file() -> PathBuf {

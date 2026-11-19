@@ -10,7 +10,9 @@
 //! installer instead, which "Restart to update" runs (silently: it puts everything in place and starts the app).
 //!
 //! The Beta updates choice is `updates.json` in the app's folder, the Electron app's file: a computer that had it on
-//! keeps it on. Leaving beta goes back to the newest regular version, even though it's "older".
+//! keeps it on. Leaving beta goes back to the newest regular version, even though it's "older". A beta running
+//! when a regular version newer than it comes out goes to that regular version (not a newer beta) and turns Beta
+//! updates off: the beta's done its job.
 //!
 //! Only on Windows, and only when started by the launcher (not while developing).
 
@@ -64,12 +66,14 @@ fn prefs_file() -> PathBuf {
     launcher::app_dir().join("updates.json")
 }
 
-/// A newer version found: its release's tag, what's in it, and whether it's "older" (leaving beta)
+/// A newer version found: its release's tag, what's in it, whether it's "older" (leaving beta), and whether it's the
+/// regular version a beta's been replaced by (Beta updates are turned off)
 #[derive(Debug, Clone, PartialEq)]
 pub struct Found {
     pub tag: String,
     pub manifest: Manifest,
     pub downgrade: bool,
+    pub leave_beta: bool,
 }
 
 /// A version downloaded: ready for "Restart to update" (its installer, when it needs one)
@@ -140,9 +144,11 @@ impl Updates {
         !matches!(self.state, State::Off(_))
     }
 
-    /// Time to look again (not while looking or downloading; not once something's waiting for a restart)
+    /// Time to look again (not while looking or downloading). Still looking with one waiting for a restart: a newer one
+    /// may come out meanwhile (a beta waiting, and a regular version comes out: that one, and Beta updates off).
     pub fn due(&self, now: i64) -> bool {
-        matches!(self.state, State::Idle | State::Current(_) | State::Failed(_)) && self.checked_at.is_none_or(|t| now - t >= CHECK_EVERY)
+        matches!(self.state, State::Idle | State::Current(_) | State::Failed(_) | State::Ready(_))
+            && self.checked_at.is_none_or(|t| now - t >= CHECK_EVERY)
     }
 
     pub fn busy(&self) -> bool {
@@ -233,6 +239,12 @@ pub fn take_regular(latest: &str, running: &str) -> Option<bool> {
     (newer || leaving_beta).then_some(!newer)
 }
 
+/// Whether a beta that's running is done with: a regular version newer than it is out ("0.5.1" for "0.5.0-beta.50",
+/// and "0.5.0" too: the release is newer than its betas)
+pub fn beta_replaced(latest_regular: &str, running: &str) -> bool {
+    running.contains('-') && compare_versions(latest_regular, running) == Ordering::Greater
+}
+
 /// A release's manifest (none when the release has none: an Electron release, or still being uploaded)
 async fn manifest_at(http: &Http, address: &str) -> Result<Option<Manifest>, String> {
     let res = http
@@ -253,6 +265,20 @@ async fn manifest_at(http: &Http, address: &str) -> Result<Option<Manifest>, Str
 /// Looks for a newer version (see the top of this file)
 pub async fn check(http: Http, beta: bool, running: String) -> Result<Option<Found>, String> {
     let base = releases();
+    let latest = format!("{base}/latest/download/{MANIFEST}");
+    // a beta running, and a regular version newer than it out: that one (not a newer beta), and Beta updates off
+    if beta && running.contains('-') {
+        if let Some(m) = manifest_at(&http, &latest).await? {
+            if beta_replaced(&m.version, &running) {
+                return Ok(Some(Found {
+                    tag: format!("v{}", m.version),
+                    manifest: m,
+                    downgrade: false,
+                    leave_beta: true,
+                }));
+            }
+        }
+    }
     if beta {
         let feed = http
             .send(Http::request(Method::GET, url(&format!("{base}.atom"))?).header("Accept", "application/atom+xml, */*"))
@@ -268,18 +294,20 @@ pub async fn check(http: Http, beta: bool, running: String) -> Result<Option<Fou
                     tag,
                     manifest: m,
                     downgrade: false,
+                    leave_beta: false,
                 }));
             }
         }
         return Ok(None);
     }
-    let Some(m) = manifest_at(&http, &format!("{base}/latest/download/{MANIFEST}")).await? else {
+    let Some(m) = manifest_at(&http, &latest).await? else {
         return Ok(None);
     };
     Ok(take_regular(&m.version, &running).map(|downgrade| Found {
         tag: format!("v{}", m.version),
         manifest: m,
         downgrade,
+        leave_beta: false,
     }))
 }
 
@@ -464,6 +492,11 @@ mod tests {
         // leaving beta: back to the newest regular version, though it's older
         assert_eq!(take_regular("0.5.0", "0.5.1-beta.4"), Some(true));
         assert_eq!(take_regular("0.5.1", "0.5.1-beta.4"), Some(false));
+        // a beta replaced by a newer regular version (even with a newer beta out): that one, Beta updates off
+        assert!(beta_replaced("0.5.1", "0.5.0-beta.50"));
+        assert!(beta_replaced("0.5.0", "0.5.0-beta.50"));
+        assert!(!beta_replaced("0.4.9", "0.5.0-beta.50"));
+        assert!(!beta_replaced("0.5.1", "0.5.0"));
     }
 
     #[test]

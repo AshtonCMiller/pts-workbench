@@ -226,6 +226,7 @@ pub fn card(app: &App) -> Element<'_, Message> {
                 ]
                 .align_y(Alignment::Center),
                 fields(app),
+                super::profiles::settings_part(app),
                 accounts(app),
                 column![
                     text("Appearance").font(style::BOLD),
@@ -246,6 +247,17 @@ pub fn card(app: &App) -> Element<'_, Message> {
                 .spacing(4),
                 sync(app),
                 version(app),
+                row![
+                    text("Admin mode: delete profiles, reset PINs (the Feedback password)")
+                        .size(12)
+                        .style(style::muted),
+                    horizontal_space(),
+                    button(text("Admin mode").size(12))
+                        .padding([4, 10])
+                        .style(style::ghost)
+                        .on_press(Message::OpenAdmin),
+                ]
+                .align_y(Alignment::Center),
                 row![
                     notice(app),
                     horizontal_space(),

@@ -19,6 +19,8 @@ thread_local! {
     static CONTEXT: RefCell<Option<WebContext>> = const { RefCell::new(None) };
     /// What's been typed on a sign-in page in them (saved once the sign-in works)
     static TYPED: RefCell<logins::Typed> = RefCell::new(logins::Typed::default());
+    /// Whose saved logins (the app's profile)
+    static SCOPE: RefCell<String> = const { RefCell::new(String::new()) };
 }
 
 fn rect(r: Rectangle) -> wry::Rect {
@@ -29,11 +31,12 @@ fn rect(r: Rectangle) -> wry::Rect {
 }
 
 pub fn show(parent: &impl HasWindowHandle, page: &Page, at: Rectangle) -> Result<(), String> {
+    SCOPE.with(|s| *s.borrow_mut() = page.scope.clone());
     PAGES.with(|pages| {
         let mut pages = pages.borrow_mut();
         for (id, v) in pages.iter() {
             if *id != page.id {
-                let _ = v.set_visible(false);
+                hide(v);
             }
         }
         if let Some(v) = pages.get(&page.id) {
@@ -64,11 +67,88 @@ pub fn show(parent: &impl HasWindowHandle, page: &Page, at: Rectangle) -> Result
     })
 }
 
+/// Hides a page, giving the keyboard back to the app first (a hidden web view keeps it otherwise: nothing could be
+/// typed in the app's own fields)
+fn hide(v: &WebView) {
+    let _ = v.focus_parent();
+    let _ = v.set_visible(false);
+}
+
 pub fn hide_all() {
     PAGES.with(|pages| {
         if let Ok(pages) = pages.try_borrow() {
             for v in pages.values() {
-                let _ = v.set_visible(false);
+                hide(v);
+            }
+        }
+    });
+}
+
+/// A picture of a page (a PNG, WebView2's CapturePreview), then the page hidden; the picture sent when it's taken
+/// (none: it couldn't be)
+pub fn picture_and_hide(id: &str, done: iced::futures::channel::oneshot::Sender<Option<Vec<u8>>>) {
+    use ::windows::Win32::Foundation::HGLOBAL;
+    use ::windows::Win32::System::Com::StructuredStorage::CreateStreamOnHGlobal;
+    use ::windows::Win32::System::Com::{IStream, STATFLAG_NONAME, STATSTG, STREAM_SEEK_SET};
+    use webview2_com::CapturePreviewCompletedHandler;
+    use webview2_com::Microsoft::Web::WebView2::Win32::COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG;
+    use wry::WebViewExtWindows;
+
+    let started = PAGES.with(|pages| {
+        let Ok(pages) = pages.try_borrow() else { return None };
+        let v = pages.get(id)?;
+        // SAFETY: COM calls on the window's own thread, on a web view that's open
+        unsafe {
+            let core = v.controller().CoreWebView2().ok()?;
+            let stream: IStream = CreateStreamOnHGlobal(HGLOBAL::default(), ::windows::Win32::Foundation::BOOL::from(true)).ok()?;
+            let kept = stream.clone();
+            let page = id.to_string();
+            let done = std::cell::RefCell::new(Some(done));
+            let handler = CapturePreviewCompletedHandler::create(Box::new(move |result| {
+                // the picture read out of the stream, then the page hidden
+                let png = result.ok().and_then(|_| {
+                    kept.Seek(0, STREAM_SEEK_SET, None).ok()?;
+                    let mut stat = STATSTG::default();
+                    kept.Stat(&mut stat, STATFLAG_NONAME).ok()?;
+                    let mut buf = vec![0u8; stat.cbSize as usize];
+                    let mut read = 0u32;
+                    kept.Read(buf.as_mut_ptr().cast(), buf.len() as u32, Some(&mut read)).ok().ok()?;
+                    buf.truncate(read as usize);
+                    Some(buf)
+                });
+                hide_one(&page);
+                if let Some(d) = done.borrow_mut().take() {
+                    let _ = d.send(png);
+                }
+                Ok(())
+            }));
+            core.CapturePreview(COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG, &stream, &handler)
+                .ok()?;
+            Some(())
+        }
+    });
+    // (couldn't start: hidden straight away, no picture)
+    if started.is_none() {
+        hide_one(id);
+    }
+}
+
+fn hide_one(id: &str) {
+    PAGES.with(|pages| {
+        if let Ok(pages) = pages.try_borrow() {
+            if let Some(v) = pages.get(id) {
+                hide(v);
+            }
+        }
+    });
+}
+
+/// The keyboard back to the app (clicked outside the page showing: its fields are typed in again)
+pub fn focus_app() {
+    PAGES.with(|pages| {
+        if let Ok(pages) = pages.try_borrow() {
+            for v in pages.values() {
+                let _ = v.focus_parent();
             }
         }
     });
@@ -78,9 +158,34 @@ pub fn close(ids: &[String]) {
     PAGES.with(|pages| {
         if let Ok(mut pages) = pages.try_borrow_mut() {
             for id in ids {
-                // (dropped: its web view closes)
+                // (dropped: its web view closes; the keyboard the app's first)
+                if let Some(v) = pages.get(id) {
+                    let _ = v.focus_parent();
+                }
                 pages.remove(id);
             }
+        }
+    });
+}
+
+/// Every page closed, and their profile let go of (another profile's pages open with its own)
+pub fn close_all() {
+    PAGES.with(|pages| {
+        if let Ok(mut pages) = pages.try_borrow_mut() {
+            for v in pages.values() {
+                let _ = v.focus_parent();
+            }
+            pages.clear();
+        }
+    });
+    CONTEXT.with(|c| {
+        if let Ok(mut c) = c.try_borrow_mut() {
+            *c = None;
+        }
+    });
+    TYPED.with(|t| {
+        if let Ok(mut t) = t.try_borrow_mut() {
+            *t = logins::Typed::default();
         }
     });
 }
@@ -93,6 +198,10 @@ pub fn reload(id: &str) {
             }
         }
     });
+}
+
+fn scope() -> String {
+    SCOPE.with(|s| s.borrow().clone())
 }
 
 fn host_of(url: &str) -> String {
@@ -131,12 +240,12 @@ fn loaded(id: &str, url: &str) {
         if let Ok(mut t) = t.try_borrow_mut() {
             if t.typed_on().is_some_and(|h| h != host) {
                 if let Some((h, login)) = t.take() {
-                    logins::save(&h, &login);
+                    logins::save(&scope(), &h, &login);
                 }
             }
         }
     });
-    if let Some(saved) = logins::get(&host) {
+    if let Some(saved) = logins::get(&scope(), &host) {
         let script = logins::fill_script(&saved);
         PAGES.with(|p| {
             if let Ok(p) = p.try_borrow() {

@@ -14,6 +14,8 @@ pub struct Workspace {
     pub xv: xtime_ui::XtimeView,
     /// The Service Manual's OASIS and TSBs tabs (crates/ford-ui)
     pub oasis: ford_ui::OasisView,
+    /// The Connected Vehicle tab (its status shows on OASIS too)
+    pub cv: ford_ui::ConnectedView,
     pub tsb: ford_ui::TsbView,
     /// The Workshop Manual tab
     pub wsm: ford_ui::ManualView,
@@ -26,12 +28,25 @@ pub struct Workspace {
     /// Tabs of their own for Ford's documents (an FSA opened from OASIS…), and the next one's number
     pub docs: Vec<ford_ui::DocTab>,
     pub next_doc: u32,
+    /// The Maintenance tab's specs (a Quick Lane profile's)
+    pub maint: Maint,
+}
+
+/// The Maintenance tab: the specs read from the Workshop Manual (ford::specs)
+#[derive(Debug, Clone, Default)]
+pub enum Maint {
+    #[default]
+    NotRead,
+    Reading,
+    Read(Vec<ford::specs::SpecGroup>),
+    Failed(String),
 }
 
 impl Workspace {
     pub fn new(ro: AssignedRo) -> Self {
         let xv = xtime_ui::XtimeView::new(ro.ro.clone());
         let oasis = ford_ui::OasisView::new(ro.vin.clone());
+        let cv = ford_ui::ConnectedView::new(ro.vin.clone());
         let tsb = ford_ui::TsbView::new(ro.vin.clone());
         let wsm = ford_ui::ManualView::new(ro.vin.clone());
         let diag = ford_ui::DiagView::new(ro.vin.clone());
@@ -49,6 +64,7 @@ impl Workspace {
             manual: ManualTab::Oasis,
             xv,
             oasis,
+            cv,
             tsb,
             wsm,
             diag,
@@ -56,6 +72,7 @@ impl Workspace {
             wiring,
             docs: Vec::new(),
             next_doc: 1,
+            maint: Maint::NotRead,
         }
     }
 
@@ -73,6 +90,8 @@ impl Workspace {
 /// A vehicle's main tabs
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
+    /// The maintenance specs (ford::specs): a Quick Lane profile's first tab, a Main Shop's last
+    Maintenance,
     /// The app's own Xtime RO page
     XtimeView,
     /// Xtime's own RO page (the website, inside the app: crates/webpane)
@@ -84,9 +103,14 @@ pub enum Tab {
 }
 
 impl Tab {
-    pub const ALL: [Tab; 4] = [Tab::XtimeView, Tab::XtimeSite, Tab::ServiceManual, Tab::PtsSite];
+    /// A Main Shop profile's: the maintenance specs last
+    pub const ALL: [Tab; 5] = [Tab::XtimeView, Tab::XtimeSite, Tab::ServiceManual, Tab::PtsSite, Tab::Maintenance];
+    /// A Quick Lane profile's: the maintenance specs first
+    pub const QUICK: [Tab; 5] = [Tab::Maintenance, Tab::XtimeView, Tab::XtimeSite, Tab::ServiceManual, Tab::PtsSite];
+
     pub fn label(self) -> &'static str {
         match self {
+            Tab::Maintenance => "Maintenance",
             Tab::XtimeView => "Xtime View",
             Tab::XtimeSite => "Xtime RO Page",
             Tab::ServiceManual => "Service Manual",
@@ -101,6 +125,10 @@ pub enum ManualTab {
     Oasis,
     ConnectedVehicle,
     Diagnostics,
+    /// Under Diagnostics (its menu): every PTS / FDRS session recorded for the VIN (PTS's own page, inside the app)
+    History,
+    /// Under Diagnostics (its menu): the vehicle's software
+    Software,
     Tsbs,
     Workshop,
     Wiring,
@@ -125,12 +153,19 @@ impl ManualTab {
             ManualTab::Oasis => "OASIS",
             ManualTab::ConnectedVehicle => "Connected Vehicle",
             ManualTab::Diagnostics => "Diagnostics",
+            ManualTab::History => "Vehicle History",
+            ManualTab::Software => "Vehicle Software",
             ManualTab::Tsbs => "TSBs",
             ManualTab::Workshop => "Workshop Manual",
             ManualTab::Wiring => "Wiring",
             ManualTab::Labor => "Labor Times",
             ManualTab::Doc(_) => "Document",
         }
+    }
+
+    /// One of the Diagnostics tab's (its menu: Diagnostics Home, Vehicle History, Vehicle Software)
+    pub fn is_diag(self) -> bool {
+        matches!(self, ManualTab::Diagnostics | ManualTab::History | ManualTab::Software)
     }
 
     /// What the tab will show (until the Ford crate has it)
@@ -141,6 +176,8 @@ impl ManualTab {
                 "What the vehicle reports through its modem: status, DTC history with TSBs, over-the-air updates, subscriptions."
             }
             ManualTab::Diagnostics => "Search DTCs and symptoms for TSBs, GSBs, SSMs, pinpoint tests and procedures.",
+            ManualTab::History => "Every PTS and FDRS session recorded for this VIN: when, the mileage, and each step.",
+            ManualTab::Software => "The vehicle's module software: what it has, and what's newer.",
             ManualTab::Tsbs => "TSBs, GSBs and SSMs for this VIN.",
             ManualTab::Workshop => "The Workshop Manual and PC/ED for this VIN: contents, search and procedures.",
             ManualTab::Wiring => "Wiring diagrams for this VIN: contents, pages and connector views.",

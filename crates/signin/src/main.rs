@@ -325,6 +325,8 @@ fn main() {
     let mut site_loaded: Option<Instant> = None;
     let mut waiting_said = false;
     let mut typed = logins::Typed::default();
+    // whose logins (the app's profile: each person's own)
+    let scope = std::env::var("PTS_PROFILE").unwrap_or_default();
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
         let _keep = (&window, &context); // the window and the web view's profile live as long as the web view
@@ -343,7 +345,7 @@ fn main() {
             Event::UserEvent(UserEvent::Loaded(url)) => {
                 log.page("loaded", &url);
                 // a sign-in page with a saved login: filled in (each field only while it's empty)
-                if let Some(saved) = logins::get(&host_of(&url)) {
+                if let Some(saved) = logins::get(&scope, &host_of(&url)) {
                     let _ = webview.evaluate_script(&logins::fill_script(&saved));
                 }
                 if host_of(&url) == a.done_host && !path_of(&url).starts_with("/transport") {
@@ -404,7 +406,7 @@ fn main() {
                 log.page("signed in at", &here);
                 // it worked: the login typed is kept for next time (the site's name in the log, nothing else)
                 if let Some((host, login)) = typed.take() {
-                    if logins::save(&host, &login) {
+                    if logins::save(&scope, &host, &login) {
                         log.line(&format!("saved the login for {host}"));
                     }
                 }

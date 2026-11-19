@@ -5,8 +5,9 @@
 //! size; the app then calls [`show`] with that place, and every other page is hidden. Pages stay open while hidden
 //! (going back to one finds it as you left it) until [`close`].
 //!
-//! A web view sits on top of everything iced draws, so the app hides them all ([`hide_all`]) while one of its own
-//! cards (Settings…) is open.
+//! A web view sits on top of everything iced draws, so while one of the app's own cards (Settings, Feedback…) is
+//! open, the page is hidden ([`picture_and_hide`]): a picture of it, taken just before, is drawn in its room instead,
+//! so it still looks to be there behind the card.
 //!
 //! Each page opens signed in: the app's sign-in cookies are handed to it first. If a site asks to sign in anyway,
 //! its saved login is filled in (the sign-in window's saved logins: crates/signin/src/logins.rs), and a new one is
@@ -40,6 +41,8 @@ pub struct Page {
     pub cookies: Vec<SiteCookie>,
     /// The web views' own profile folder
     pub data_dir: PathBuf,
+    /// Whose saved logins (the app's profile: none for its first)
+    pub scope: String,
 }
 
 /// Shows the page in this place (opened the first time, else moved there); every other page is hidden. Its error
@@ -72,6 +75,17 @@ pub fn hide_all() -> Task<()> {
     })
 }
 
+/// Gives the keyboard back to the app (a click outside the page showing: a web view keeps the keyboard until then,
+/// and the app's own fields couldn't be typed in)
+pub fn focus_app() -> Task<()> {
+    window::get_latest().and_then(|id| {
+        window::run_with_handle(id, |_| {
+            #[cfg(windows)]
+            win::focus_app();
+        })
+    })
+}
+
 /// Closes these pages (their RO closed)
 pub fn close(ids: Vec<String>) -> Task<()> {
     window::get_latest().and_then(move |id| {
@@ -83,6 +97,53 @@ pub fn close(ids: Vec<String>) -> Task<()> {
             let _ = ids;
         })
     })
+}
+
+/// Closes every page (switching to another of the app's profiles: its pages are its own)
+pub fn close_all() -> Task<()> {
+    window::get_latest().and_then(|id| {
+        window::run_with_handle(id, |_| {
+            #[cfg(windows)]
+            win::close_all();
+        })
+    })
+}
+
+/// A picture of a page as it is (a PNG), then the page hidden: the app draws the picture in its room while one of
+/// its cards is over it (none: the picture couldn't be taken, and the page is hidden anyway)
+pub fn picture_and_hide(page: String) -> Task<Option<Vec<u8>>> {
+    use iced::futures::channel::oneshot;
+    use std::sync::{Arc, Mutex};
+    let (tx, rx) = oneshot::channel::<Option<Vec<u8>>>();
+    let tx = Arc::new(Mutex::new(Some(tx)));
+    let rx = Arc::new(Mutex::new(Some(rx)));
+    window::get_latest()
+        .and_then(move |id| {
+            let (page, tx) = (page.clone(), tx.clone());
+            window::run_with_handle(id, move |_| {
+                let Some(tx) = tx.lock().ok().and_then(|mut t| t.take()) else {
+                    return;
+                };
+                #[cfg(windows)]
+                win::picture_and_hide(&page, tx);
+                #[cfg(not(windows))]
+                {
+                    let _ = (page, tx.send(None));
+                }
+            })
+        })
+        .then(move |_| {
+            let rx = rx.lock().ok().and_then(|mut r| r.take());
+            Task::perform(
+                async move {
+                    match rx {
+                        Some(rx) => rx.await.ok().flatten(),
+                        None => None,
+                    }
+                },
+                |png| png,
+            )
+        })
 }
 
 /// Reloads a page (it's gone wrong, or to see it again from the start)

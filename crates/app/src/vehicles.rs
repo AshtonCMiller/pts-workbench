@@ -69,6 +69,7 @@ pub struct Saved {
 // The Electron app's names for the tabs
 fn tab_kind(t: Tab) -> &'static str {
     match t {
+        Tab::Maintenance => "maint",
         Tab::XtimeView => "xview",
         Tab::XtimeSite => "xtime",
         Tab::ServiceManual => "service",
@@ -81,6 +82,8 @@ fn manual_kind(m: ManualTab) -> &'static str {
         ManualTab::Oasis | ManualTab::Doc(_) => "oasisview",
         ManualTab::ConnectedVehicle => "cvview",
         ManualTab::Diagnostics => "diag",
+        ManualTab::History => "vhist",
+        ManualTab::Software => "vsw",
         ManualTab::Tsbs => "tsb",
         ManualTab::Workshop => "manual",
         ManualTab::Wiring => "wiring",
@@ -93,6 +96,8 @@ fn manual_of(kind: &str) -> Option<ManualTab> {
         "oasisview" | "oasis" => ManualTab::Oasis,
         "cvview" | "cvd" | "ota" => ManualTab::ConnectedVehicle,
         "diag" => ManualTab::Diagnostics,
+        "vhist" => ManualTab::History,
+        "vsw" => ManualTab::Software,
         "tsb" => ManualTab::Tsbs,
         "manual" | "pced" => ManualTab::Workshop,
         "wiring" => ManualTab::Wiring,
@@ -118,6 +123,7 @@ fn read_entry(e: &Value) -> Option<SavedVehicle> {
             "service" => Tab::ServiceManual,
             "xtime" => Tab::XtimeSite,
             "pts" => Tab::PtsSite,
+            "maint" => Tab::Maintenance,
             _ => Tab::XtimeView,
         };
         manual = manual_of(&s(&rs["manual"])).unwrap_or(ManualTab::Oasis);

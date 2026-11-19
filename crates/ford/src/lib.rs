@@ -10,12 +10,14 @@
 //! | [`tsb`]       | TSBs / GSBs / SSMs for the VIN; one article (or FSA document), or its PDF   |
 //! | [`fsa`]       | an FSA's page from OASIS: its documents (PDFs); the document server's sign-on |
 //! | [`doc`]       | Ford's documents read into a plain document the app draws in its own style  |
+//! | [`connected`] | Connected Vehicle: status, health history, OTA updates, subscriptions       |
 //! | (to come)     | the Workshop Manual and PC/ED, wiring, TSBs, Connected Vehicle, SLTS, Diagnostics |
 //!
 //! Each module has a pure part that reads Ford's answer (tested without Ford) and a method on [`Ford`] that asks.
 //! The dealer code comes from the app's settings (set on first setup), never from the code. Nothing about the
 //! vehicle's owner is kept.
 
+pub mod connected;
 pub mod diagnostics;
 pub mod doc;
 pub mod fsa;
@@ -23,6 +25,7 @@ pub mod html;
 pub mod labor;
 pub mod manual;
 pub mod oasis;
+pub mod specs;
 pub mod tsb;
 pub mod vehicle;
 pub mod wiring;
