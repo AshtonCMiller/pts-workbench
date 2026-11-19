@@ -82,6 +82,8 @@ pub enum Overlay {
     ProfileKind,
     /// Admin mode: the Feedback password, then every profile (delete one, reset its PIN)
     Admin,
+    /// Pair phone (bottom right): its QR code, the phones paired, when they get notifications
+    Phone,
 }
 
 /// Admin mode (the Feedback password, checked by the feedback server; unlocked until it's locked, the app closes or
@@ -256,6 +258,8 @@ pub struct App {
     /// Every task started (stopped when switching profiles: nothing of one profile's lands in another's)
     tasks: Vec<iced::task::Handle>,
     pub admin: Admin,
+    /// Your phone (crate::phone): paired or not, its card's state
+    pub phone: crate::phone::PhoneState,
 }
 
 /// The dashboard's and My ROs' messages (crates/xtime-ui) are the app's own
@@ -531,6 +535,18 @@ pub enum Message {
     /// profile deleted (pressed twice); locked
     OpenAdmin,
     CloseAdmin,
+    /// Your phone: the card, asking the server which phones are paired, a test, unpairing, when they're sent to
+    OpenPhone,
+    ClosePhone,
+    PhoneCheck,
+    PhoneChecked(Result<Vec<crate::phone::PhoneInfo>, String>),
+    PhoneTest,
+    PhoneTested(Result<usize, String>),
+    PhoneUnpair,
+    PhoneUnpaired(Result<(), String>),
+    /// Notifications sent to the phone (their IDs, and how it went)
+    PhoneSent(Vec<u64>, Result<usize, String>),
+    SetPhoneAfter(u32),
     AdminKey(String),
     AdminUnlock,
     AdminChecked(Result<(), String>),
@@ -707,6 +723,7 @@ impl App {
             profile_name: String::new(),
             tasks: Vec::new(),
             admin: Admin::default(),
+            phone: crate::phone::PhoneState::default(),
         };
         // (straight onto the vehicle showing, no transition in)
         app.outer = Transition::new(app.outer_key());
@@ -2015,6 +2032,79 @@ impl App {
                 self.admin.key.clear();
                 return self.close_overlay();
             }
+            Message::OpenPhone => {
+                self.profile_menu = false;
+                self.phone.qr = self
+                    .phone_keys()
+                    .and_then(|k| ui_kit::qr::encode(crate::phone::pair_link(&k).as_bytes(), ui_kit::qr::Level::L));
+                self.phone.tested = None;
+                self.phone.unpair_asked = false;
+                self.show_overlay(Overlay::Phone);
+                return self.check_phone();
+            }
+            Message::ClosePhone => {
+                // (the code isn't kept around once it's put away)
+                self.phone.unpair_asked = false;
+                return self.close_overlay();
+            }
+            Message::PhoneCheck => return self.check_phone(),
+            Message::PhoneChecked(r) => {
+                self.phone.checking = false;
+                self.phone.checked_at = Some(self.now);
+                match r {
+                    Ok(list) => {
+                        self.phone.phones = Some(list);
+                        self.phone.error = None;
+                    }
+                    Err(e) => self.phone.error = Some(e),
+                }
+            }
+            Message::PhoneTest => {
+                let Some(keys) = self.phone_keys() else { return Task::none() };
+                self.phone.testing = true;
+                self.phone.tested = None;
+                return Task::perform(
+                    crate::phone::send(
+                        self.http.clone(),
+                        keys,
+                        "PTS Workbench".into(),
+                        "This is a test from your computer. Notifications work!".into(),
+                        "test".into(),
+                    ),
+                    Message::PhoneTested,
+                );
+            }
+            Message::PhoneTested(r) => {
+                self.phone.testing = false;
+                self.phone.tested = Some(r);
+            }
+            Message::PhoneUnpair => {
+                if !self.phone.unpair_asked {
+                    self.phone.unpair_asked = true;
+                    return Task::none();
+                }
+                self.phone.unpair_asked = false;
+                let Some(keys) = self.phone_keys() else { return Task::none() };
+                return Task::perform(crate::phone::unpair(self.http.clone(), keys), Message::PhoneUnpaired);
+            }
+            Message::PhoneUnpaired(r) => match r {
+                Ok(()) => {
+                    self.phone.phones = Some(Vec::new());
+                    self.phone.tested = None;
+                }
+                Err(e) => self.phone.error = Some(e),
+            },
+            Message::PhoneSent(_ids, r) => {
+                if let Err(e) = r {
+                    // (they stay marked sent: not tried over and over; the next ones try again)
+                    self.phone.error = Some(e);
+                }
+            }
+            Message::SetPhoneAfter(m) => {
+                self.settings.phone_after = Some(m);
+                self.draft.phone_after = Some(m);
+                let _ = self.settings.save();
+            }
             Message::AdminKey(t) => {
                 self.admin.key = t;
                 self.admin.error = None;
@@ -2291,10 +2381,18 @@ impl App {
                     self.hours.heartbeat(now);
                     let _ = timecard::save(&self.hours);
                 }
+                // your phone: which are paired, every ten minutes; unread notifications sent to them
+                let phone_check = if self.phone.checked_at.is_none_or(|t| self.now - t >= 600) {
+                    self.check_phone()
+                } else {
+                    Task::none()
+                };
+                let phone_send = self.send_to_phone();
                 // sync: every minute (and soon after a change, see SyncDue)
                 let sync_due = self.sync.last_run.is_none_or(|t| self.now - t >= crate::syncing::EVERY);
                 let sync = if sync_due { self.sync_now() } else { Task::none() };
                 // updates: shortly after starting, then every half hour
+                let sync = Task::batch([sync, phone_check, phone_send]);
                 if self.updates.on() && self.updates.due(self.now) {
                     return Task::batch([sync, self.check_updates()]);
                 }
@@ -2492,6 +2590,7 @@ impl App {
                         Overlay::Print => self.print_job = None,
                         Overlay::Service => self.service = None,
                         Overlay::WhatsNew => self.whats_new = None,
+                        Overlay::Phone => self.phone.qr = None,
                         _ => {}
                     }
                 }
@@ -3256,6 +3355,51 @@ impl App {
         self.watch.lines(ro, &lines)
     }
 
+    /// What pairs a phone and sends to it: this profile's sync keys (its store ID and employee number)
+    fn phone_keys(&self) -> Option<workbench_sync::Keys> {
+        if self.sample_data {
+            return None;
+        }
+        crate::syncing::derive_keys(&self.settings.store_id, &self.settings.employee_number)
+    }
+
+    /// Asks the server which phones are paired (not while it's asking already)
+    fn check_phone(&mut self) -> Task<Message> {
+        let Some(keys) = self.phone_keys() else {
+            return Task::none();
+        };
+        if self.phone.checking {
+            return Task::none();
+        }
+        self.phone.checking = true;
+        Task::perform(crate::phone::status(self.http.clone(), keys), Message::PhoneChecked)
+    }
+
+    /// Notifications unread here a while: sent to your phone (once each)
+    fn send_to_phone(&mut self) -> Task<Message> {
+        if !self.phone.paired() {
+            return Task::none();
+        }
+        let Some(keys) = self.phone_keys() else {
+            return Task::none();
+        };
+        let ids = crate::phone::due(&self.notes, timecard::now_ms(), self.settings.phone_after_min());
+        if ids.is_empty() {
+            return Task::none();
+        }
+        let (title, body, tag) = {
+            let list: Vec<&crate::notes::Note> = ids.iter().filter_map(|id| self.notes.get(*id)).collect();
+            crate::phone::message(&list)
+        };
+        for id in &ids {
+            self.notes.mark_phoned(*id);
+        }
+        self.notes.save();
+        Task::perform(crate::phone::send(self.http.clone(), keys, title, body, tag), move |r| {
+            Message::PhoneSent(ids.clone(), r)
+        })
+    }
+
     /// New notifications: kept in the list, the newest popped up in the corner, the taskbar button flashed
     fn notify(&mut self, news: Vec<crate::notes::New>) -> Task<Message> {
         if news.is_empty() || self.sample_data {
@@ -3427,6 +3571,12 @@ impl App {
             },
             iced::window::open_events().map(|_| Message::WindowOpened),
             iced::time::every(std::time::Duration::from_secs(15 * 60)).map(|_| Message::Report(ReportMsg::Count)),
+            // Pair phone: whether it's paired yet, every few seconds while its card is up
+            if matches!(self.overlay, Some((Overlay::Phone, _))) {
+                iced::time::every(std::time::Duration::from_secs(4)).map(|_| Message::PhoneCheck)
+            } else {
+                Subscription::none()
+            },
             // the Print window: printers added meanwhile (Manage printers) show up
             if matches!(self.overlay, Some((Overlay::Print, _))) {
                 iced::time::every(std::time::Duration::from_secs(3)).map(|_| Message::RefreshPrinters)

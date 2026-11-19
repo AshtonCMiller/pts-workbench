@@ -26,6 +26,8 @@ pub struct Settings {
     pub graphics: Graphics,
     /// The Xtime page shows Xtime's own dashboard (the website), not the app's
     pub xtime_site: bool,
+    /// Minutes a notification stays unread before it's sent to your phone (0: never; none: the usual 5)
+    pub phone_after: Option<u32>,
 }
 
 /// How the app draws its window. Standard: the graphics card, through DirectX 12 on Windows (the way Windows' own apps
@@ -114,6 +116,11 @@ impl Settings {
             .ok()
             .and_then(|t| serde_json::from_str(&t).ok())
             .unwrap_or_default()
+    }
+
+    /// Minutes a notification stays unread before it's sent to your phone (0: never)
+    pub fn phone_after_min(&self) -> u32 {
+        self.phone_after.unwrap_or(crate::phone::DEFAULT_AFTER)
     }
 
     /// Saves them (whole or not at all)

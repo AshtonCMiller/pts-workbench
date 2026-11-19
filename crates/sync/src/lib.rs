@@ -53,6 +53,21 @@ impl Keys {
             key: self.key,
         }
     }
+
+    /// What pairs a phone (the page at `<server>/phone/` reads it after `#pair=`): this ID and the key, so the phone
+    /// can work out the same push ID and token, and later read your synced flags itself. Shown only as a QR code.
+    pub fn pair_code(&self) -> String {
+        format!("v1.{}.{}", self.id, hex(&self.key))
+    }
+
+    /// For phone notifications (sync-server/src/push.js): whose phones (a hash of the sync ID) and the token that
+    /// sends to them (from the key: the server keeps only a hash of it). The phone page works out the same two.
+    pub fn push_ids(&self) -> (String, String) {
+        (
+            hex(&Sha256::digest(format!("pts-push|{}", self.id).as_bytes())),
+            hex(&Sha256::digest(format!("pts-push-token|{}", hex(&self.key)).as_bytes())),
+        )
+    }
 }
 
 impl std::fmt::Debug for Keys {
@@ -879,6 +894,20 @@ mod tests {
         assert_eq!(back, v);
         assert!(derive_keys("3590", "").is_none());
         assert_eq!(derive_keys("3590", "0").unwrap().id, derive_keys("3590", "000").unwrap().id);
+    }
+
+    #[test]
+    fn the_phone_works_out_the_same() {
+        // (the same as sync-server/site/phone/app.js works out from the store ID and employee number)
+        let k = derive_keys(" 12345 ", "00987").unwrap();
+        assert_eq!(k.id, "bb452fd48e0d937395cc279ab8b649bfd02449aea1e2677aff49c77fc64c1a07");
+        assert_eq!(
+            k.pair_code(),
+            "v1.bb452fd48e0d937395cc279ab8b649bfd02449aea1e2677aff49c77fc64c1a07.5a73714deab4eacc024e01c12ba737036e194e4415e4032322e112a3f2ae4ad6"
+        );
+        let (pid, token) = k.push_ids();
+        assert_eq!(pid, "4e4793f85c371e165adaaadecefe18edd7ebbef88237c774e147f0fbfc6efcc9");
+        assert_eq!(token, "15e32b65a0c37f6fcd1187d2abc814dd6abb2fb4b85383004bc86da35e943513");
     }
 
     #[test]

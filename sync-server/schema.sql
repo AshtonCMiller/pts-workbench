@@ -22,7 +22,24 @@ CREATE TABLE IF NOT EXISTS reports (
   platform TEXT NOT NULL DEFAULT '',
   screen TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL DEFAULT 'new',  -- new · planned · in-progress · done · wont-do
-  reply TEXT NOT NULL DEFAULT '',      -- a note back to the person, shown in their list
-  fixed_in TEXT NOT NULL DEFAULT ''    -- the version it was fixed in ("0.5.0"), set when it's marked done
+  reply TEXT NOT NULL DEFAULT ''       -- a note back to the person, shown in their list
 );
 CREATE INDEX IF NOT EXISTS reports_reporter ON reports (reporter, created_at);
+-- Phones that get notifications (the page at /phone/, added to the home screen). One row per phone.
+CREATE TABLE IF NOT EXISTS push_subs (
+  endpoint TEXT PRIMARY KEY,      -- where Apple's / Google's push service takes notifications for that phone
+  pid TEXT NOT NULL,              -- whose phone: a hash of their sync ID
+  token TEXT NOT NULL,            -- a hash of their send token (the token itself is never kept)
+  p256dh TEXT NOT NULL,           -- the phone's public key and secret, to encrypt notifications for it
+  auth TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT '',  -- "iPhone", "Android phone"
+  created_at INTEGER NOT NULL,
+  seen_at INTEGER NOT NULL        -- the last time the page was opened on it
+);
+CREATE INDEX IF NOT EXISTS push_subs_pid ON push_subs (pid);
+
+-- The server's own settings: its push signing key (made the first time it's needed)
+CREATE TABLE IF NOT EXISTS config (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);

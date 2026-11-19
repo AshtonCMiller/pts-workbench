@@ -66,6 +66,9 @@ pub struct Note {
     pub channel: String,
     #[serde(default)]
     pub read: bool,
+    /// Sent to your phone already (unread here a while: crate::phone)
+    #[serde(default)]
+    pub phoned: bool,
 }
 
 /// A notification to add (the list gives it its ID and time)
@@ -142,6 +145,7 @@ impl Notes {
                     ro: n.ro,
                     channel: n.channel,
                     read: false,
+                    phoned: false,
                 },
             );
             ids.push(id);
@@ -161,6 +165,13 @@ impl Notes {
     pub fn mark_read(&mut self, id: u64) {
         if let Some(n) = self.list.iter_mut().find(|n| n.id == id) {
             n.read = true;
+        }
+    }
+
+    /// Sent to your phone (not sent again)
+    pub fn mark_phoned(&mut self, id: u64) {
+        if let Some(n) = self.list.iter_mut().find(|n| n.id == id) {
+            n.phoned = true;
         }
     }
 
