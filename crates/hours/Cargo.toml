@@ -1,0 +1,12 @@
+[package]
+name = "hours"
+description = "Your hours: the shift clock, flagged lines, spiffs and the pay-period report (the Electron app's tracker.js)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true

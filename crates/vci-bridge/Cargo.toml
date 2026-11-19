@@ -1,0 +1,15 @@
+[package]
+name = "vci-bridge"
+description = "pts-vci32: the 32-bin helper that loads Ford's 32-bit J2534 driver"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "pts-vci32"
+path = "src/main.rs"
+
+[dependencies]
+vci = { path = "../vci" }
+serde_json.workspace = true

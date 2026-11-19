@@ -1,0 +1,66 @@
+[package]
+name = "pts-workbench"
+description = "Workbench: Uniting Technician Workflows."
+version.workspace = true # fetch version number from workspace cargo.toml
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+default-run = "pts-workbench-app"
+
+# the app (started by the launcher, crates/launcher; standalone during development.
+[[bin]]
+name = "pts-workbench-app"
+path = "src/main.rs"
+
+# command line to try the Xtime crate against the real site (src/bin/pts-try.rs)
+[[bin]]
+name = "pts-try"
+path = "src/bin/pts-try.rs"
+
+[dependencies]
+workbench-net.workspace = true
+# updates: each downloaded file checked agsint its release's checksum
+sha2.workspace = true
+# "What's new": which items were shown, named as the Electron app names them.
+sha1.workspace = true
+xtime.workspace = true
+ford.workspace = true
+launcher.workspace = true
+feedback.workspace = true
+hours.workspace = true
+workbench-sync = { path = "../sync" }
+ui-kit.workspace = true
+xtime-ui.workspace = true
+hours-ui.workspace = true
+ford-ui.workspace = true
+# Diagnostics: talking to the vehicle through Ford's VCI
+diag-ui = { path = "../diag-ui" }
+# Web views for XTime & PTS Pages.
+webpane = { path = "../webpane" }
+keyring.workspace = true
+iced.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+
+# build.rs: puts PDFium beside the app, downloaded once.
+[build-dependencies]
+ureq = "2"
+flate2 = "1"
+tar = "0.4"
+
+# build.rs: the icon in the .exe (Windows only)
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
+[target.'cfg(windows)'.dependencies]
+# Windows' light/dark setting for the Auto appearance (system_theme.rs), and printing (print/windows.rs: the Print
+# window and drawing on the printer)
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Registry",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Printing",
+    "Win32_Storage_Xps",
+] }

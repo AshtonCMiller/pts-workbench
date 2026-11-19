@@ -1,3 +1,9 @@
 node_modules/
 dist/
 *.log
+# Clean up the git log
+/oldsrc
+
+/target
+# saved sign-ins
+*cookies*.json

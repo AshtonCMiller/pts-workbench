@@ -1,0 +1,10 @@
+[package]
+name = "ui-kit"
+description = "Workbench's shared look and motion"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+iced.workspace = true

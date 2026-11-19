@@ -1,0 +1,31 @@
+[package]
+name = "workbench-net"
+description = "Web requests with the app's sign-in cookies, shared by the Xtime and Ford parts"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+reqwest.workspace = true
+reqwest_cookie_store.workspace = true
+cookie_store.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+url.workspace = true
+# The WebSocket connection to Xtime's chat server (ws.rs): the connection and handshake, its encryption
+# (rustls with ring and the same trusted certificates as reqwest's), sending and reading messages.
+tokio = { workspace = true, features = ["net", "io-util"] }
+tokio-tungstenite = { workspace = true }
+tokio-rustls = { workspace = true }
+rustls = { workspace = true }
+webpki-roots = { workspace = true }
+futures-util = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+# the system's proxy setting (proxy.rs)
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Registry"] }
+
+[dev-dependencies]
+tokio.workspace = true

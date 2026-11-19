@@ -5,6 +5,10 @@ main = "src/worker.js"
 compatibility_date = "2024-11-01"
 workers_dev = true
 
+# The page for phones (site/phone/), served as it is; everything else goes to the worker
+[assets]
+directory = "./site"
+
 [[d1_databases]]
 binding = "DB"
 database_name = "pts-sync"

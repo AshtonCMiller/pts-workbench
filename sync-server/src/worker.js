@@ -10,9 +10,14 @@
 //   PATCH  /v1/reports/<id>  { status?, reply? }                          (admin)
 //   DELETE /v1/reports/<id>                                               (admin)
 //
+//   /v1/push/…                         phone notifications (src/push.js)
+//   /phone/                            the page for phones (site/phone/: served as it is, by Cloudflare)
+//
 // Sync data is encrypted on each computer before it is sent, so this server only ever stores
 // an opaque ID and unreadable text for it. Conflicts are handled by the app: when two computers save
 // at the same time, the second gets 409 with the newer copy, merges it with its own, and tries again.
+
+import { push } from './push.js';
 
 const MAX_BYTES = 4 * 1024 * 1024; // plenty for years of flags
 const ID = /^[a-f0-9]{64}$/;
@@ -28,6 +33,7 @@ export default {
     if (url.pathname === '/' || url.pathname === '/health') return json({ ok: true, service: 'pts-workbench-sync' });
 
     if (url.pathname.startsWith('/v1/reports')) return reports(request, env, url);
+    if (url.pathname.startsWith('/v1/push/')) return push(request, env, url);
 
     const m = url.pathname.match(/^\/v1\/store\/([^/]+)$/);
     if (!m) return json({ error: 'not found' }, 404);
