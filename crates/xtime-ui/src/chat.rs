@@ -863,7 +863,7 @@ fn list<'a>(chat: &'a ChatPanel, shown: &ChatShown<'a>) -> Element<'a, ChatMsg> 
         }
     } else {
         let items = Column::with_children(convs.into_iter().map(|c| conversation_item(c, shown.now))).spacing(2);
-        scrollable(items).height(Length::Fill).into()
+        scrollable(items).height(Length::Fill).remember("chat-list").into()
     };
     let mut col = Column::new().spacing(10);
     if let (Some(e), false) = (&chat.error, chat.messages.is_empty()) {

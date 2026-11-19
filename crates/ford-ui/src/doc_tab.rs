@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use ford::fsa::FsaPage;
 use iced::widget::image::Handle;
-use iced::widget::{Column, Space, button, column, container, image, row, text};
+use iced::widget::{Column, Space, button, column, container, horizontal_space, image, row, text};
 use iced::{Alignment, Element, Length, Task};
 use ui_kit::scroll::scrollable;
 use ui_kit::{anim, pill, style};
@@ -282,7 +282,9 @@ pub fn view(d: &DocTab) -> Element<'_, DocMsg> {
         };
         return column![
             container(top).padding([16, 16]),
-            scrollable(container(body).padding([0, 16])).height(Length::Fill)
+            scrollable(container(body).padding([0, 16]))
+                .height(Length::Fill)
+                .remember(format!("doc:{}", d.url))
         ]
         .into();
     }
@@ -315,7 +317,10 @@ pub fn view(d: &DocTab) -> Element<'_, DocMsg> {
             .padding([4, 16])
             .align_x(Alignment::Center)
             .width(Length::Fill);
-            scrollable(sheets).height(Length::Fill).into()
+            scrollable(sheets)
+                .height(Length::Fill)
+                .remember(format!("doc-pdf:{}", d.url))
+                .into()
         }
     };
     // its documents down the left (sliding away with Contents), the one picked filling the rest
@@ -331,7 +336,7 @@ pub fn view(d: &DocTab) -> Element<'_, DocMsg> {
     let side = container(
         column![
             text("Documents").size(12).font(style::BOLD).style(style::muted),
-            scrollable(list).height(Length::Fill),
+            scrollable(list).height(Length::Fill).remember(format!("doc-list:{}", d.url)),
         ]
         .spacing(8),
     )

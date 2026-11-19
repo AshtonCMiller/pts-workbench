@@ -196,6 +196,7 @@ fn copyable<'a>(value: &'a str, what: &str, mono: bool) -> Element<'a, OasisMsg>
 pub fn view<'a>(o: &'a OasisView, cv: &'a ConnectedView, sample: bool, today: NaiveDate) -> Element<'a, OasisMsg> {
     scrollable(container(page(o, cv, sample, today)).padding(16).width(Length::Fill))
         .height(Length::Fill)
+        .remember(format!("oasis:{}", o.vin))
         .into()
 }
 

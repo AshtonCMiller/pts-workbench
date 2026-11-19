@@ -502,7 +502,9 @@ pub fn view(d: &DiagView, sample: bool) -> Element<'_, DiagMsg> {
     }
     column![
         container(bar).padding([14, 16]).width(Length::Fill).style(style::panel),
-        scrollable(container(body.max_width(1000)).padding(16).width(Length::Fill)).height(Length::Fill),
+        scrollable(container(body.max_width(1000)).padding(16).width(Length::Fill))
+            .height(Length::Fill)
+            .remember(format!("diag:{}", d.vin)),
     ]
     .height(Length::Fill)
     .into()

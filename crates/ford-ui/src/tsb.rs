@@ -269,19 +269,23 @@ pub fn view(t: &TsbView, sample: bool) -> Element<'_, TsbMsg> {
     }
     let base = column![
         container(top).padding([16, 16]).width(Length::Fill),
-        scrollable(container(items).padding([0, 16]).width(Length::Fill)).height(Length::Fill),
+        scrollable(container(items).padding([0, 16]).width(Length::Fill))
+            .height(Length::Fill)
+            .remember(format!("tsb:{}", t.vin)),
     ]
     .height(Length::Fill);
 
     // the bulletin open, sliding in over the list
     let over: Element<'_, TsbMsg> = match &t.article {
-        Some(a) => {
-            container(scrollable(container(article::view(a).map(TsbMsg::Article)).padding(16).width(Length::Fill)).height(Length::Fill))
-                .width(Length::Fill)
+        Some(a) => container(
+            scrollable(container(article::view(a).map(TsbMsg::Article)).padding(16).width(Length::Fill))
                 .height(Length::Fill)
-                .style(style::page)
-                .into()
-        }
+                .remember(format!("tsb-article:{}:{}", t.vin, a.url)),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(style::page)
+        .into(),
         None => Space::new(Length::Fill, Length::Fill).into(),
     };
     anim::push(base, over, t.open).into()

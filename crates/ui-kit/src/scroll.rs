@@ -10,8 +10,16 @@
 //!
 //! [`glide_to`] glides one (by its id) to a part of what's in it (a container's id) or back to where it was, the same
 //! smooth way: a jump within a procedure that doesn't lose your place.
+//!
+//! `.remember(key)` keeps its place: where it's scrolled to is kept under the key (for as long as the app runs), and
+//! a scrollable drawn anew with that key goes back there. iced forgets a scrollable's place whenever what's around it
+//! changes (another tab shown and back, a card or a notification popping up over the window), so the pages people
+//! scroll through say who they are with a key ("oasis:VIN"). Two pages in the same spot with different keys each keep
+//! their own place. [`forget`] lets go of them (a vehicle closed).
 
 use std::any::Any;
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::time::Instant;
 
 use iced::advanced::layout::{self, Layout};
@@ -36,13 +44,43 @@ const EASE: f32 = 0.075;
 pub struct Smooth<'a, Message> {
     inner: Scrollable<'a, Message, Theme, Renderer>,
     id: Option<widget::Id>,
+    key: Option<String>,
 }
 
 pub fn scrollable<'a, Message: 'a>(content: impl Into<Element<'a, Message>>) -> Smooth<'a, Message> {
     Smooth {
         inner: Scrollable::new(content),
         id: None,
+        key: None,
     }
+}
+
+thread_local! {
+    /// Where each remembered scrollable was scrolled to (by its key)
+    static PLACES: RefCell<HashMap<String, Vector>> = RefCell::new(HashMap::new());
+}
+
+fn place_of(key: &str) -> Option<Vector> {
+    PLACES.with(|p| p.borrow().get(key).copied())
+}
+
+fn keep_place(key: &str, at: Vector) {
+    PLACES.with(|p| {
+        let mut p = p.borrow_mut();
+        if at.x.abs() < 0.5 && at.y.abs() < 0.5 {
+            p.remove(key);
+        } else {
+            p.insert(key.to_string(), at);
+        }
+    });
+}
+
+/// Lets go of the places kept under keys with this in them (a vehicle closed: its VIN)
+pub fn forget(part: &str) {
+    if part.is_empty() {
+        return;
+    }
+    PLACES.with(|p| p.borrow_mut().retain(|k, _| !k.contains(part)));
 }
 
 impl<'a, Message: 'a> Smooth<'a, Message> {
@@ -68,6 +106,11 @@ impl<'a, Message: 'a> Smooth<'a, Message> {
         self.inner = self.inner.id(id);
         self
     }
+    /// Keeps its place under `key` (see the module's notes)
+    pub fn remember(mut self, key: impl Into<String>) -> Self {
+        self.key = Some(key.into());
+        self
+    }
 }
 
 /// The widget itself: iced's scrollable inside, fed the wheel a little at a time
@@ -75,6 +118,8 @@ struct Glide<'a, Message> {
     inner: Element<'a, Message>,
     /// Its scrollable's id ([`glide_to`] finds it by it)
     id: Option<widget::Id>,
+    /// Whose place it keeps
+    key: Option<String>,
 }
 
 #[derive(Default)]
@@ -85,6 +130,9 @@ struct State {
     at: Option<Point>,
     /// The last frame (to know how much time passed)
     last: Option<Instant>,
+    /// Whose place it keeps, and that it's to go back there (on its next frame: it's been laid out by then)
+    key: Option<String>,
+    restore: bool,
 }
 
 impl State {
@@ -98,6 +146,7 @@ impl<'a, Message: 'a> From<Smooth<'a, Message>> for Element<'a, Message> {
         Element::new(Glide {
             inner: s.inner.into(),
             id: s.id,
+            key: s.key,
         })
     }
 }
@@ -116,7 +165,11 @@ impl<'a, Message> Widget<Message, Theme, Renderer> for Glide<'a, Message> {
     }
 
     fn state(&self) -> tree::State {
-        tree::State::new(State::default())
+        tree::State::new(State {
+            key: self.key.clone(),
+            restore: self.key.is_some(),
+            ..State::default()
+        })
     }
 
     fn children(&self) -> Vec<Tree> {
@@ -124,6 +177,13 @@ impl<'a, Message> Widget<Message, Theme, Renderer> for Glide<'a, Message> {
     }
 
     fn diff(&self, tree: &mut Tree) {
+        // another page in its spot (another key): that one's place, not this one's
+        let state = tree.state.downcast_mut::<State>();
+        if state.key != self.key {
+            state.key = self.key.clone();
+            state.restore = true;
+            state.left = Vector::ZERO;
+        }
         tree.diff_children(std::slice::from_ref(&self.inner));
     }
 
@@ -150,6 +210,97 @@ impl<'a, Message> Widget<Message, Theme, Renderer> for Glide<'a, Message> {
     }
 
     fn on_event(
+        &mut self,
+        tree: &mut Tree,
+        event: Event,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        renderer: &Renderer,
+        clipboard: &mut dyn Clipboard,
+        shell: &mut Shell<'_, Message>,
+        viewport: &Rectangle,
+    ) -> event::Status {
+        let Some(child) = layout.children().next() else {
+            return event::Status::Ignored;
+        };
+        let state = tree.state.downcast_mut::<State>();
+
+        // drawn anew (or another page in its spot): back to where it was
+        if state.restore && matches!(event, Event::Window(window::Event::RedrawRequested(_))) {
+            state.restore = false;
+            let at = state.key.as_deref().and_then(place_of).unwrap_or(Vector::ZERO);
+            self.inner
+                .as_widget()
+                .operate(&mut tree.children[0], child, renderer, &mut ScrollTo { at, done: false });
+            shell.request_redraw(window::RedrawRequest::NextFrame);
+            return event::Status::Ignored;
+        }
+        // whatever may have scrolled it: its place kept afterwards
+        let moved = self.key.is_some()
+            && match &event {
+                Event::Mouse(mouse::Event::WheelScrolled { .. } | mouse::Event::ButtonReleased(_)) => true,
+                Event::Keyboard(_) | Event::Touch(_) => true,
+                Event::Window(window::Event::RedrawRequested(_)) => state.gliding(),
+                _ => false,
+            };
+        let status = self.handle(tree, event, layout, cursor, renderer, clipboard, shell, viewport);
+        if moved {
+            if let (Some(key), Some(child)) = (self.key.as_deref(), layout.children().next()) {
+                let mut look = Look { at: None, seen: false };
+                self.inner.as_widget().operate(&mut tree.children[0], child, renderer, &mut look);
+                if let Some(at) = look.at {
+                    keep_place(key, at);
+                }
+            }
+        }
+        status
+    }
+
+    fn mouse_interaction(
+        &self,
+        tree: &Tree,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        viewport: &Rectangle,
+        renderer: &Renderer,
+    ) -> mouse::Interaction {
+        layout
+            .children()
+            .next()
+            .map(|child| {
+                self.inner
+                    .as_widget()
+                    .mouse_interaction(&tree.children[0], child, cursor, viewport, renderer)
+            })
+            .unwrap_or_default()
+    }
+
+    fn operate(&self, tree: &mut Tree, layout: Layout<'_>, renderer: &Renderer, operation: &mut dyn widget::Operation) {
+        // (its glide, for glide_to)
+        operation.custom(tree.state.downcast_mut::<State>(), self.id.as_ref());
+        if let Some(child) = layout.children().next() {
+            self.inner.as_widget().operate(&mut tree.children[0], child, renderer, operation);
+        }
+    }
+
+    fn overlay<'b>(
+        &'b mut self,
+        tree: &'b mut Tree,
+        layout: Layout<'_>,
+        renderer: &Renderer,
+        translation: Vector,
+    ) -> Option<overlay::Element<'b, Message, Theme, Renderer>> {
+        let child = layout.children().next()?;
+        self.inner
+            .as_widget_mut()
+            .overlay(&mut tree.children[0], child, renderer, translation)
+    }
+}
+
+impl<Message> Glide<'_, Message> {
+    /// The event itself: the wheel kept and passed on a little at a time, the rest straight to iced's scrollable
+    #[allow(clippy::too_many_arguments)]
+    fn handle(
         &mut self,
         tree: &mut Tree,
         event: Event,
@@ -237,46 +388,62 @@ impl<'a, Message> Widget<Message, Theme, Renderer> for Glide<'a, Message> {
             .as_widget_mut()
             .on_event(&mut tree.children[0], event, child, cursor, renderer, clipboard, shell, viewport)
     }
+}
 
-    fn mouse_interaction(
-        &self,
-        tree: &Tree,
-        layout: Layout<'_>,
-        cursor: mouse::Cursor,
-        viewport: &Rectangle,
-        renderer: &Renderer,
-    ) -> mouse::Interaction {
-        layout
-            .children()
-            .next()
-            .map(|child| {
-                self.inner
-                    .as_widget()
-                    .mouse_interaction(&tree.children[0], child, cursor, viewport, renderer)
-            })
-            .unwrap_or_default()
-    }
+/// Reads where a scrollable is scrolled to (the first one: not what's inside it). Nothing while what's in it fits
+/// (still loading, say): there's no place to keep, and the one kept stays.
+struct Look {
+    at: Option<Vector>,
+    seen: bool,
+}
 
-    fn operate(&self, tree: &mut Tree, layout: Layout<'_>, renderer: &Renderer, operation: &mut dyn widget::Operation) {
-        // (its glide, for glide_to)
-        operation.custom(tree.state.downcast_mut::<State>(), self.id.as_ref());
-        if let Some(child) = layout.children().next() {
-            self.inner.as_widget().operate(&mut tree.children[0], child, renderer, operation);
+impl Operation for Look {
+    fn scrollable(
+        &mut self,
+        _state: &mut dyn widget::operation::Scrollable,
+        _id: Option<&widget::Id>,
+        bounds: Rectangle,
+        content_bounds: Rectangle,
+        translation: Vector,
+    ) {
+        if self.seen {
+            return;
+        }
+        self.seen = true;
+        if content_bounds.height > bounds.height + 1.0 || content_bounds.width > bounds.width + 1.0 {
+            self.at = Some(translation);
         }
     }
 
-    fn overlay<'b>(
-        &'b mut self,
-        tree: &'b mut Tree,
-        layout: Layout<'_>,
-        renderer: &Renderer,
-        translation: Vector,
-    ) -> Option<overlay::Element<'b, Message, Theme, Renderer>> {
-        let child = layout.children().next()?;
-        self.inner
-            .as_widget_mut()
-            .overlay(&mut tree.children[0], child, renderer, translation)
+    // (not into what it holds)
+    fn container(&mut self, _id: Option<&widget::Id>, _bounds: Rectangle, _children: &mut dyn FnMut(&mut dyn Operation)) {}
+}
+
+/// Scrolls a scrollable to a place at once (the first one: not what's inside it)
+struct ScrollTo {
+    at: Vector,
+    done: bool,
+}
+
+impl Operation for ScrollTo {
+    fn scrollable(
+        &mut self,
+        state: &mut dyn widget::operation::Scrollable,
+        _id: Option<&widget::Id>,
+        _bounds: Rectangle,
+        _content_bounds: Rectangle,
+        _translation: Vector,
+    ) {
+        if !self.done {
+            self.done = true;
+            state.scroll_to(iced::widget::scrollable::AbsoluteOffset {
+                x: self.at.x,
+                y: self.at.y,
+            });
+        }
     }
+
+    fn container(&mut self, _id: Option<&widget::Id>, _bounds: Rectangle, _children: &mut dyn FnMut(&mut dyn Operation)) {}
 }
 
 /// Where [`glide_to`] goes: to a container (its id: the part's top, a little below the scrollable's top), or to a

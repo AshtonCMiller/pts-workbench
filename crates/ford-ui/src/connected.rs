@@ -721,7 +721,9 @@ pub fn view(cv: &ConnectedView, sample: bool) -> Element<'_, ConnectedMsg> {
             body = body.push(text(format!("Couldn't refresh ({})", e.text())).size(13).style(text::danger));
         }
     }
-    let scrolled = scrollable(container(body).padding(16).width(Length::Fill)).height(Length::Fill);
+    let scrolled = scrollable(container(body).padding(16).width(Length::Fill))
+        .height(Length::Fill)
+        .remember(format!("cv:{}:{}", cv.vin, cv.part.label()));
     let mut page = column![container(bar).padding([10, 0]), scrolled];
     if cv.part == Part::Home && !cv.picked.is_empty() && !sample {
         page = page.push(pick_bar(cv));

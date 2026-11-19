@@ -936,10 +936,13 @@ fn diagram_list<'a>(w: &'a WiringView, t: &'a Toc) -> Element<'a, WiringMsg> {
             .spacing(6),
         );
     }
-    column![text(count).size(12).style(style::muted), scrollable(col).height(Length::Fill)]
-        .spacing(8)
-        .height(Length::Fill)
-        .into()
+    column![
+        text(count).size(12).style(style::muted),
+        scrollable(col).height(Length::Fill).remember(format!("wiring-list:{}", w.vin))
+    ]
+    .spacing(8)
+    .height(Length::Fill)
+    .into()
 }
 
 fn search_results<'a>(w: &'a WiringView, s: &'a SearchState) -> Element<'a, WiringMsg> {
@@ -1030,10 +1033,13 @@ fn search_results<'a>(w: &'a WiringView, s: &'a SearchState) -> Element<'a, Wiri
                     .align_y(Alignment::Center),
                 );
             }
-            column![tabs.wrap(), scrollable(col).height(Length::Fill)]
-                .spacing(10)
-                .height(Length::Fill)
-                .into()
+            column![
+                tabs.wrap(),
+                scrollable(col).height(Length::Fill).remember(format!("wiring-search:{}", w.vin))
+            ]
+            .spacing(10)
+            .height(Length::Fill)
+            .into()
         }
     };
     column![head, body].spacing(10).height(Length::Fill).into()

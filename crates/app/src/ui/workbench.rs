@@ -112,6 +112,9 @@ pub fn view(app: &App) -> Element<'_, Message> {
             .unwrap_or(0);
         let sub = anim::tabs(active, items).spacing(2.0);
         page = page.push(container(container(sub).padding([4, 10])).width(Length::Fill).style(style::panel));
+    } else {
+        // (an empty spot in its place: the page below stays where it is among them, so iced keeps what it remembers)
+        page = page.push(iced::widget::Space::new(0, 0));
     }
     // the Xtime View scrolls as one page; each Service Manual tab scrolls its own parts (a list under its filters, a
     // document sliding in over it…)
@@ -123,6 +126,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
             let xv = xtime_ui::view::view(&ws.xv, &shown).map(move |m| Message::Xv(ro.clone(), m));
             scrollable(container(xv).padding(16).width(Length::Fill))
                 .height(Length::Fill)
+                .remember(format!("xview:{}", ws.ro.ro))
                 .into()
         }
         Tab::ServiceManual => container(manual(app, ws, manual_tab))
@@ -243,6 +247,7 @@ fn maintenance(ws: &Workspace) -> Element<'_, Message> {
     }
     scrollable(container(container(page).max_width(900)).padding(20).center_x(Length::Fill))
         .height(Length::Fill)
+        .remember(format!("maint:{}", ws.ro.ro))
         .into()
 }
 
@@ -421,6 +426,7 @@ fn manual<'a>(app: &'a App, ws: &'a Workspace, tab: ManualTab) -> Element<'a, Me
                 .width(Length::Fill),
         )
         .height(Length::Fill)
+        .remember(format!("manual:{}:{}", ws.ro.ro, tab.label()))
         .into(),
     }
 }

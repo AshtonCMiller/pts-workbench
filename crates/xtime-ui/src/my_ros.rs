@@ -197,9 +197,15 @@ pub fn dashboard<'a>(ros: &'a [AssignedRo], search: &str) -> Element<'a, RosMsg>
     .spacing(8);
     let rows = Column::with_children(shown.into_iter().map(ro_row)).spacing(2);
 
-    let table = container(column![container(header).padding([8, 10]), scrollable(rows).height(Length::Fill)].spacing(2))
-        .style(style::card)
-        .height(Length::Fill);
+    let table = container(
+        column![
+            container(header).padding([8, 10]),
+            scrollable(rows).height(Length::Fill).remember("my-ros")
+        ]
+        .spacing(2),
+    )
+    .style(style::card)
+    .height(Length::Fill);
     container(column![head, table].spacing(12))
         .padding(16)
         .width(Length::Fill)

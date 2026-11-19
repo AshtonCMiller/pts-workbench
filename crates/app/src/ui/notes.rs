@@ -99,11 +99,15 @@ pub fn panel(app: &App) -> Element<'_, Message> {
     for n in &app.notes.list {
         list = list.push(item(n, now));
     }
-    container(column![head, scrollable(list).height(Length::Fill)].spacing(10).padding(12))
-        .width(WIDTH)
-        .height(Length::Fill)
-        .style(style::panel)
-        .into()
+    container(
+        column![head, scrollable(list).height(Length::Fill).remember("notes")]
+            .spacing(10)
+            .padding(12),
+    )
+    .width(WIDTH)
+    .height(Length::Fill)
+    .style(style::panel)
+    .into()
 }
 
 /// The newest one, popped up in the bottom-right corner for a few seconds (it slides in and away)

@@ -66,18 +66,15 @@ pub fn view(app: &App) -> Element<'_, Message> {
         .width(Length::Fill)
         .height(Length::Fill);
     // a new notification, popped up in the corner for a few seconds
-    let base: Element<'_, Message> = match notes::toast(app) {
-        Some(t) => iced::widget::stack![page, t].into(),
-        None => page.into(),
-    };
+    let toast = notes::toast(app).unwrap_or_else(nothing);
     // the profile switcher's menu, dropped from the top right
-    let base: Element<'_, Message> = if app.profile_menu && app.overlay.is_none() {
-        iced::widget::stack![base, profiles::menu(app)].into()
+    let menu = if app.profile_menu && app.overlay.is_none() {
+        profiles::menu(app)
     } else {
-        base
+        nothing()
     };
     // Settings, Feedback, Print, Hours or Service: a card over everything, the page frosted behind it
-    match app.overlay {
+    let over: Element<'_, Message> = match app.overlay {
         Some((which, phase)) => {
             let (card, close) = match which {
                 Overlay::Settings => (settings::card(app), Message::CloseSettings),
@@ -106,10 +103,18 @@ pub fn view(app: &App) -> Element<'_, Message> {
                     Message::Svc(xtime_ui::service::SvcMsg::Close),
                 ),
             };
-            iced::widget::stack![base, anim::modal(card, phase, close)].into()
+            anim::modal(card, phase, close).into()
         }
-        None => base.into(),
-    }
+        None => nothing(),
+    };
+    // (always the same layers, the page always the first: iced keeps what each widget remembers, such as how far each
+    // page is scrolled, only while it stays in the same place among them, so nothing popping up moves the page)
+    iced::widget::stack![page, toast, menu, over].into()
+}
+
+/// An empty layer
+fn nothing<'a>() -> Element<'a, Message> {
+    iced::widget::Space::new(0, 0).into()
 }
 
 const CHAT_WIDTH: f32 = 340.0;

@@ -1155,6 +1155,11 @@ impl App {
                     self.pane_places.remove(id);
                 }
                 let closing = quiet(webpane::close(ids));
+                // (and the places its pages were scrolled to)
+                ui_kit::scroll::forget(&format!(":{ro}"));
+                if let Some(vin) = self.open.iter().find(|w| w.ro.ro == ro).map(|w| w.ro.vin.clone()) {
+                    ui_kit::scroll::forget(&vin);
+                }
                 let at = self.open.iter().position(|w| w.ro.ro == ro);
                 self.open.retain(|w| w.ro.ro != ro);
                 if self.selected.as_deref() == Some(ro.as_str()) {

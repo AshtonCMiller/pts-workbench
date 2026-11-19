@@ -248,7 +248,7 @@ pub fn card(app: &App) -> Element<'_, Message> {
                 sync(app),
                 version(app),
                 row![
-                    text("Admin mode: delete profiles, reset PINs (the Feedback password)")
+                    text("Admin mode: delete profiles, reset PINs (requires password)")
                         .size(12)
                         .style(style::muted),
                     horizontal_space(),

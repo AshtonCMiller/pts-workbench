@@ -58,7 +58,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
             }
         }
     }
-    container(scrollable(list.padding(10)).height(Length::Fill))
+    container(scrollable(list.padding(10)).height(Length::Fill).remember("sidebar"))
         .width(WIDTH)
         .height(Length::Fill)
         .style(style::panel)

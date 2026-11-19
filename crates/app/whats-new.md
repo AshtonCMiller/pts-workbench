@@ -35,3 +35,4 @@
 # Bug Fixes
 
 - Corrected an issue with webviews that led to the webview holding keyboard focus even after leaving the webview, leading to an inability to control certain functions of the app.
+- Corrected an issue with scroll bars resetting when switching between views
