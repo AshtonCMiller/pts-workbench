@@ -1,1 +1,8 @@
 node_modules/
+
+# The website's build (web/ → site/): made by `npm run build` in web/, and by the deploy workflow
+site/index.html
+site/assets/
+site/download/
+site/phone/next/
+site/phone/index.html

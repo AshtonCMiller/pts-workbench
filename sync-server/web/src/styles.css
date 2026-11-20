@@ -1,0 +1,79 @@
+/* What every part of the site shares: colors (light and dark), type, buttons, section layout, and the slide-in */
+
+:root {
+  --bg: #f3f6fb;
+  --bg-2: #e8eef7;
+  --card: #ffffff;
+  --ink: #0f1a2b;
+  --muted: #5b6880;
+  --line: #dbe3ef;
+  --soft: #eef3fa;
+  --accent: #1a5fb4;
+  --accent-2: #3d8bfd;
+  --accent-ink: #ffffff;
+  --good: #1f9d55;
+  --warn: #d9822b;
+  --bad: #d64545;
+  --shadow: 0 1px 2px rgba(15, 26, 43, .05), 0 12px 40px rgba(15, 26, 43, .10);
+  --spring: cubic-bezier(.34, 1.56, .64, 1);
+  --ease: cubic-bezier(.22, 1, .36, 1);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0a111e;
+    --bg-2: #0f1828;
+    --card: #131e31;
+    --ink: #e8eef8;
+    --muted: #94a3bb;
+    --line: #22314a;
+    --soft: #1a2740;
+    --accent: #4a8fe6;
+    --accent-2: #7ab2ff;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 16px 48px rgba(0, 0, 0, .45);
+  }
+}
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--ink);
+  font: 16px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  overflow-x: hidden;
+}
+a { color: inherit; }
+.wrap { max-width: 1120px; margin: 0 auto; padding: 0 20px; }
+
+section { padding: 72px 0; }
+.center { text-align: center; }
+h2 { font-size: clamp(28px, 4vw, 40px); letter-spacing: -.025em; line-height: 1.12; margin: 0 0 14px; font-weight: 800; }
+.sub { color: var(--muted); font-size: 18px; max-width: 40em; margin: 0 auto; }
+.kicker { color: var(--accent); font-weight: 700; font-size: 14px; letter-spacing: .06em; text-transform: uppercase; margin-bottom: 10px; }
+
+.btn {
+  display: inline-flex; align-items: center; gap: 8px; text-decoration: none; cursor: pointer;
+  padding: 11px 18px; border-radius: 12px; border: 0; font: inherit; font-weight: 650; font-size: 15px;
+  background: var(--accent); color: var(--accent-ink);
+  box-shadow: 0 6px 18px color-mix(in srgb, var(--accent) 35%, transparent);
+  transition: transform .35s var(--spring), box-shadow .3s;
+}
+.btn:hover { transform: translateY(-2px) scale(1.03); box-shadow: 0 10px 26px color-mix(in srgb, var(--accent) 45%, transparent); }
+.btn:active { transform: scale(.97); transition-duration: .1s; }
+.btn.ghost { background: var(--card); color: var(--ink); box-shadow: inset 0 0 0 1px var(--line); }
+.btn.ghost:hover { box-shadow: inset 0 0 0 1px var(--accent), 0 8px 20px rgba(15, 26, 43, .08); }
+.btn.small { padding: 8px 14px; font-size: 14px; border-radius: 10px; }
+
+.tag { font-size: 11.5px; font-weight: 700; padding: 3px 8px; border-radius: 99px; white-space: nowrap; }
+.tag.ok { color: var(--good); background: color-mix(in srgb, var(--good) 14%, transparent); }
+.tag.wait { color: var(--warn); background: color-mix(in srgb, var(--warn) 15%, transparent); }
+.tag.new { color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
+
+/* v-reveal (directives/reveal.js). An animation rather than a transition, so it doesn't fight an element's own
+   hover transitions; it only holds the start state (backwards), so the element's own styles take over after */
+.reveal:not(.in) { opacity: 0; }
+.reveal.in { animation: reveal-in .8s var(--spring) var(--reveal-delay, 0ms) backwards; }
+@keyframes reveal-in { from { opacity: 0; transform: translateY(26px) scale(.98); } }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition-duration: .01s !important; }
+  .reveal:not(.in) { opacity: 1; }
+}

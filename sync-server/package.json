@@ -1,12 +1,18 @@
 {
-  "name": "pts-workbench-sync",
+  "name": "prodealer-web",
   "private": true,
   "type": "module",
-  "description": "Stores encrypted profile data to be saved between computers.",
+  "description": "The prodealer.works website (Vue 3 + Vite). Built into ../site/ next to the phone page.",
   "scripts": {
-    "deploy": "wrangler deploy"
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "vue": "^3.5.13"
   },
   "devDependencies": {
-    "wrangler": "^3.90.0"
+    "@vitejs/plugin-vue": "^5.2.1",
+    "vite": "^6.0.7"
   }
 }

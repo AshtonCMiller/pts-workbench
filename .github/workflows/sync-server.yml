@@ -34,6 +34,14 @@ jobs:
       - name: Install
         run: npm install --no-audit --no-fund
 
+      # The website (web/, Vue + Vite), built into site/ next to the phone page, which goes out with the deploy
+      - name: Build the website
+        working-directory: sync-server/web
+        run: |
+          npm install --no-audit --no-fund
+          npm run build
+          ls -la ../site ../site/assets
+
       - name: Check Cloudflare access
         run: npx wrangler whoami
 

@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<!-- The phone page, as a Vue app (src/phone/). While it's being tried out it's at /phone/next/; the page people use
+     is still site/phone/index.html at /phone/. To switch over, move this file to web/phone/index.html and delete
+     site/phone/index.html, app.js and sheet.js (the service worker, manifest and icons stay in site/phone/). -->
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>PTS Workbench</title>
+<meta name="description" content="Notifications from PTS Workbench on your phone.">
+<meta name="theme-color" content="#1a5fb4">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="PTS Workbench">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="manifest" href="/phone/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/phone/apple-touch-icon.png">
+<link rel="icon" href="/phone/icon-192.png">
+</head>
+<body>
+<div id="app"></div>
+<!-- If the page doesn't start, say so on the screen instead of staying blank: there's no console on a phone -->
+<div id="stuck" hidden style="margin:24px 16px;padding:18px;border-radius:16px;background:#fff3f0;color:#7a1d0e;font:15px/1.45 system-ui,sans-serif">
+  <b style="display:block;font-size:17px;margin-bottom:6px">The page didn't start</b>
+  <span>Try reloading. If it keeps happening, send a screenshot of this:</span>
+  <pre id="stuck-why" style="white-space:pre-wrap;word-break:break-word;font-size:12px;margin:10px 0 0"></pre>
+</div>
+<script>
+  (function () {
+    var why = [];
+    window.addEventListener('error', function (e) {
+      var t = e.target;
+      if (t && t !== window && (t.src || t.href)) why.push("Couldn't load " + (t.src || t.href));
+      else why.push((e.message || 'Error') + (e.filename ? ' (' + e.filename.split('/').pop() + ':' + e.lineno + ')' : ''));
+    }, true);
+    window.addEventListener('unhandledrejection', function (e) { why.push(String((e.reason && e.reason.message) || e.reason)); });
+    setTimeout(function () {
+      if (document.querySelector('.view')) return;
+      document.getElementById('stuck-why').textContent =
+        location.href.split('#')[0] + '\n' + navigator.userAgent + '\n\n' + (why.join('\n') || 'No error was reported.');
+      document.getElementById('stuck').hidden = false;
+    }, 4000);
+  })();
+</script>
+<script type="module" src="/src/phone/main.js"></script>
+</body>
+</html>

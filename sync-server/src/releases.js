@@ -8,7 +8,8 @@
 //   GET /updates/latest/workbench.json  what the app checks (crates/app/src/updates.rs)
 //   GET /updates/beta/workbench.json    … with Beta updates on (it takes the newer of the two)
 //   GET /updates/<tag>/<file>           a release's file (never changes once it's there)
-//   GET /download                       the newest installer, for setting up a new computer
+//   GET /download/latest                the newest installer, for setting up a new computer (the download page,
+//                                       /download/, is the website's: web/download/)
 //
 // Every night, old releases are deleted so the bucket stays small (R2's free 10 GB): the newest few of each kind
 // are kept, and always the ones the channels point at. The app checks each file's size and SHA-256 from
@@ -67,7 +68,7 @@ export async function releases(request, env, url) {
   if (request.method !== 'GET' && request.method !== 'HEAD') return text('Not allowed', 405);
   if (!env.RELEASES) return text("Updates aren't set up on this server yet.", 503);
 
-  if (url.pathname === '/download' || url.pathname === '/download/') {
+  if (/^\/download(\/|\/latest)?$/.test(url.pathname)) {
     const m = await channel(env, 'latest');
     if (!m?.setup?.name || !NAME.test(m.setup.name)) return text('There is no version to download yet.', 404);
     return Response.redirect(`${url.origin}/updates/v${m.version}/${m.setup.name}`, 302);
