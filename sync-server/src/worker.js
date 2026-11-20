@@ -12,12 +12,14 @@
 //
 //   /v1/push/…                         phone notifications (src/push.js)
 //   /phone/                            the page for phones (site/phone/: served as it is, by Cloudflare)
+//   /updates/…, /download              the desktop app's releases and installer (src/releases.js)
 //
 // Sync data is encrypted on each computer before it is sent, so this server only ever stores
 // an opaque ID and unreadable text for it. Conflicts are handled by the app: when two computers save
 // at the same time, the second gets 409 with the newer copy, merges it with its own, and tries again.
 
 import { push } from './push.js';
+import { releases, pruneReleases } from './releases.js';
 
 const MAX_BYTES = 4 * 1024 * 1024; // plenty for years of flags
 const ID = /^[a-f0-9]{64}$/;
@@ -28,6 +30,11 @@ const json = (body, status = 200) => new Response(JSON.stringify(body), {
 });
 
 export default {
+  // every night (wrangler.toml [triggers]): old releases are deleted
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(pruneReleases(env));
+  },
+
   async fetch(request, env) {
     const url = new URL(request.url);
     if (url.pathname === '/health') return json({ ok: true, service: 'pts-workbench-sync' });
@@ -36,6 +43,9 @@ export default {
 
     if (url.pathname.startsWith('/v1/reports')) return reports(request, env, url);
     if (url.pathname.startsWith('/v1/push/')) return push(request, env, url);
+    if (url.pathname.startsWith('/updates/') || url.pathname === '/download' || url.pathname === '/download/') {
+      return releases(request, env, url);
+    }
 
     const m = url.pathname.match(/^\/v1\/store\/([^/]+)$/);
     if (!m) return json({ error: 'not found' }, 404);

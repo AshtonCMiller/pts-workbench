@@ -1,10 +1,11 @@
-//! The app updating itself (the Electron app's `app/updates.js`), from the repository's GitHub releases.
+//! The app updating itself (the Electron app's `app/updates.js`), from the sync server (prodealer.works).
 //!
 //! Each release built by `.github/workflows/release.yml` has `workbench.json`: its version, the launcher level it
 //! needs, and each of its files with its size and SHA-256 (the app, the sign-in window, the PDF engine, the
-//! launcher), plus the installer. Checking: shortly after the app starts and every 30 minutes, the newest release
-//! (`releases/latest`, which never holds betas), or with **Beta updates** on, the newest of all (the releases feed,
-//! betas included). A newer version is downloaded into the launcher's `versions\<version>\` folder (files the same as
+//! launcher), plus the installer. The workflow puts them on the server (sync-server/src/releases.js):
+//! `/updates/<tag>/<file>`, with `/updates/latest/workbench.json` the newest regular version's and
+//! `/updates/beta/workbench.json` the newest beta's. Checking: shortly after the app starts and every 30 minutes, the
+//! newest regular version, or with **Beta updates** on, the newer of the two. A newer version is downloaded into the launcher's `versions\<version>\` folder (files the same as
 //! ones already here are copied, not downloaded), each file checked, and `versions\current.json` pointed at it; the
 //! launcher starts it on "Restart to update" (or the next start). One that needs a newer launcher downloads the
 //! installer instead, which "Restart to update" runs (silently: it puts everything in place and starts the app).
@@ -24,8 +25,6 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use workbench_net::{Http, Method, Url};
 
-/// Where the releases are
-pub const REPO: &str = "AshtonCMiller/pts-workbench";
 /// Each release's list of its files
 pub const MANIFEST: &str = "workbench.json";
 /// How often to look (seconds)
@@ -193,43 +192,28 @@ impl Updates {
     }
 }
 
-fn releases() -> String {
-    format!("https://github.com/{REPO}/releases")
+/// Where the releases are
+fn updates_base() -> String {
+    format!("{}/updates", workbench_sync::URL.trim_end_matches('/'))
+}
+
+/// A version's release tag ("0.5.0-beta.3" → "v0.5.0-beta.3", as the workflow names them)
+fn tag_of(version: &str) -> String {
+    format!("v{version}")
 }
 
 fn url(s: &str) -> Result<Url, String> {
     Url::parse(s).map_err(|_| format!("bad address {s}"))
 }
 
-/// The release tags in GitHub's releases feed (`…/releases.atom`), newest first, each once
-pub fn feed_tags(xml: &str) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    let mut rest = xml;
-    while let Some(at) = rest.find("/releases/tag/") {
-        rest = &rest[at + "/releases/tag/".len()..];
-        let end = rest.find(['"', '<', '\'', ' ']).unwrap_or(rest.len());
-        let tag = rest[..end].replace("%2B", "+");
-        if !tag.is_empty() && !out.contains(&tag) {
-            out.push(tag);
-        }
-    }
-    out
-}
-
-/// A tag's version ("v0.5.0-beta.3" → "0.5.0-beta.3")
-fn version_of(tag: &str) -> &str {
-    tag.strip_prefix('v').unwrap_or(tag)
-}
-
-/// Which of the beta channel's tags to try, best first: newer than what's running
-pub fn beta_candidates(tags: &[String], running: &str) -> Vec<String> {
-    let mut t: Vec<String> = tags
-        .iter()
-        .filter(|t| compare_versions(version_of(t), running) == Ordering::Greater)
-        .cloned()
-        .collect();
-    t.sort_by(|a, b| compare_versions(version_of(b), version_of(a)));
-    t
+/// The beta channel's pick: the newer of the newest regular version and the newest beta, as long as it's newer than
+/// what's running
+pub fn beta_pick(latest: Option<Manifest>, beta: Option<Manifest>, running: &str) -> Option<Manifest> {
+    [latest, beta]
+        .into_iter()
+        .flatten()
+        .filter(|m| compare_versions(&m.version, running) == Ordering::Greater)
+        .max_by(|a, b| compare_versions(&a.version, &b.version))
 }
 
 /// Whether the newest regular version should be taken: newer, or leaving a beta (as long as it's another version)
@@ -245,17 +229,17 @@ pub fn beta_replaced(latest_regular: &str, running: &str) -> bool {
     running.contains('-') && compare_versions(latest_regular, running) == Ordering::Greater
 }
 
-/// A release's manifest (none when the release has none: an Electron release, or still being uploaded)
+/// A release's manifest (none when there isn't one yet)
 async fn manifest_at(http: &Http, address: &str) -> Result<Option<Manifest>, String> {
     let res = http
         .send(Http::request(Method::GET, url(address)?).header("Accept", "application/json, */*"))
         .await
-        .map_err(|e| format!("couldn't reach GitHub ({e})"))?;
+        .map_err(|e| format!("couldn't reach the update server ({e})"))?;
     if res.status.as_u16() == 404 {
         return Ok(None);
     }
     if !res.ok() {
-        return Err(format!("GitHub answered {}", res.status.as_u16()));
+        return Err(format!("the update server answered {}", res.status.as_u16()));
     }
     serde_json::from_str(&res.body)
         .map(Some)
@@ -264,49 +248,33 @@ async fn manifest_at(http: &Http, address: &str) -> Result<Option<Manifest>, Str
 
 /// Looks for a newer version (see the top of this file)
 pub async fn check(http: Http, beta: bool, running: String) -> Result<Option<Found>, String> {
-    let base = releases();
-    let latest = format!("{base}/latest/download/{MANIFEST}");
+    let base = updates_base();
+    let latest = manifest_at(&http, &format!("{base}/latest/{MANIFEST}")).await?;
+    if !beta {
+        let Some(m) = latest else {
+            return Ok(None);
+        };
+        return Ok(take_regular(&m.version, &running).map(|downgrade| Found {
+            tag: tag_of(&m.version),
+            manifest: m,
+            downgrade,
+            leave_beta: false,
+        }));
+    }
     // a beta running, and a regular version newer than it out: that one (not a newer beta), and Beta updates off
-    if beta && running.contains('-') {
-        if let Some(m) = manifest_at(&http, &latest).await? {
-            if beta_replaced(&m.version, &running) {
-                return Ok(Some(Found {
-                    tag: format!("v{}", m.version),
-                    manifest: m,
-                    downgrade: false,
-                    leave_beta: true,
-                }));
-            }
-        }
+    if let Some(m) = latest.as_ref().filter(|m| beta_replaced(&m.version, &running)) {
+        return Ok(Some(Found {
+            tag: tag_of(&m.version),
+            manifest: m.clone(),
+            downgrade: false,
+            leave_beta: true,
+        }));
     }
-    if beta {
-        let feed = http
-            .send(Http::request(Method::GET, url(&format!("{base}.atom"))?).header("Accept", "application/atom+xml, */*"))
-            .await
-            .map_err(|e| format!("couldn't reach GitHub ({e})"))?;
-        if !feed.ok() {
-            return Err(format!("GitHub answered {}", feed.status.as_u16()));
-        }
-        // the newest first; releases without a file list (the Electron app's) are passed over
-        for tag in beta_candidates(&feed_tags(&feed.body), &running).into_iter().take(8) {
-            if let Some(m) = manifest_at(&http, &format!("{base}/download/{tag}/{MANIFEST}")).await? {
-                return Ok(Some(Found {
-                    tag,
-                    manifest: m,
-                    downgrade: false,
-                    leave_beta: false,
-                }));
-            }
-        }
-        return Ok(None);
-    }
-    let Some(m) = manifest_at(&http, &latest).await? else {
-        return Ok(None);
-    };
-    Ok(take_regular(&m.version, &running).map(|downgrade| Found {
-        tag: format!("v{}", m.version),
+    let newest_beta = manifest_at(&http, &format!("{base}/beta/{MANIFEST}")).await?;
+    Ok(beta_pick(latest, newest_beta, &running).map(|m| Found {
+        tag: tag_of(&m.version),
         manifest: m,
-        downgrade,
+        downgrade: false,
         leave_beta: false,
     }))
 }
@@ -329,13 +297,13 @@ fn plain_name(s: &str) -> Option<String> {
 
 /// Fetches one of a release's files, checked against its size and SHA-256, into `dest` (whole or not at all)
 async fn fetch_file(http: &Http, tag: &str, f: &FileInfo, dest: &Path) -> Result<(), String> {
-    let address = format!("{}/download/{tag}/{}", releases(), f.name);
+    let address = format!("{}/{tag}/{}", updates_base(), f.name);
     let res = http
         .send_bytes(Http::request(Method::GET, url(&address)?))
         .await
         .map_err(|e| format!("couldn't download {} ({e})", f.name))?;
     if !res.status.is_success() {
-        return Err(format!("{} wasn't there (GitHub answered {})", f.name, res.status.as_u16()));
+        return Err(format!("{} wasn't there (the update server answered {})", f.name, res.status.as_u16()));
     }
     if res.bytes.len() as u64 != f.size {
         return Err(format!("{} didn't download whole", f.name));
@@ -471,17 +439,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reads_the_releases_feed() {
-        let xml = r#"<feed><entry><id>tag:github.com,2008:Repository/1/v0.5.0-beta.3</id>
-            <link rel="alternate" type="text/html" href="https://github.com/AshtonCMiller/pts-workbench/releases/tag/v0.5.0-beta.3"/>
-            </entry><entry><link rel="alternate" type="text/html" href="https://github.com/AshtonCMiller/pts-workbench/releases/tag/v0.4.7-beta.42"/></entry>
-            <entry><link rel="alternate" href="https://github.com/AshtonCMiller/pts-workbench/releases/tag/v0.4.6"/></entry>
-            <entry><link rel="alternate" href="https://github.com/AshtonCMiller/pts-workbench/releases/tag/v0.5.0-beta.3"/></entry></feed>"#;
-        let tags = feed_tags(xml);
-        assert_eq!(tags, ["v0.5.0-beta.3", "v0.4.7-beta.42", "v0.4.6"]);
-        // only newer ones, newest first
-        assert_eq!(beta_candidates(&tags, "0.4.6"), ["v0.5.0-beta.3", "v0.4.7-beta.42"]);
-        assert_eq!(beta_candidates(&tags, "0.5.0-beta.3"), Vec::<String>::new());
+    fn beta_channel() {
+        let m = |v: &str| Manifest {
+            version: v.into(),
+            ..Default::default()
+        };
+        let v = |x: Option<Manifest>| x.map(|m| m.version);
+        // the newer of the two, if it's newer than what's running
+        assert_eq!(v(beta_pick(Some(m("0.5.0")), Some(m("0.5.1-beta.3")), "0.5.0")).as_deref(), Some("0.5.1-beta.3"));
+        assert_eq!(v(beta_pick(Some(m("0.5.1")), Some(m("0.5.1-beta.3")), "0.5.0")).as_deref(), Some("0.5.1"));
+        assert_eq!(v(beta_pick(Some(m("0.5.0")), None, "0.4.9")).as_deref(), Some("0.5.0"));
+        assert_eq!(v(beta_pick(Some(m("0.5.0")), Some(m("0.5.1-beta.3")), "0.5.1-beta.3")), None);
+        assert_eq!(v(beta_pick(None, None, "0.5.0")), None);
+        assert_eq!(tag_of("0.5.1-beta.3"), "v0.5.1-beta.3");
     }
 
     #[test]

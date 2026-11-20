@@ -1,4 +1,4 @@
-# PTS Workbench sync server (Cloudflare Worker + D1 database).
+# PTS Workbench sync server (Cloudflare Worker + D1 database + R2 bucket for the app's releases).
 # The GitHub workflow fills in database_id on every deploy, so leave it as is.
 name = "pts-sync"
 main = "src/worker.js"
@@ -20,3 +20,11 @@ directory = "./site"
 binding = "DB"
 database_name = "pts-sync"
 database_id = "filled-in-by-github-workflow"
+# The desktop app's releases (src/releases.js): the GitHub workflow makes the bucket if it isn't there
+[[r2_buckets]]
+binding = "RELEASES"
+bucket_name = "pts-releases"
+
+# Every night at 3:23 in the morning (Central; cron times are UTC): old releases are deleted
+[triggers]
+crons = ["23 9 * * *"]
