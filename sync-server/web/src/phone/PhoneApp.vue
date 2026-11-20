@@ -32,7 +32,7 @@ onMounted(start);
     <header>
       <img src="./assets/icon.png" alt="">
       <div>
-        <h1>PTS Workbench</h1>
+        <h1>Workbench</h1>
         <p>On your phone</p>
       </div>
     </header>

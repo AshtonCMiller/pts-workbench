@@ -1,4 +1,4 @@
-// PTS Workbench on a phone: shows the notifications the desktop app sends (through /v1/push/send).
+// Workbench on a phone: shows the notifications the desktop app sends (through /v1/push/send).
 // Nothing is cached here, so the page is always the newest one on the server.
 
 self.addEventListener('install', () => self.skipWaiting());
@@ -7,7 +7,7 @@ self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
 self.addEventListener('push', (e) => {
   let n = {};
   try { n = e.data ? e.data.json() : {}; } catch { n = { body: e.data ? e.data.text() : '' }; }
-  const title = n.title || 'PTS Workbench';
+  const title = n.title || 'Workbench';
   const options = {
     body: n.body || '',
     icon: 'icon-192.png',

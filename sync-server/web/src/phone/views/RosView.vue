@@ -12,7 +12,7 @@ const empty = computed(() => {
   if (!hours.value && data.refreshing) return 'Getting your ROs…';
   if (data.rosError) return `Couldn't get your ROs (${data.rosError}).`;
   if (data.rosDoc) return 'No ROs on your list right now.';
-  return 'Your RO list shows here once PTS Workbench on your computer has sent it (it does every few minutes while it’s open, once this phone is paired).';
+  return 'Your RO list shows here once Workbench on your computer has sent it (it does every few minutes while it’s open, once this phone is paired).';
 });
 </script>
 

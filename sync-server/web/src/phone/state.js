@@ -214,7 +214,7 @@ export async function sendTest() {
   if (!data.pair) return;
   notify.testing = true;
   try {
-    const r = await api('/v1/push/send', { ...(await pushIds(data.pair)), title: 'PTS Workbench', body: 'This is a test. Notifications work!', tag: 'test' });
+    const r = await api('/v1/push/send', { ...(await pushIds(data.pair)), title: 'Workbench', body: 'This is a test. Notifications work!', tag: 'test' });
     toast(r.sent ? 'Sent. It should show in a moment.' : 'Nothing was sent: turn notifications on first.', !r.sent);
   } catch (e) {
     toast(`Couldn't send it (${e.message}).`, true);

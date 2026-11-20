@@ -1,4 +1,4 @@
-// PTS Workbench on a phone.
+// Workbench on a phone.
 //
 // Pairing: the desktop app's "Pair phone" shows a QR code of this page's address with `#pair=v1.<sync ID>.<key>`
 // after it (the part after # never reaches the server). Opened from the camera, or scanned from inside the page,
@@ -158,12 +158,12 @@ function showNotifyState(on) {
   if (on) return;
   if (!canPush) {
     $('n-about').textContent = ios && !standalone
-      ? 'Open PTS Workbench from your Home Screen to turn on notifications.'
+      ? 'Open Workbench from your Home Screen to turn on notifications.'
       : "This browser can't show notifications. On an iPhone, it needs iOS 16.4 or newer.";
     $('b-notify').style.display = 'none';
   } else if (Notification.permission === 'denied') {
     $('n-about').textContent = ios
-      ? 'Notifications are turned off for PTS Workbench. Turn them on in Settings › Notifications › PTS Workbench.'
+      ? 'Notifications are turned off for Workbench. Turn them on in Settings › Notifications › Workbench.'
       : "Notifications are blocked for this site. Allow them in your browser's site settings.";
     $('b-notify').style.display = 'none';
   }
@@ -231,7 +231,7 @@ async function startScan() {
           setTimeout(() => paired(pair), 450);
           return;
         }
-        if (code) $('scan-msg').textContent = 'That code isn’t from PTS Workbench. Use the one under Pair phone.';
+        if (code) $('scan-msg').textContent = 'That code isn’t from Workbench. Use the one under Pair phone.';
       }
       requestAnimationFrame(look);
     };
@@ -286,7 +286,7 @@ $('b-test').onclick = async () => {
   const b = $('b-test');
   b.disabled = true;
   try {
-    const r = await api('/v1/push/send', { ...(await pushIds(pair)), title: 'PTS Workbench', body: 'This is a test. Notifications work!', tag: 'test' });
+    const r = await api('/v1/push/send', { ...(await pushIds(pair)), title: 'Workbench', body: 'This is a test. Notifications work!', tag: 'test' });
     toast(r.sent ? 'Sent. It should show in a moment.' : 'Nothing was sent: turn notifications on first.', !r.sent);
   } catch (e) {
     toast(`Couldn't send it (${e.message}).`, true);
@@ -810,7 +810,7 @@ function renderRos() {
     list.innerHTML = `<div class="card empty">${!hoursDoc && refreshing ? 'Getting your ROs…'
       : rosError ? esc(`Couldn't get your ROs (${rosError}).`)
       : rosDoc ? 'No ROs on your list right now.'
-      : 'Your RO list shows here once PTS Workbench on your computer has sent it (it does every few minutes while it’s open, once this phone is paired).'}</div>`;
+      : 'Your RO list shows here once Workbench on your computer has sent it (it does every few minutes while it’s open, once this phone is paired).'}</div>`;
     return;
   }
   list.innerHTML = '';

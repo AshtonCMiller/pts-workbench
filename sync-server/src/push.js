@@ -189,7 +189,7 @@ export async function push(request, env, url) {
     const phones = await phonesOf(env, pid, tokenHash);
     if (!phones.length) return json({ sent: 0, phones: 0 });
     const payload = JSON.stringify({
-      title: text(b?.title, 80) || 'PTS Workbench',
+      title: text(b?.title, 80) || 'Workbench',
       body: text(b?.body, 240),
       tag: text(b?.tag, 64),
       url: '/phone/',

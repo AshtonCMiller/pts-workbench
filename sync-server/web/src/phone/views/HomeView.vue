@@ -9,12 +9,12 @@ const about = computed(() => {
   if (notify.on) return 'When something on your ROs is waiting on you and you haven’t seen it on your computer, it comes here.';
   if (!canPush) {
     return ios && !standalone
-      ? 'Open PTS Workbench from your Home Screen to turn on notifications.'
+      ? 'Open Workbench from your Home Screen to turn on notifications.'
       : "This browser can't show notifications. On an iPhone, it needs iOS 16.4 or newer.";
   }
   if (permission() === 'denied') {
     return ios
-      ? 'Notifications are turned off for PTS Workbench. Turn them on in Settings › Notifications › PTS Workbench.'
+      ? 'Notifications are turned off for Workbench. Turn them on in Settings › Notifications › Workbench.'
       : "Notifications are blocked for this site. Allow them in your browser's site settings.";
   }
   return 'When something on your ROs is waiting on you and you haven’t seen it on your computer, it comes to your phone.';
@@ -29,7 +29,7 @@ const canTurnOn = computed(() => !notify.on && canPush && permission() !== 'deni
         <div class="tick"><Icon name="tick" :stroke="2.6" /></div>
         <div>
           <h2>Paired</h2>
-          <p class="muted">With your PTS Workbench profile.</p>
+          <p class="muted">With your Workbench profile.</p>
         </div>
       </div>
     </div>

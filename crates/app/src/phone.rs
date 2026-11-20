@@ -216,7 +216,7 @@ pub fn phone_note(n: &Note) -> (String, String, String) {
             (title, n.body.clone())
         }
         // the rest: the RO and what happened ("RO 820400 sent to Review")
-        _ => (n.title.clone(), "Still waiting on you in PTS Workbench.".to_string()),
+        _ => (n.title.clone(), "Still waiting on you in Workbench.".to_string()),
     };
     (hide_vins(&title), hide_vins(&body), tag)
 }
@@ -236,7 +236,7 @@ pub fn messages(notes: &[&Note]) -> Vec<(String, String, String)> {
         r
     };
     let body = if ros.is_empty() {
-        "Open PTS Workbench to see them.".to_string()
+        "Open Workbench to see them.".to_string()
     } else if ros.len() <= 4 {
         format!("On RO {}", ros.join(", "))
     } else {

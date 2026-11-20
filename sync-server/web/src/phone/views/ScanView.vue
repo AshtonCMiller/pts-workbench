@@ -46,7 +46,7 @@ onMounted(async () => {
           setTimeout(() => paired(pair), 450);
           return;
         }
-        if (code) message.value = 'That code isn’t from PTS Workbench. Use the one under Pair phone.';
+        if (code) message.value = 'That code isn’t from Workbench. Use the one under Pair phone.';
       }
       requestAnimationFrame(look);
     };

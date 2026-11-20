@@ -17,7 +17,7 @@ const shown = `${location.host}${location.pathname}`.replace(/\/$/, '');
       <p class="muted">Or go to <b>{{ shown }}</b> on your phone.</p>
       <ol class="steps">
         <li><div>On an iPhone, add it to your Home Screen from Safari's <b>Share</b> menu, then open it from there.</div></li>
-        <li><div>Pair it: in PTS Workbench on your computer, click <b>Pair phone</b> at the bottom right and scan that code.</div></li>
+        <li><div>Pair it: in Workbench on your computer, click <b>Pair phone</b> at the bottom right and scan that code.</div></li>
       </ol>
     </div>
     <button class="plain" @click="begin">Use it here anyway</button>
