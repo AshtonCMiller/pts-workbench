@@ -3,7 +3,14 @@
 name = "pts-sync"
 main = "src/worker.js"
 compatibility_date = "2024-11-01"
+# The old address (pts-sync.parkourdev.workers.dev) stays on so older app versions and already-paired phones keep working
 workers_dev = true
+
+# prodealer.works: Cloudflare creates its DNS record and certificate on deploy (the zone must be in this account and
+# have no existing A/AAAA/CNAME record for prodealer.works itself)
+routes = [
+  { pattern = "prodealer.works", custom_domain = true },
+]
 
 # The page for phones (site/phone/), served as it is; everything else goes to the worker
 [assets]
