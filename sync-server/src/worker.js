@@ -11,6 +11,7 @@
 //   DELETE /v1/reports/<id>                                               (admin)
 //
 //   /v1/push/…                         phone notifications (src/push.js)
+//   /                                  the home page (site/index.html)
 //   /phone/                            the page for phones (site/phone/: served as it is, by Cloudflare)
 //   /updates/…, /download              the desktop app's releases and installer (src/releases.js)
 //
@@ -38,8 +39,9 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (url.pathname === '/health') return json({ ok: true, service: 'pts-workbench-sync' });
-    // prodealer.works and prodealer.works/phone open the phone page (its files are under /phone/; the browser keeps any #pair= part)
-    if (url.pathname === '/' || url.pathname === '/phone') return Response.redirect(`${url.origin}/phone/`, 302);
+    // prodealer.works/phone opens the phone page (its files are under /phone/; the browser keeps any #pair= part).
+    // prodealer.works itself is the home page, site/index.html, which Cloudflare serves before this runs.
+    if (url.pathname === '/phone') return Response.redirect(`${url.origin}/phone/`, 302);
 
     if (url.pathname.startsWith('/v1/reports')) return reports(request, env, url);
     if (url.pathname.startsWith('/v1/push/')) return push(request, env, url);

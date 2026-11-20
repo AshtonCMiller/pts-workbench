@@ -1,0 +1,642 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>ProDealer Works</title>
+<meta name="description" content="Workbench puts the service manual, diagnostics, repair orders and your hours in one window, opened to the vehicle in your bay.">
+<meta name="theme-color" content="#1a5fb4">
+<link rel="icon" href="/phone/icon-192.png">
+<link rel="apple-touch-icon" href="/phone/apple-touch-icon.png">
+<style>
+  :root {
+    --bg: #f3f6fb;
+    --bg-2: #e8eef7;
+    --card: #ffffff;
+    --ink: #0f1a2b;
+    --muted: #5b6880;
+    --line: #dbe3ef;
+    --soft: #eef3fa;
+    --accent: #1a5fb4;
+    --accent-2: #3d8bfd;
+    --accent-ink: #ffffff;
+    --good: #1f9d55;
+    --warn: #d9822b;
+    --bad: #d64545;
+    --shadow: 0 1px 2px rgba(15, 26, 43, .05), 0 12px 40px rgba(15, 26, 43, .10);
+    --spring: cubic-bezier(.34, 1.56, .64, 1);
+    --ease: cubic-bezier(.22, 1, .36, 1);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0a111e;
+      --bg-2: #0f1828;
+      --card: #131e31;
+      --ink: #e8eef8;
+      --muted: #94a3bb;
+      --line: #22314a;
+      --soft: #1a2740;
+      --accent: #4a8fe6;
+      --accent-2: #7ab2ff;
+      --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 16px 48px rgba(0, 0, 0, .45);
+    }
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 16px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    overflow-x: hidden;
+  }
+  a { color: inherit; }
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 0 20px; }
+
+  /* ---------- top bar ---------- */
+  header.top {
+    position: sticky; top: 0; z-index: 10;
+    background: color-mix(in srgb, var(--bg) 82%, transparent);
+    backdrop-filter: saturate(1.6) blur(14px); -webkit-backdrop-filter: saturate(1.6) blur(14px);
+    border-bottom: 1px solid transparent; transition: border-color .3s;
+  }
+  header.top.scrolled { border-bottom-color: var(--line); }
+  header.top .wrap { display: flex; align-items: center; gap: 24px; height: 64px; }
+  .brand { display: flex; align-items: center; gap: 10px; text-decoration: none; font-weight: 750; font-size: 18px; letter-spacing: -.01em; }
+  .brand .mark {
+    width: 30px; height: 30px; border-radius: 9px; display: grid; place-items: center;
+    background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: #fff;
+  }
+  .brand .tld { color: var(--muted); font-weight: 600; }
+  nav.links { display: flex; gap: 22px; margin-left: auto; align-items: center; }
+  nav.links a { text-decoration: none; color: var(--muted); font-size: 15px; font-weight: 550; transition: color .2s; }
+  nav.links a:hover { color: var(--ink); }
+  @media (max-width: 720px) { nav.links a:not(.btn) { display: none; } }
+
+  .btn {
+    display: inline-flex; align-items: center; gap: 8px; text-decoration: none; cursor: pointer;
+    padding: 11px 18px; border-radius: 12px; border: 0; font: inherit; font-weight: 650; font-size: 15px;
+    background: var(--accent); color: var(--accent-ink) !important;
+    box-shadow: 0 6px 18px color-mix(in srgb, var(--accent) 35%, transparent);
+    transition: transform .35s var(--spring), box-shadow .3s;
+  }
+  .btn:hover { transform: translateY(-2px) scale(1.03); box-shadow: 0 10px 26px color-mix(in srgb, var(--accent) 45%, transparent); }
+  .btn:active { transform: scale(.97); transition-duration: .1s; }
+  .btn.ghost { background: var(--card); color: var(--ink) !important; box-shadow: inset 0 0 0 1px var(--line); }
+  .btn.ghost:hover { box-shadow: inset 0 0 0 1px var(--accent), 0 8px 20px rgba(15, 26, 43, .08); }
+  .btn.small { padding: 8px 14px; font-size: 14px; border-radius: 10px; }
+
+  /* ---------- hero ---------- */
+  .hero { position: relative; padding: 72px 0 40px; }
+  .hero::before {
+    content: ""; position: absolute; inset: -120px 0 auto; height: 620px; z-index: -1; pointer-events: none;
+    background:
+      radial-gradient(600px 300px at 18% 30%, color-mix(in srgb, var(--accent-2) 22%, transparent), transparent 70%),
+      radial-gradient(520px 280px at 85% 20%, color-mix(in srgb, var(--accent) 18%, transparent), transparent 70%);
+  }
+  .hero .wrap { display: grid; grid-template-columns: 1fr 1.15fr; gap: 48px; align-items: center; }
+  @media (max-width: 920px) { .hero .wrap { grid-template-columns: 1fr; gap: 40px; } .hero { padding-top: 40px; } }
+  .eyebrow {
+    display: inline-flex; align-items: center; gap: 8px; padding: 5px 12px; border-radius: 99px;
+    background: var(--card); box-shadow: inset 0 0 0 1px var(--line); font-size: 13px; font-weight: 600; color: var(--muted);
+  }
+  .eyebrow i { width: 7px; height: 7px; border-radius: 50%; background: var(--good); box-shadow: 0 0 0 4px color-mix(in srgb, var(--good) 20%, transparent); }
+  h1 { font-size: clamp(38px, 6vw, 62px); line-height: 1.04; letter-spacing: -.035em; margin: 18px 0 18px; font-weight: 800; }
+  h1 .grad { background: linear-gradient(100deg, var(--accent), var(--accent-2)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .lede { font-size: 19px; color: var(--muted); max-width: 34em; margin: 0 0 28px; }
+  .cta { display: flex; gap: 12px; flex-wrap: wrap; }
+  .fine { display: flex; gap: 18px; flex-wrap: wrap; margin-top: 20px; font-size: 14px; color: var(--muted); }
+  .fine span { display: inline-flex; align-items: center; gap: 6px; }
+  .fine svg { color: var(--good); }
+
+  /* ---------- the app, drawn ---------- */
+  .window {
+    background: var(--card); border-radius: 18px; box-shadow: var(--shadow), inset 0 0 0 1px var(--line);
+    overflow: hidden; animation: float 7s ease-in-out infinite;
+  }
+  @keyframes float { 0%, 100% { transform: translateY(0) rotate(-.4deg); } 50% { transform: translateY(-10px) rotate(.2deg); } }
+  .chrome { display: flex; align-items: center; gap: 7px; padding: 12px 14px; border-bottom: 1px solid var(--line); background: var(--soft); }
+  .chrome b { width: 11px; height: 11px; border-radius: 50%; background: var(--line); }
+  .chrome .title { margin-left: 10px; font-size: 13px; font-weight: 650; color: var(--muted); }
+  .tabs { position: relative; display: flex; gap: 4px; padding: 10px 12px 0; border-bottom: 1px solid var(--line); }
+  .tabs button {
+    position: relative; z-index: 1; border: 0; background: none; font: inherit; font-size: 13.5px; font-weight: 600;
+    color: var(--muted); padding: 8px 12px 10px; cursor: pointer; transition: color .25s;
+  }
+  .tabs button.on { color: var(--accent); }
+  .tabs .glow {
+    position: absolute; bottom: -1px; height: 3px; border-radius: 3px 3px 0 0; background: var(--accent);
+    transition: left .55s var(--spring), width .55s var(--spring);
+  }
+  .panes { position: relative; height: 318px; }
+  .pane {
+    position: absolute; inset: 0; padding: 16px; opacity: 0; transform: translateX(24px) scale(.98); pointer-events: none;
+    transition: opacity .35s var(--ease), transform .55s var(--spring);
+  }
+  .pane.on { opacity: 1; transform: none; pointer-events: auto; }
+  .pane.gone { transform: translateX(-24px) scale(.98); }
+  @media (max-width: 520px) { .panes { height: 360px; } .tabs button { padding: 8px 8px 10px; font-size: 12.5px; } }
+
+  .ro { display: flex; align-items: center; gap: 12px; padding: 11px 12px; border-radius: 12px; background: var(--soft); margin-bottom: 8px; }
+  .ro .num { font-weight: 750; font-variant-numeric: tabular-nums; min-width: 62px; }
+  .ro .veh { flex: 1; min-width: 0; }
+  .ro .veh b { display: block; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .ro .veh small { color: var(--muted); font-size: 12.5px; }
+  .tag { font-size: 11.5px; font-weight: 700; padding: 3px 8px; border-radius: 99px; white-space: nowrap; }
+  .tag.ok { color: var(--good); background: color-mix(in srgb, var(--good) 14%, transparent); }
+  .tag.wait { color: var(--warn); background: color-mix(in srgb, var(--warn) 15%, transparent); }
+  .tag.new { color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
+  .ro.pop { animation: pop .7s var(--spring) both; }
+  @keyframes pop { from { opacity: 0; transform: translateY(10px) scale(.96); } }
+
+  .doc h4 { margin: 2px 0 4px; font-size: 15px; }
+  .doc .crumb { font-size: 12px; color: var(--muted); margin-bottom: 12px; }
+  .step { display: flex; gap: 10px; margin-bottom: 10px; font-size: 13.5px; }
+  .step em { flex: none; width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; font-style: normal; font-size: 12px; font-weight: 700; background: var(--soft); color: var(--accent); }
+  .bar { height: 8px; border-radius: 99px; background: var(--soft); overflow: hidden; }
+  .bar i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--accent), var(--accent-2)); width: 0; transition: width 1.2s var(--ease); }
+  .line { height: 9px; border-radius: 6px; background: var(--soft); margin: 7px 0; }
+
+  .dtc { display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-radius: 12px; background: var(--soft); margin-bottom: 8px; font-size: 13.5px; }
+  .dtc code { font: 700 13px ui-monospace, SFMono-Regular, Consolas, monospace; color: var(--bad); }
+  .dtc span:not(.tag) { flex: 1; color: var(--muted); }
+  .mini { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 12px; }
+  .mini div { background: var(--soft); border-radius: 12px; padding: 10px; }
+  .mini small { display: block; font-size: 11.5px; color: var(--muted); }
+  .mini b { font-size: 17px; font-variant-numeric: tabular-nums; }
+
+  .hours { display: grid; grid-template-columns: 150px 1fr; gap: 18px; align-items: center; height: 100%; }
+  @media (max-width: 520px) { .hours { grid-template-columns: 1fr; justify-items: center; height: auto; } }
+  .ring { position: relative; width: 150px; height: 150px; }
+  .ring svg { transform: rotate(-90deg); }
+  .ring circle { fill: none; stroke-width: 12; }
+  .ring .track { stroke: var(--soft); }
+  .ring .fill { stroke: var(--accent); stroke-linecap: round; stroke-dasharray: 377; stroke-dashoffset: 377; transition: stroke-dashoffset 1.4s var(--ease); }
+  .ring .val { position: absolute; inset: 0; display: grid; place-content: center; text-align: center; }
+  .ring .val b { font-size: 28px; font-variant-numeric: tabular-nums; line-height: 1; }
+  .ring .val small { color: var(--muted); font-size: 12px; }
+  .days { display: grid; gap: 7px; width: 100%; }
+  .days div { display: grid; grid-template-columns: 34px 1fr 38px; gap: 8px; align-items: center; font-size: 12.5px; color: var(--muted); }
+  .days b { color: var(--ink); text-align: right; font-variant-numeric: tabular-nums; }
+
+  /* ---------- sections ---------- */
+  section { padding: 72px 0; }
+  .center { text-align: center; }
+  h2 { font-size: clamp(28px, 4vw, 40px); letter-spacing: -.025em; line-height: 1.12; margin: 0 0 14px; font-weight: 800; }
+  .sub { color: var(--muted); font-size: 18px; max-width: 40em; margin: 0 auto; }
+  .kicker { color: var(--accent); font-weight: 700; font-size: 14px; letter-spacing: .06em; text-transform: uppercase; margin-bottom: 10px; }
+
+  .juggle { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; margin: 34px auto 0; max-width: 780px; }
+  .juggle span {
+    padding: 9px 14px; border-radius: 12px; background: var(--card); box-shadow: inset 0 0 0 1px var(--line);
+    font-weight: 600; font-size: 14.5px; color: var(--muted);
+  }
+  .juggle .arrow { background: none; box-shadow: none; color: var(--accent); padding: 9px 4px; }
+  .juggle .one { background: var(--accent); color: #fff; box-shadow: 0 8px 22px color-mix(in srgb, var(--accent) 35%, transparent); }
+
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; margin-top: 44px; }
+  @media (max-width: 920px) { .grid { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 600px) { .grid { grid-template-columns: 1fr; } }
+  .feat {
+    background: var(--card); border-radius: 18px; padding: 24px; box-shadow: inset 0 0 0 1px var(--line);
+    transition: transform .45s var(--spring), box-shadow .3s;
+  }
+  .feat:hover { transform: translateY(-5px); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, var(--line)), var(--shadow); }
+  .feat .ic {
+    width: 44px; height: 44px; border-radius: 13px; display: grid; place-items: center; margin-bottom: 16px;
+    background: color-mix(in srgb, var(--accent) 13%, transparent); color: var(--accent);
+    transition: transform .5s var(--spring);
+  }
+  .feat:hover .ic { transform: rotate(-8deg) scale(1.1); }
+  .feat h3 { margin: 0 0 8px; font-size: 18px; letter-spacing: -.01em; }
+  .feat p { margin: 0; color: var(--muted); font-size: 15px; }
+
+  .flow { display: grid; grid-template-columns: repeat(4, 1fr); gap: 18px; margin-top: 44px; counter-reset: s; position: relative; }
+  @media (max-width: 860px) { .flow { grid-template-columns: 1fr 1fr; } }
+  @media (max-width: 520px) { .flow { grid-template-columns: 1fr; } }
+  .flow div { position: relative; padding: 22px; border-radius: 18px; background: var(--card); box-shadow: inset 0 0 0 1px var(--line); }
+  .flow div::before {
+    counter-increment: s; content: counter(s); display: grid; place-items: center; width: 34px; height: 34px; border-radius: 50%;
+    background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: #fff; font-weight: 800; margin-bottom: 14px;
+  }
+  .flow h3 { margin: 0 0 6px; font-size: 17px; }
+  .flow p { margin: 0; color: var(--muted); font-size: 14.5px; }
+
+  .band { background: var(--bg-2); }
+  .split { display: grid; grid-template-columns: 1fr 1fr; gap: 56px; align-items: center; }
+  @media (max-width: 860px) { .split { grid-template-columns: 1fr; gap: 40px; } }
+  .ticks { list-style: none; padding: 0; margin: 22px 0 28px; display: grid; gap: 12px; }
+  .ticks li { display: flex; gap: 12px; align-items: flex-start; font-size: 16px; }
+  .ticks li svg { flex: none; margin-top: 3px; color: var(--accent); }
+
+  .phone {
+    width: 270px; height: 540px; margin: 0 auto; border-radius: 44px; padding: 12px; position: relative;
+    background: #0d1422; box-shadow: var(--shadow), inset 0 0 0 2px #2a3550;
+  }
+  .phone .screen {
+    height: 100%; border-radius: 33px; overflow: hidden; position: relative;
+    background: linear-gradient(160deg, #1d4f9c, #0e2a57 55%, #0a1730);
+  }
+  .phone .clock { text-align: center; color: #fff; padding-top: 54px; }
+  .phone .clock b { display: block; font-size: 58px; font-weight: 300; letter-spacing: -.02em; line-height: 1; }
+  .phone .clock small { opacity: .8; font-size: 14px; }
+  .notes { position: absolute; left: 10px; right: 10px; bottom: 26px; display: grid; gap: 8px; }
+  .note {
+    background: rgba(255, 255, 255, .86); color: #0f1a2b; border-radius: 18px; padding: 11px 13px; font-size: 12.5px;
+    backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+    transform-origin: 50% 100%; animation: note .8s var(--spring) both;
+  }
+  .note.out { animation: noteout .35s var(--ease) both; }
+  @keyframes note { from { opacity: 0; transform: translateY(30px) scale(.9); } }
+  @keyframes noteout { to { opacity: 0; transform: scale(.94); } }
+  .note .app { display: flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 700; color: #5b6880; margin-bottom: 3px; }
+  .note .app i { width: 15px; height: 15px; border-radius: 4px; background: linear-gradient(135deg, #1a5fb4, #3d8bfd); }
+  .note .app span { margin-left: auto; font-weight: 500; }
+  .note b { display: block; font-size: 13px; }
+
+  .road { display: grid; grid-template-columns: repeat(4, 1fr); gap: 18px; margin-top: 44px; }
+  @media (max-width: 920px) { .road { grid-template-columns: 1fr 1fr; } }
+  @media (max-width: 520px) { .road { grid-template-columns: 1fr; } }
+  .road div { padding: 22px; border-radius: 18px; border: 1.5px dashed var(--line); transition: border-color .3s, transform .45s var(--spring); }
+  .road div:hover { border-color: var(--accent); transform: translateY(-4px); }
+  .road .soon { display: inline-block; font-size: 11.5px; font-weight: 700; color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); padding: 3px 9px; border-radius: 99px; margin-bottom: 12px; }
+  .road h3 { margin: 0 0 6px; font-size: 17px; }
+  .road p { margin: 0; color: var(--muted); font-size: 14.5px; }
+
+  .final {
+    margin: 0 auto; max-width: 880px; text-align: center; padding: 52px 28px; border-radius: 28px; color: #fff;
+    background: radial-gradient(500px 220px at 20% 0%, rgba(255, 255, 255, .18), transparent 70%), linear-gradient(135deg, #1a5fb4, #2f7be6);
+    box-shadow: 0 20px 60px rgba(26, 95, 180, .35);
+  }
+  .final h2 { color: #fff; }
+  .final p { color: rgba(255, 255, 255, .85); font-size: 18px; margin: 0 0 26px; }
+  .final .btn { background: #fff; color: #1a5fb4 !important; box-shadow: 0 8px 24px rgba(0, 0, 0, .18); }
+  .final .btn.ghost { background: rgba(255, 255, 255, .14); color: #fff !important; box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .4); }
+
+  footer { padding: 40px 0 56px; color: var(--muted); font-size: 14px; }
+  footer .wrap { display: flex; flex-wrap: wrap; gap: 14px 28px; align-items: center; }
+  footer nav { display: flex; gap: 20px; margin-left: auto; }
+  footer a { text-decoration: none; }
+  footer a:hover { color: var(--ink); }
+
+  /* things slide up into place as they come on screen */
+  .reveal { opacity: 0; transform: translateY(26px) scale(.98); transition: opacity .6s var(--ease), transform .8s var(--spring); }
+  .reveal.in { opacity: 1; transform: none; }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation: none !important; transition-duration: .01s !important; }
+    .reveal { opacity: 1; transform: none; }
+  }
+</style>
+</head>
+<body>
+
+<header class="top" id="top">
+  <div class="wrap">
+    <a class="brand" href="/">
+      <span class="mark"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.6 2.6-2.4-.6-.6-2.4z"/></svg></span>
+      <span>ProDealer<span class="tld">.works</span></span>
+    </a>
+    <nav class="links">
+      <a href="#features">Features</a>
+      <a href="#phone">Phone</a>
+      <a href="#next">What's next</a>
+      <a class="btn small" href="/download">Download</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <!-- ---------- hero ---------- -->
+  <section class="hero">
+    <div class="wrap">
+      <div>
+        <span class="eyebrow reveal"><i></i>Built in a dealership service department</span>
+        <h1 class="reveal">Less clicking.<br><span class="grad">More fixing.</span></h1>
+        <p class="lede reveal">Workbench puts the service manual, diagnostics, repair orders and your hours in one window,
+          already open to the vehicle in your bay. Dealership techs spend their time on the car, not on finding things.</p>
+        <div class="cta reveal">
+          <a class="btn" href="/download">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0-5-5m5 5 5-5M4 19h16"/></svg>
+            Download for Windows
+          </a>
+          <a class="btn ghost" href="#features">See what it does</a>
+        </div>
+        <div class="fine reveal">
+          <span><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5 10 17 19 7"/></svg>No admin rights needed</span>
+          <span><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5 10 17 19 7"/></svg>Updates itself</span>
+          <span><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5 10 17 19 7"/></svg>Customer info stays in the shop</span>
+        </div>
+      </div>
+
+      <!-- The app, drawn (made-up repair orders) -->
+      <div class="reveal" aria-hidden="true">
+        <div class="window">
+          <div class="chrome"><b></b><b></b><b></b><span class="title">Workbench</span></div>
+          <div class="tabs" id="demo-tabs">
+            <button class="on" data-pane="0">My ROs</button>
+            <button data-pane="1">Manual</button>
+            <button data-pane="2">Diagnostics</button>
+            <button data-pane="3">Hours</button>
+            <span class="glow" id="demo-glow"></span>
+          </div>
+          <div class="panes">
+            <div class="pane on">
+              <div class="ro"><span class="num">418203</span><span class="veh"><b>2021 F-150 XLT 3.5L</b><small>Tag 512 · Check engine light on</small></span><span class="tag ok">Approved</span></div>
+              <div class="ro"><span class="num">418221</span><span class="veh"><b>2019 Escape SE 1.5L</b><small>Tag 538 · Brakes grinding</small></span><span class="tag wait">Waiting</span></div>
+              <div class="ro"><span class="num">418230</span><span class="veh"><b>2023 Bronco Sport</b><small>Tag 541 · Recall + maintenance</small></span><span class="tag new">New</span></div>
+              <div class="ro" id="demo-new" style="display:none"><span class="num">418247</span><span class="veh"><b>2020 Explorer ST</b><small>Tag 557 · Noise over bumps</small></span><span class="tag new">Just assigned</span></div>
+            </div>
+            <div class="pane doc">
+              <h4>Brake pads and rotors: removal and installation</h4>
+              <div class="crumb">2019 Escape · Brakes · Front disc brake</div>
+              <div class="step"><em>1</em><span>Raise and support the vehicle. Remove the wheel and tire.</span></div>
+              <div class="step"><em>2</em><span>Remove the caliper bolts and position the caliper aside.</span></div>
+              <div class="step"><em>3</em><span>Remove the pads, then the caliper anchor plate.</span></div>
+              <div class="line" style="width:92%"></div><div class="line" style="width:76%"></div><div class="line" style="width:84%"></div>
+            </div>
+            <div class="pane">
+              <div class="dtc"><code>P0301</code><span>Cylinder 1 misfire detected</span><span class="tag wait">Pending</span></div>
+              <div class="dtc"><code>P0420</code><span>Catalyst efficiency below threshold</span><span class="tag ok">Cleared</span></div>
+              <div class="mini">
+                <div><small>12V battery</small><b>12.6 V</b></div>
+                <div><small>Oil life</small><b>38%</b></div>
+                <div><small>Odometer</small><b>48,210</b></div>
+              </div>
+              <div style="margin-top:14px;font-size:12.5px;color:var(--muted)">Health reports, last 30 days</div>
+              <div class="bar" style="margin-top:6px"><i data-w="72%"></i></div>
+            </div>
+            <div class="pane">
+              <div class="hours">
+                <div class="ring">
+                  <svg width="150" height="150" viewBox="0 0 150 150"><circle class="track" cx="75" cy="75" r="60"/><circle class="fill" cx="75" cy="75" r="60" id="demo-ring"/></svg>
+                  <div class="val"><b id="demo-hrs">0.0</b><small>flagged this period</small></div>
+                </div>
+                <div class="days">
+                  <div>Mon<div class="bar"><i data-w="78%"></i></div><b>9.4</b></div>
+                  <div>Tue<div class="bar"><i data-w="62%"></i></div><b>7.5</b></div>
+                  <div>Wed<div class="bar"><i data-w="90%"></i></div><b>10.8</b></div>
+                  <div>Thu<div class="bar"><i data-w="55%"></i></div><b>6.6</b></div>
+                  <div>Fri<div class="bar"><i data-w="70%"></i></div><b>8.4</b></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ---------- the problem ---------- -->
+  <section>
+    <div class="wrap center">
+      <div class="kicker reveal">The problem</div>
+      <h2 class="reveal">One repair order, six places to look</h2>
+      <p class="sub reveal">Every job means jumping between the repair order system, the service manual, bulletins, wiring
+        diagrams, diagnostics and a notepad for your hours, and typing the same VIN into each of them.</p>
+      <div class="juggle reveal">
+        <span>Repair orders</span><span>Service manual</span><span>Bulletins</span><span>Wiring</span><span>Diagnostics</span><span>Your hours</span>
+        <span class="arrow">→</span><span class="one">One window</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ---------- features ---------- -->
+  <section id="features" style="padding-top:24px">
+    <div class="wrap">
+      <div class="center">
+        <div class="kicker reveal">What it does</div>
+        <h2 class="reveal">Everything for the job, in the bay</h2>
+      </div>
+      <div class="grid">
+        <div class="feat reveal">
+          <div class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M9 8h6M9 12h6M9 16h4"/></svg></div>
+          <h3>Opens to the right vehicle</h3>
+          <p>Reads the repair orders assigned to you and opens each vehicle's manual, bulletins and wiring by itself. No more typing VINs.</p>
+        </div>
+        <div class="feat reveal">
+          <div class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg></div>
+          <h3>Diagnostics in one place</h3>
+          <p>Trouble codes, the vehicle's health history and software updates, vehicle history and labor times, side by side with the manual.</p>
+        </div>
+        <div class="feat reveal">
+          <div class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></div>
+          <h3>Your hours, kept for you</h3>
+          <p>Flagged hours for every pay period, checked against your pay sheet so nothing goes missing, plus spiffs you've turned in.</p>
+        </div>
+        <div class="feat reveal">
+          <div class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8a6 6 0 1 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg></div>
+          <h3>Never miss an approval</h3>
+          <p>Know the moment repairs are approved or declined, or the advisor sends a message, even when you've stepped away.</p>
+        </div>
+        <div class="feat reveal">
+          <div class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg></div>
+          <h3>Private by design</h3>
+          <p>Your notes and hours follow you between computers, encrypted before they leave. Customer information never leaves the shop.</p>
+        </div>
+        <div class="feat reveal">
+          <div class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg></div>
+          <h3>Installs without IT</h3>
+          <p>Runs on the shop computers you already have, with no admin rights, and keeps itself up to date in the background.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ---------- how a job goes ---------- -->
+  <section style="padding-top:24px">
+    <div class="wrap">
+      <div class="center">
+        <div class="kicker reveal">How a job goes</div>
+        <h2 class="reveal">From assigned to flagged</h2>
+      </div>
+      <div class="flow">
+        <div class="reveal"><h3>The RO comes in</h3><p>It shows up in My ROs with the vehicle and concern, ready when you are.</p></div>
+        <div class="reveal"><h3>The vehicle opens</h3><p>Its manual, bulletins, wiring and diagnostics are a click away, already for that VIN.</p></div>
+        <div class="reveal"><h3>You fix it</h3><p>Look things up without leaving the bay, and get a heads-up the second more work is approved.</p></div>
+        <div class="reveal"><h3>Your hours add up</h3><p>Flagged time lands on your hours for the pay period, on your computer and your phone.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ---------- phone ---------- -->
+  <section class="band" id="phone">
+    <div class="wrap split">
+      <div>
+        <div class="kicker reveal">On your phone</div>
+        <h2 class="reveal">The shop in your pocket</h2>
+        <p class="sub reveal" style="margin:0">Pair your phone once by scanning a code from the desktop app. No app store needed.</p>
+        <ul class="ticks">
+          <li class="reveal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5 10 17 19 7"/></svg>Notifications for approvals and messages you haven't seen yet</li>
+          <li class="reveal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5 10 17 19 7"/></svg>Your open repair orders, and flag hours from anywhere</li>
+          <li class="reveal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5 10 17 19 7"/></svg>Snap your pay sheet to see what you've been paid for</li>
+          <li class="reveal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5 10 17 19 7"/></svg>Clock in and out, and watch the pay period add up</li>
+        </ul>
+        <a class="btn reveal" href="/phone/">Open on your phone</a>
+      </div>
+      <div class="reveal" aria-hidden="true">
+        <div class="phone">
+          <div class="screen">
+            <div class="clock"><b id="phone-time">9:41</b><small id="phone-date">Thursday</small></div>
+            <div class="notes" id="notes"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ---------- what's next ---------- -->
+  <section id="next">
+    <div class="wrap">
+      <div class="center">
+        <div class="kicker reveal">What's next</div>
+        <h2 class="reveal">Built to grow with the dealership</h2>
+        <p class="sub reveal">Workbench starts with the technician. Next, it brings the rest of the store onto the same page.</p>
+      </div>
+      <div class="road">
+        <div class="reveal"><span class="soon">Planned</span><h3>Every brand you sell</h3><p>The same workbench for multi-franchise stores, whatever's on the lift.</p></div>
+        <div class="reveal"><span class="soon">Planned</span><h3>Dispatch</h3><p>Repair orders routed to the right tech automatically, by skill and workload.</p></div>
+        <div class="reveal"><span class="soon">Planned</span><h3>Customer updates</h3><p>Customers see where their vehicle is in the process without calling the desk.</p></div>
+        <div class="reveal"><span class="soon">Planned</span><h3>Parts and inventory</h3><p>See what's on the shelf from the job, and keep stock simpler for the parts team.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section style="padding-top:8px">
+    <div class="wrap">
+      <div class="final reveal">
+        <h2>Get back to the car</h2>
+        <p>Install Workbench on a shop computer in a couple of minutes. No admin rights, no IT ticket.</p>
+        <div class="cta" style="justify-content:center">
+          <a class="btn" href="/download">Download for Windows</a>
+          <a class="btn ghost" href="/phone/">Set up your phone</a>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>© <span id="year">2026</span> ProDealer Works. Built by technicians, for dealership service departments.</span>
+    <nav><a href="#features">Features</a><a href="/phone/">Phone</a><a href="/download">Download</a></nav>
+  </div>
+</footer>
+
+<script>
+  (function () {
+    var still = matchMedia('(prefers-reduced-motion: reduce)').matches;
+    document.getElementById('year').textContent = new Date().getFullYear();
+
+    // the top bar gets its line once the page is scrolled
+    var top = document.getElementById('top');
+    var onScroll = function () { top.classList.toggle('scrolled', scrollY > 8); };
+    addEventListener('scroll', onScroll, { passive: true }); onScroll();
+
+    // things slide in as they come on screen, a little after each other when they come together
+    var io = new IntersectionObserver(function (entries) {
+      var n = 0;
+      entries.forEach(function (e) {
+        if (!e.isIntersecting) return;
+        e.target.style.transitionDelay = (n++ * 70) + 'ms';
+        e.target.classList.add('in');
+        io.unobserve(e.target);
+      });
+    }, { threshold: .12, rootMargin: '0px 0px -40px 0px' });
+    document.querySelectorAll('.reveal').forEach(function (el) { io.observe(el); });
+
+    // ---------- the app, drawn: its tabs take turns ----------
+    var tabs = [].slice.call(document.querySelectorAll('#demo-tabs button'));
+    var panes = [].slice.call(document.querySelectorAll('.pane'));
+    var glow = document.getElementById('demo-glow');
+    var at = 0, timer = null;
+
+    function place() {
+      var b = tabs[at];
+      glow.style.left = b.offsetLeft + 'px';
+      glow.style.width = b.offsetWidth + 'px';
+    }
+    function fill(pane) {
+      pane.querySelectorAll('.bar i').forEach(function (i) { i.style.width = '0'; });
+      requestAnimationFrame(function () { requestAnimationFrame(function () {
+        pane.querySelectorAll('.bar i').forEach(function (i) { i.style.width = i.dataset.w; });
+      }); });
+    }
+    function hours() {
+      var ring = document.getElementById('demo-ring'), out = document.getElementById('demo-hrs');
+      var goal = 42.7, max = 60;
+      ring.style.strokeDashoffset = 377;
+      requestAnimationFrame(function () { requestAnimationFrame(function () {
+        ring.style.strokeDashoffset = 377 * (1 - goal / max);
+      }); });
+      var t0 = performance.now();
+      (function count(t) {
+        var p = Math.min(1, (t - t0) / 1400), e = 1 - Math.pow(1 - p, 3);
+        out.textContent = (goal * e).toFixed(1);
+        if (p < 1) requestAnimationFrame(count);
+      })(t0);
+    }
+    function show(i) {
+      if (i === at && panes[i].classList.contains('on')) return;
+      panes[at].classList.remove('on');
+      panes[at].classList.add('gone');
+      var was = panes[at];
+      setTimeout(function () { was.classList.remove('gone'); }, 400);
+      tabs[at].classList.remove('on');
+      at = i;
+      tabs[at].classList.add('on');
+      panes[at].classList.add('on');
+      place();
+      fill(panes[at]);
+      if (at === 3) hours();
+      if (at === 0) {
+        var r = document.getElementById('demo-new');
+        r.style.display = 'none';
+        setTimeout(function () { r.style.display = ''; r.classList.remove('pop'); void r.offsetWidth; r.classList.add('pop'); }, 900);
+      }
+    }
+    function cycle() {
+      clearInterval(timer);
+      if (!still) timer = setInterval(function () { show((at + 1) % tabs.length); }, 3800);
+    }
+    tabs.forEach(function (b, i) { b.onclick = function () { show(i); cycle(); }; });
+    addEventListener('resize', place);
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(place);
+    place();
+    cycle();
+
+    // ---------- the phone, drawn: notifications come in ----------
+    var now = new Date();
+    document.getElementById('phone-time').textContent = now.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }).replace(/\s?[AP]M$/i, '');
+    document.getElementById('phone-date').textContent = now.toLocaleDateString([], { weekday: 'long', month: 'long', day: 'numeric' });
+    var notes = [
+      ['RO 418203: repairs approved', 'Spark plugs, ignition coil #1'],
+      ['RO 418221: message', '"Customer says go ahead with the rear pads too"'],
+      ['RO 418230: 1 repair declined', 'Cabin air filter'],
+    ];
+    var box = document.getElementById('notes'), k = 0;
+    function note() {
+      var shown = box.children;
+      if (shown.length >= 3) {
+        [].slice.call(shown).forEach(function (n) { n.classList.add('out'); });
+        setTimeout(function () { box.innerHTML = ''; note(); }, 380);
+        return;
+      }
+      var n = notes[k++ % notes.length];
+      var el = document.createElement('div');
+      el.className = 'note';
+      el.innerHTML = '<div class="app"><i></i>WORKBENCH<span>now</span></div><b></b><div></div>';
+      el.querySelector('b').textContent = n[0];
+      el.lastChild.textContent = n[1];
+      box.insertBefore(el, box.firstChild);
+    }
+    var started = false;
+    new IntersectionObserver(function (e, o) {
+      if (!e[0].isIntersecting || started) return;
+      started = true; o.disconnect();
+      note();
+      if (!still) setInterval(note, 2600);
+      else { note(); note(); }
+    }, { threshold: .3 }).observe(document.querySelector('.phone'));
+  })();
+</script>
+</body>
+</html>
