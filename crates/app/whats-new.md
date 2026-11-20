@@ -31,6 +31,7 @@
 - **RO Status** has been updated, so the sidebar will now show the current status of each RO.
 - **Accept new ROs from Dispatch:** Finally, through the built-in XTime display, we can finally accept new ROs from dispatch.
 - **Backup PTS & XTime Interface:** For those of us that are not yet ready to embrace what technology has to offer, the normal XTime & PTS websites are available as a built-in tool. Web pages will not hold the same performance advantages the rest of the app has.
+- **Phone Linking:** Workbench now has a mobile app! Only tested on iPhone so far. Get on-the-go notifications about any ROs you're tracking.
 
 # Bug Fixes
 

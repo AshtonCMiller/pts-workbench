@@ -10,9 +10,10 @@
 // their sync ID) and a send token. The server keeps only a hash of the token, so even with the database in hand
 // nobody can send to someone's phone, and it never sees the sync key itself (the phone keeps that to itself).
 //
-// What's sent: whatever the desktop app puts in a notification (an RO number and what happened to it, never a
-// customer, a VIN or a name), encrypted for the phone (RFC 8291) and handed to Apple's, Google's or Mozilla's push
-// service, signed with the server's own key (VAPID, RFC 8292), made once and kept in the config table.
+// What's sent: whatever the desktop app puts in a notification (the RO and what happened, the lines approved or
+// declined, a chat message's words; VINs hidden), encrypted for the phone (RFC 8291) right here and handed to
+// Apple's, Google's or Mozilla's push service, signed with the server's own key (VAPID, RFC 8292), made once and kept
+// in the config table. Only the phone can read it, and it isn't kept here (nor logged).
 
 const HEX64 = /^[a-f0-9]{64}$/;
 // Push services a subscription may point at (anything else is refused, so the server can't be made to call out

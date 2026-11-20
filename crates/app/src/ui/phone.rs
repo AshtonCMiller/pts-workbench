@@ -163,7 +163,9 @@ pub fn card(app: &App) -> Element<'_, Message> {
         column![
             text("Send a notification to your phone when it's still unread here after:").size(13),
             choices,
-            text("It says only the RO number and what happened, never the vehicle, the customer or chat messages.")
+            text(
+                "It shows the RO, what happened and which lines, or the chat message itself (with any VIN hidden). It's encrypted for your phone: the server can't read it, and doesn't keep it."
+            )
                 .size(11)
                 .style(style::muted),
         ]

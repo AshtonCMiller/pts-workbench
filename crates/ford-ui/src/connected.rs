@@ -988,7 +988,7 @@ fn recent(cv: &ConnectedView) -> Element<'_, ConnectedMsg> {
                 .style(style::muted),
         );
     }
-    let mut c = column![head].spacing(10);
+    let c = column![head].spacing(10);
     if list.is_empty() {
         return c
             .push(if cv.history_loading {

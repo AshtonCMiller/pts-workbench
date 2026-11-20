@@ -324,7 +324,9 @@ mod tests {
         // the Electron app's tabs (and procedures) are kept; this app's place is added
         assert_eq!(list[0]["tabs"].as_array().unwrap().len(), 6);
         assert_eq!(list[0]["tabs"][5]["state"], json!({"open": [1]}));
-        assert_eq!(list[0]["rs"], json!({"tab": "service", "manual": "tsb"}));
+        // (this app's own place: its tab and Service Manual tab, and its Labor Times list)
+        assert_eq!((&list[0]["rs"]["tab"], &list[0]["rs"]["manual"]), (&json!("service"), &json!("tsb")));
+        assert!(list[0]["rs"]["labor"].is_object());
         // new here: set up by the Electron app as from an older layout
         assert_eq!(list[1]["layout"], 2);
         assert_eq!(list[1]["ymm"], "2024 Ford Maverick");

@@ -5,9 +5,10 @@
 //! it, and registers itself with the server under the push ID and token worked out from it
 //! (sync-server/src/push.js). This side asks the server how many phones are paired, and sends to them.
 //!
-//! What's sent: a notification still unread here some minutes after it came (Settings: how many, or never), once.
-//! Only what's in its title when that's an RO number and what happened ("RO 820400: line approved"); never the
-//! vehicle, the lines, a customer, or who wrote in chat and what.
+//! What's sent: a notification still unread here some minutes after it came (its card: how many, or never), once.
+//! The RO and what happened ("RO 820400: 2 lines approved"), the lines approved or declined, and a chat message's own
+//! words; not the vehicle, the tag, or who wrote. VINs are hidden. It's encrypted for the phone itself: the sync
+//! server and Apple's / Google's push services pass it on without being able to read it, and nothing is kept.
 
 use serde_json::{Value, json};
 use workbench_net::{Http, Method, Url};
@@ -133,40 +134,89 @@ pub fn due(notes: &Notes, now_ms: i64, after_min: u32) -> Vec<u64> {
         .collect()
 }
 
-/// One notification's words for the phone: what happened, never who or what's on the RO
-fn line(n: &Note) -> String {
-    match n.kind {
-        Kind::Message if n.ro.is_empty() => "New chat message".to_string(),
-        Kind::Message => format!("New chat message on RO {}", n.ro),
-        // (these titles are only the RO number and what happened: "RO 820400 sent to Approval")
-        _ => n.title.clone(),
-    }
-}
+/// Each one on its own up to this many at once; more than that, one that says how many
+const SEPARATE: usize = 4;
 
-/// The phone's notification for these (title, body, tag): one says what it is, several how many
-pub fn message(notes: &[&Note]) -> (String, String, String) {
-    match notes {
-        [one] => (
-            line(one),
-            "Still waiting on you in PTS Workbench.".to_string(),
-            if one.ro.is_empty() {
-                "pts-chat".to_string()
-            } else {
-                format!("ro-{}", one.ro)
-            },
-        ),
-        many => {
-            let mut lines: Vec<String> = many.iter().take(3).map(|n| line(n)).collect();
-            if many.len() > 3 {
-                lines.push(format!("and {} more", many.len() - 3));
-            }
-            (
-                format!("{} things are waiting on you", many.len()),
-                lines.join(" · "),
-                "pts-waiting".to_string(),
-            )
+/// VINs in what's sent are hidden ("1FTFW1E85MFA00000" → "[VIN]"): a 17-character run of letters and digits (no I, O
+/// or Q) with digits in it
+pub fn hide_vins(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut word = String::new();
+    let flush = |word: &mut String, out: &mut String| {
+        let vin = word.len() == 17
+            && word
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() && !matches!(c.to_ascii_uppercase(), 'I' | 'O' | 'Q'))
+            && word.chars().filter(char::is_ascii_digit).count() >= 4
+            && word.chars().any(|c| c.is_ascii_alphabetic());
+        out.push_str(if vin { "[VIN]" } else { word.as_str() });
+        word.clear();
+    };
+    for c in s.chars() {
+        if c.is_ascii_alphanumeric() {
+            word.push(c);
+        } else {
+            flush(&mut word, &mut out);
+            out.push(c);
         }
     }
+    flush(&mut word, &mut out);
+    out
+}
+
+/// One notification for the phone (title, body, tag): the RO and what happened; the lines approved or declined; a
+/// chat message's own words. (Not the vehicle, the tag or who wrote.)
+pub fn phone_note(n: &Note) -> (String, String, String) {
+    let tag = if n.ro.is_empty() {
+        format!("note-{}", n.id)
+    } else {
+        format!("ro-{}-{}", n.ro, n.id)
+    };
+    let (title, body) = match n.kind {
+        // "RO 820400: 2 lines approved" / "Brakes; Front tires"
+        Kind::Approved | Kind::Declined => (n.title.clone(), n.body.clone()),
+        Kind::Message => {
+            let mentioned = n.title.contains(" mentioned you");
+            let title = match (n.ro.is_empty(), mentioned) {
+                (true, false) => "New chat message".to_string(),
+                (true, true) => "You were mentioned in chat".to_string(),
+                (false, false) => format!("Chat on RO {}", n.ro),
+                (false, true) => format!("You were mentioned on RO {}", n.ro),
+            };
+            (title, n.body.clone())
+        }
+        // the rest: the RO and what happened ("RO 820400 sent to Review")
+        _ => (n.title.clone(), "Still waiting on you in PTS Workbench.".to_string()),
+    };
+    (hide_vins(&title), hide_vins(&body), tag)
+}
+
+/// What to send for these: each one on its own, or (many at once) one that says how many
+pub fn messages(notes: &[&Note]) -> Vec<(String, String, String)> {
+    if notes.len() <= SEPARATE {
+        return notes.iter().map(|n| phone_note(n)).collect();
+    }
+    let ros: Vec<String> = {
+        let mut r: Vec<String> = Vec::new();
+        for n in notes {
+            if !n.ro.is_empty() && !r.contains(&n.ro) {
+                r.push(n.ro.clone());
+            }
+        }
+        r
+    };
+    let body = if ros.is_empty() {
+        "Open PTS Workbench to see them.".to_string()
+    } else if ros.len() <= 4 {
+        format!("On RO {}", ros.join(", "))
+    } else {
+        format!("On RO {} and {} more", ros[..3].join(", "), ros.len() - 3)
+    };
+    vec![(
+        format!("{} things are waiting on you", notes.len()),
+        body,
+        "pts-waiting".to_string(),
+    )]
 }
 
 #[cfg(test)]
@@ -186,8 +236,8 @@ mod tests {
         n.add(
             vec![news(
                 Kind::Approved,
-                "RO 820400: line approved",
-                "Brakes · 2022 Ford F-150",
+                "RO 820400: 2 lines approved",
+                "Front brakes; Cabin filter",
                 "820400",
             )],
             0,
@@ -196,12 +246,15 @@ mod tests {
             vec![news(
                 Kind::Message,
                 "New message from Sam on RO 820400",
-                "Call Mrs. Smith back",
+                "Customer says it's 1FTFW1E85MFA12345, check the recall",
                 "820400",
             )],
             60_000,
         );
-        n.add(vec![news(Kind::Stage, "RO 820411 sent to Review", "", "820411")], 9 * 60_000);
+        n.add(
+            vec![news(Kind::Stage, "RO 820411 sent to Review", "2022 Ford F-150 · Tag 51", "820411")],
+            9 * 60_000,
+        );
         n
     }
 
@@ -225,15 +278,28 @@ mod tests {
     }
 
     #[test]
-    fn says_nothing_private() {
+    fn says_what_happened() {
         let n = notes();
-        let (t, b, tag) = message(&[n.list.iter().find(|x| x.kind == Kind::Approved).unwrap()]);
-        assert_eq!((t.as_str(), tag.as_str()), ("RO 820400: line approved", "ro-820400"));
-        assert!(!b.contains("F-150") && !b.contains("Brakes"));
+        let get = |k: Kind| n.list.iter().find(|x| x.kind == k).unwrap();
+        let (t, b, _) = phone_note(get(Kind::Approved));
+        assert_eq!(
+            (t.as_str(), b.as_str()),
+            ("RO 820400: 2 lines approved", "Front brakes; Cabin filter")
+        );
+        let (t, b, tag) = phone_note(get(Kind::Message));
+        assert_eq!(t, "Chat on RO 820400");
+        assert_eq!(b, "Customer says it's [VIN], check the recall");
+        assert!(tag.starts_with("ro-820400-"));
+        let (t, b, _) = phone_note(get(Kind::Stage));
+        assert_eq!(t, "RO 820411 sent to Review");
+        assert!(!b.contains("F-150") && !b.contains("Tag"));
         let all: Vec<&Note> = n.list.iter().collect();
-        let (t, b, _) = message(&all);
-        assert_eq!(t, "3 things are waiting on you");
-        assert!(b.contains("New chat message on RO 820400"));
-        assert!(!b.contains("Sam") && !b.contains("Smith"));
+        assert_eq!(messages(&all).len(), 3);
+        let many: Vec<&Note> = all.iter().cycle().take(6).copied().collect();
+        let m = messages(&many);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].0, "6 things are waiting on you");
+        assert_eq!(m[0].1, "On RO 820411, 820400");
+        assert_eq!(hide_vins("RO 820400 and 12345678901234567"), "RO 820400 and 12345678901234567");
     }
 }

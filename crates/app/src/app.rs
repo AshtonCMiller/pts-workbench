@@ -3387,17 +3387,20 @@ impl App {
         if ids.is_empty() {
             return Task::none();
         }
-        let (title, body, tag) = {
+        let sends = {
             let list: Vec<&crate::notes::Note> = ids.iter().filter_map(|id| self.notes.get(*id)).collect();
-            crate::phone::message(&list)
+            crate::phone::messages(&list)
         };
         for id in &ids {
             self.notes.mark_phoned(*id);
         }
         self.notes.save();
-        Task::perform(crate::phone::send(self.http.clone(), keys, title, body, tag), move |r| {
-            Message::PhoneSent(ids.clone(), r)
-        })
+        Task::batch(sends.into_iter().map(|(title, body, tag)| {
+            let ids = ids.clone();
+            Task::perform(crate::phone::send(self.http.clone(), keys.clone(), title, body, tag), move |r| {
+                Message::PhoneSent(ids.clone(), r)
+            })
+        }))
     }
 
     /// New notifications: kept in the list, the newest popped up in the corner, the taskbar button flashed

@@ -159,6 +159,40 @@
   .muted { color: var(--muted); font-size: 14px; }
   .soon { opacity: .8; }
 
+  /* the pay sheet */
+  .bar { height: 8px; border-radius: 99px; background: var(--soft); overflow: hidden; margin: 6px 0 4px; }
+  .bar i { display: block; height: 100%; width: 0; border-radius: 99px; background: var(--accent); transition: width .4s var(--ease); }
+  .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 4px; }
+  .stat { background: var(--bg); border-radius: 14px; padding: 12px 14px; animation: pop .6s var(--spring) both; }
+  .stat:nth-child(2) { animation-delay: .06s; } .stat:nth-child(3) { animation-delay: .12s; } .stat:nth-child(4) { animation-delay: .18s; }
+  .stat b { display: block; font-size: 24px; letter-spacing: -.02em; }
+  .stat span { font-size: 13px; color: var(--muted); }
+  .stat.good b { color: var(--good); } .stat.bad b { color: var(--bad); } .stat.warn b { color: #b45309; }
+  .items { list-style: none; margin: 8px 0 0; padding: 0; }
+  .items li { display: flex; gap: 10px; align-items: flex-start; padding: 11px 0; border-top: 1px solid var(--line); animation: rise .45s var(--spring) both; }
+  .items li:first-child { border-top: 0; }
+  .items .what { flex: 1; min-width: 0; }
+  .items .what b { display: block; font-size: 15px; }
+  .items .what span { display: block; color: var(--muted); font-size: 13px; }
+  .items .what code { display: block; margin-top: 4px; font: 11px/1.35 ui-monospace, Menlo, monospace; color: var(--muted); white-space: pre-wrap; word-break: break-all; }
+  .items .hrs { font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  details.card summary { list-style: none; cursor: pointer; display: flex; justify-content: space-between; align-items: center; }
+  details.card summary::-webkit-details-marker { display: none; }
+  details.card summary::after { content: "›"; font-size: 22px; color: var(--muted); transition: transform .3s var(--spring); }
+  details.card[open] summary::after { transform: rotate(90deg); }
+  details.card summary h2 { margin: 0; }
+  .count { font-size: 13px; font-weight: 600; color: var(--muted); margin-left: 6px; }
+
+  /* a switch for each change */
+  .switch { flex: none; position: relative; width: 46px; height: 28px; margin-top: 2px; }
+  .switch input { position: absolute; opacity: 0; inset: 0; margin: 0; cursor: pointer; }
+  .switch i { position: absolute; inset: 0; border-radius: 99px; background: var(--line); transition: background .25s; pointer-events: none; }
+  .switch i::after { content: ""; position: absolute; top: 3px; left: 3px; width: 22px; height: 22px; border-radius: 50%; background: #fff;
+    box-shadow: 0 1px 3px rgba(0,0,0,.25); transition: transform .35s var(--spring); }
+  .switch input:checked + i { background: var(--good); }
+  .switch input:checked + i::after { transform: translateX(18px); }
+  .note { font-size: 13px; color: var(--muted); margin-top: 10px; }
+
   .toast {
     position: fixed; left: 50%; bottom: calc(18px + env(safe-area-inset-bottom)); z-index: 9;
     transform: translate(-50%, 140%); max-width: calc(100% - 32px);
@@ -250,14 +284,42 @@
       <button class="ghost" id="b-test">Send a test</button>
       <ul class="log" id="log"></ul>
     </div>
-    <div class="card soon">
-      <h2>Coming soon</h2>
-      <p>Scan your pay sheet to see which ROs you've been paid for.</p>
+    <div class="card">
+      <h2>Your pay sheet</h2>
+      <p>Take a picture of your Technician Payroll Report to see which of your flagged lines were paid. The picture is read on this phone, and never leaves it.</p>
+      <button class="ghost" id="b-sheet">Scan a page</button>
     </div>
     <button class="danger" id="b-unpair">Unpair this phone</button>
   </section>
+
+  <!-- the pay sheet, checked against your flags -->
+  <section class="view" id="v-sheet">
+    <div class="card" id="sh-head">
+      <div class="row">
+        <h2 id="sh-title">Pay sheet</h2>
+        <button class="plain" id="b-sheet-done" style="width:auto">Done</button>
+      </div>
+      <p id="sh-about"></p>
+      <div id="sh-busy" style="display:none">
+        <div class="bar"><i id="sh-bar"></i></div>
+        <p class="muted" id="sh-step">Reading the page…</p>
+      </div>
+      <div class="stats" id="sh-stats"></div>
+      <button class="ghost" id="b-sheet-more" style="margin-top:14px">Scan another page</button>
+      <button class="plain" id="b-sheet-clear">Start over</button>
+    </div>
+    <div class="card" id="sh-changes" style="display:none">
+      <h2>Changes to make</h2>
+      <p>Here’s what the sheet says to change. Nothing changes until you tap Apply; turn off any you don’t want. Your computer picks them up at its next sync.</p>
+      <ul class="items" id="sh-change-list"></ul>
+      <button id="b-apply">Apply</button>
+    </div>
+    <div id="sh-lists"></div>
+  </section>
 </div>
+<input type="file" id="f-sheet" accept="image/*" hidden>
 <div class="toast" id="toast"></div>
+<script src="sheet.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
