@@ -30,7 +30,9 @@ const json = (body, status = 200) => new Response(JSON.stringify(body), {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    if (url.pathname === '/' || url.pathname === '/health') return json({ ok: true, service: 'pts-workbench-sync' });
+    if (url.pathname === '/health') return json({ ok: true, service: 'pts-workbench-sync' });
+    // prodealer.works and prodealer.works/phone open the phone page (its files are under /phone/; the browser keeps any #pair= part)
+    if (url.pathname === '/' || url.pathname === '/phone') return Response.redirect(`${url.origin}/phone/`, 302);
 
     if (url.pathname.startsWith('/v1/reports')) return reports(request, env, url);
     if (url.pathname.startsWith('/v1/push/')) return push(request, env, url);
