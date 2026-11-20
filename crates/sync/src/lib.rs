@@ -54,6 +54,14 @@ impl Keys {
         }
     }
 
+    /// Your RO list, as this computer's sidebar has it (for your phone): its own document, written whole by the app
+    pub fn ros(&self) -> Keys {
+        Keys {
+            id: hex(&Sha256::digest(format!("ros|{}", self.id).as_bytes())),
+            key: self.key,
+        }
+    }
+
     /// What pairs a phone (the page at `<server>/phone/` reads it after `#pair=`): this ID and the key, so the phone
     /// can work out the same push ID and token, and later read your synced flags itself. Shown only as a QR code.
     pub fn pair_code(&self) -> String {
@@ -752,6 +760,27 @@ fn records_of(keys: &Keys, doc: &Doc) -> Result<BTreeMap<String, Rec>, String> {
         .as_object()
         .map(|o| o.iter().filter_map(|(k, r)| Some((k.clone(), Rec::from_value(r)?))).collect())
         .unwrap_or_default())
+}
+
+/// Saves a document whole (one only this app writes, like the RO list for your phone): written over the server's
+/// copy, again over a newer one if another of your computers saved in between
+pub async fn put_whole(http: &Http, url: &str, keys: &Keys, value: &Value) -> Result<(), String> {
+    let at = format!("{}/v1/store/{}", url.trim_end_matches('/'), keys.id);
+    let sealed = encrypt(keys, value)?;
+    let (status, mut got) = request(http, Method::GET, &at, None).await?;
+    if status != 200 {
+        return Err(format!("the sync server said {status}"));
+    }
+    for _ in 0..3 {
+        let body = json!({ "base": got.version, "data": sealed }).to_string();
+        let (status, put) = request(http, Method::PUT, &at, Some(body)).await?;
+        match status {
+            200 => return Ok(()),
+            409 => got = put,
+            s => return Err(format!("the sync server said {s}")),
+        }
+    }
+    Err("the sync server was busy".into())
 }
 
 /// One sync (`sync.js` `run`): the server's copy merged with this computer's, this computer brought up to date,

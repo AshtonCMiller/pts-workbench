@@ -83,7 +83,8 @@ function phoneName() {
 // ---------- the views ----------
 
 let current = null;
-const order = ['install', 'pair', 'type', 'scan', 'home', 'sheet'];
+const order = ['install', 'pair', 'type', 'scan', 'ros', 'hours', 'home', 'sheet'];
+const TABS = ['ros', 'hours', 'home'];
 function show(name) {
   if (current === name) return;
   const back = current && order.indexOf(name) < order.indexOf(current);
@@ -94,6 +95,16 @@ function show(name) {
   void v.offsetWidth;
   v.classList.add('on');
   current = name;
+  // the tab bar: shown on the tabs' own views, its highlight sliding to the one showing
+  const tab = TABS.indexOf(name);
+  document.body.classList.toggle('tabbed', tab >= 0);
+  if (tab >= 0) {
+    $('tab-glow').style.transform = `translateX(${tab * 86}px)`;
+    document.querySelectorAll('#tabs button').forEach((b) => b.classList.toggle('on', b.dataset.tab === name));
+    window.scrollTo({ top: 0 });
+    if (name === 'ros') renderRos();
+    if (name === 'hours') renderHours();
+  }
 }
 
 let toastTimer;
@@ -176,7 +187,8 @@ async function paired(pair) {
   // a pairing in the address isn't left there (it'd be in the history, and shared if the page is)
   if (location.hash) history.replaceState(null, '', location.pathname);
   if (ios && !standalone) { show('install'); return; }
-  show('home');
+  show('ros');
+  refresh();
   let on = false;
   try { on = await subscribe(false); } catch (e) { toast(`Couldn't reach the server (${e.message}).`, true); }
   showNotifyState(on);
@@ -297,6 +309,8 @@ $('b-unpair').onclick = async () => {
   } catch { /* forgotten here anyway */ }
   store.drop('pair');
   store.drop('endpoint');
+  hoursDoc = null;
+  rosDoc = null;
   show('pair');
 };
 
@@ -635,7 +649,7 @@ $('b-sheet-clear').onclick = () => {
   store.drop('sheet');
   render();
 };
-$('b-sheet-done').onclick = () => show('home');
+$('b-sheet-done').onclick = () => show('hours');
 $('b-apply').onclick = async () => {
   const pick = changes.filter((c) => c.on);
   if (!pick.length) return;
@@ -652,6 +666,349 @@ $('b-apply').onclick = async () => {
     applyLabel();
   }
 };
+
+// ---------- your ROs and hours (what your computer syncs) ----------
+//
+// The hours: the same document as the desktop apps (records: l/RO an RO's lines, o/RO/LINE your hours for a line,
+// n/RO/LINE your name for it, r/RO the RO, f/RO/LINE a flag, s/START a shift). The RO list: a document of its own
+// that the desktop app writes (crates/sync `Keys::ros`), as its sidebar has it: { at, ros: [{ ro, tag, ymm, open,
+// mine, tags: [[label, colour]] }] }. Flagging, confirming and clocking in or out here change the hours document;
+// your computer picks it up at its next sync.
+
+let hoursDoc = null;
+let rosDoc = null;
+let rosError = '';
+let refreshing = false;
+let periodOffset = 0;
+const openRos = new Set();
+
+async function rosId(pair) {
+  return sha256hex(`ros|${pair.id}`);
+}
+
+async function refresh() {
+  const pair = store.get('pair');
+  if (!pair || refreshing) return;
+  refreshing = true;
+  $('b-refresh-ros').classList.add('spin');
+  try {
+    const [h, r] = await Promise.allSettled([
+      readStore(pair),
+      (async () => {
+        const res = await fetch(`/v1/store/${await rosId(pair)}`, { cache: 'no-store' });
+        if (!res.ok) throw new Error(`the server said ${res.status}`);
+        const got = await res.json();
+        return got.data ? openDoc(pair, got.data) : null;
+      })(),
+    ]);
+    if (h.status === 'fulfilled') hoursDoc = h.value;
+    if (r.status === 'fulfilled') { rosDoc = r.value; rosError = ''; } else rosError = r.reason.message;
+    if (h.status === 'rejected') toast(`Couldn't get your hours (${h.reason.message}).`, true);
+  } finally {
+    refreshing = false;
+    $('b-refresh-ros').classList.remove('spin');
+  }
+  if (current === 'ros') renderRos();
+  if (current === 'hours') renderHours();
+}
+
+const recs = () => (hoursDoc && hoursDoc.doc.records) || {};
+const live = (r) => r && !r.del && r.v !== undefined && r.v !== null;
+
+/** An RO's lines that count (approved, a concern, or done; not declined), as the desktop's sidebar lists them */
+function linesOf(ro) {
+  const r = recs();
+  const l = r[`l/${ro}`];
+  if (!live(l)) return null;
+  const lines = l.v.lines || {};
+  return (l.v.order || Object.keys(lines)).map((k) => lines[k] && { ...lines[k], key: k }).filter(Boolean)
+    .filter((x) => (x.approved || x.primary || x.completed) && !x.declined)
+    .map((x) => {
+      const over = r[`o/${ro}/${x.key}`];
+      const name = r[`n/${ro}/${x.key}`];
+      const text = (live(name) && name.v) || x.complaint || x.service || '';
+      const flag = r[`f/${ro}/${x.key}`];
+      return { ...x, text, paid: live(over) ? Number(over.v) : Number(x.hours) || 0, flag: live(flag) ? flag.v : null };
+    });
+}
+
+/** Changes records in the hours document (`edit` changes them in place, returns whether anything changed) */
+async function editHours(edit) {
+  const pair = store.get('pair');
+  // shown at once, then saved
+  if (hoursDoc) { edit(hoursDoc.doc.records, Date.now()); }
+  if (current === 'ros') renderRos();
+  if (current === 'hours') renderHours();
+  for (let tries = 0; tries < 4; tries++) {
+    const got = await readStore(pair);
+    const now = Date.now();
+    if (!edit(got.doc.records, now)) { hoursDoc = got; return; }
+    const res = await fetch(`/v1/store/${pair.id}`, {
+      method: 'PUT', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ base: got.version, data: await sealDoc(pair, got.doc) }),
+    });
+    if (res.ok) { hoursDoc = { version: (await res.json()).version, doc: got.doc }; return; }
+    if (res.status !== 409) throw new Error(`the server said ${res.status}`);
+  }
+  throw new Error('the server was busy: try again');
+}
+
+/** A record set (newer than what's there, so it wins when your computers merge) */
+function put(records, k, v, now) {
+  const was = records[k];
+  records[k] = v === null
+    ? { t: Math.max(now, ((was && was.t) || 0) + 1), d: 'phone', del: 1 }
+    : { t: Math.max(now, ((was && was.t) || 0) + 1), d: 'phone', v };
+}
+
+async function save(edit, done) {
+  try {
+    await editHours(edit);
+    if (done) toast(done);
+  } catch (e) {
+    toast(`Couldn't save it (${e.message}).`, true);
+    await refresh();
+  }
+  if (current === 'ros') renderRos();
+  if (current === 'hours') renderHours();
+}
+
+function flagLine(ro, line) {
+  const ymm = (live(recs()[`r/${ro}`]) && recs()[`r/${ro}`].v.ymm) || (rosDoc && (rosDoc.ros.find((x) => x.ro === ro) || {}).ymm) || '';
+  save((r, now) => {
+    const k = `f/${ro}/${line.key}`;
+    if (live(r[k])) return false;
+    put(r, k, { dms: line.dms || '', label: `${line.diag ? 'Diag: ' : ''}${line.text}`, ymm, hours: line.paid, flaggedAt: now, confirmed: false }, now);
+    return true;
+  });
+}
+
+function unflagLine(ro, key) {
+  save((r, now) => {
+    const k = `f/${ro}/${key}`;
+    if (!live(r[k])) return false;
+    put(r, k, null, now);
+    return true;
+  });
+}
+
+function ago(ms) {
+  const m = Math.max(0, Math.round((Date.now() - ms) / 60000));
+  if (m < 1) return 'just now';
+  if (m < 60) return `${m} min ago`;
+  if (m < 1440) return `${Math.round(m / 60)} h ago`;
+  return new Date(ms).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
+const fh = (n) => `${(Math.round((n || 0) * 100) / 100).toFixed(2)}`;
+
+function renderRos() {
+  const list = $('ros-list');
+  $('ros-asof').textContent = rosDoc && rosDoc.at
+    ? `From your computer, ${ago(rosDoc.at)}`
+    : refreshing ? 'Getting them…' : '';
+  if (!rosDoc || !(rosDoc.ros || []).length) {
+    list.innerHTML = `<div class="card empty">${!hoursDoc && refreshing ? 'Getting your ROs…'
+      : rosError ? esc(`Couldn't get your ROs (${rosError}).`)
+      : rosDoc ? 'No ROs on your list right now.'
+      : 'Your RO list shows here once PTS Workbench on your computer has sent it (it does every few minutes while it’s open, once this phone is paired).'}</div>`;
+    return;
+  }
+  list.innerHTML = '';
+  rosDoc.ros.forEach((ro, i) => {
+    const lines = linesOf(ro.ro);
+    const flagged = (lines || []).filter((l) => l.flag).reduce((s, l) => s + (Number(l.flag.hours) || 0), 0);
+    const total = (lines || []).reduce((s, l) => s + l.paid, 0);
+    const card = document.createElement('div');
+    card.className = `card ro${openRos.has(ro.ro) ? ' open' : ''}`;
+    card.style.animationDelay = `${Math.min(i, 10) * 0.035}s`;
+    const chips = (ro.tags || []).map(([label, color]) => `<span class="chip" style="background:${esc(color)}">${esc(label)}</span>`).join('')
+      + (ro.open ? '<span class="chip ghosty">Open on your computer</span>' : '')
+      + (ro.mine === false ? '<span class="chip ghosty">Not on your list</span>' : '');
+    card.innerHTML = `<button class="top">
+        <div class="head"><b>RO ${esc(ro.ro)}</b>${ro.tag ? `<span class="tag">Tag ${esc(ro.tag)}</span>` : ''}
+          ${lines ? `<span class="hrs">${fh(flagged)}<span class="muted" style="font-weight:500"> / ${fh(total)} h</span></span>` : ''}</div>
+        <div class="ymm">${esc(ro.ymm || '')}</div>
+        ${chips ? `<div class="chips">${chips}</div>` : ''}
+      </button>
+      <div class="lines"><div><ul></ul></div></div>`;
+    const ul = card.querySelector('ul');
+    if (!lines) {
+      ul.innerHTML = '<li class="ln"><div class="what"><span>Open this RO on your computer once to see its lines here.</span></div></li>';
+    } else if (!lines.length) {
+      ul.innerHTML = '<li class="ln"><div class="what"><span>No approved lines yet.</span></div></li>';
+    }
+    for (const l of lines || []) {
+      const li = document.createElement('li');
+      li.className = 'ln';
+      const sub = l.flag
+        ? `Flagged ${new Date(l.flag.flaggedAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}${l.flag.confirmed ? ' · on your time sheet' : ''}`
+        : l.completed ? 'Done in Xtime' : l.diag ? 'Diagnosis' : '';
+      li.innerHTML = `<span class="letter">${esc(l.dms || '·')}</span>
+        <div class="what"><b>${esc(l.text || 'Line')}</b>${sub ? `<span>${esc(sub)}</span>` : ''}</div>
+        <span class="h">${fh(l.flag ? l.flag.hours : l.paid)}</span>
+        <button class="flagbtn ${l.flag ? 'on' : 'ghost'}">${l.flag ? 'Flagged' : 'Flag'}</button>`;
+      li.querySelector('button').onclick = () => {
+        if (!l.flag) flagLine(ro.ro, l);
+        else if (l.flag.confirmed) toast('That one’s on your time sheet: take it off on your computer.', true);
+        else if (confirm(`Take the flag off RO ${ro.ro} line ${l.dms || ''}?`)) unflagLine(ro.ro, l.key);
+      };
+      ul.append(li);
+    }
+    card.querySelector('.top').onclick = () => {
+      if (openRos.has(ro.ro)) openRos.delete(ro.ro); else openRos.add(ro.ro);
+      card.classList.toggle('open');
+    };
+    list.append(card);
+  });
+}
+
+// ----- hours -----
+
+/** The pay period (1st–15th, 16th–end) `offset` periods from the one `t` is in: [start, end) as times */
+function payPeriod(t, offset) {
+  const d = new Date(t);
+  const idx = d.getFullYear() * 24 + d.getMonth() * 2 + (d.getDate() <= 15 ? 0 : 1) + offset;
+  const y = Math.floor(idx / 24);
+  const r = idx - y * 24;
+  const m = Math.floor(r / 2);
+  const second = r % 2 === 1;
+  const start = new Date(y, m, second ? 16 : 1).getTime();
+  const end = second ? new Date(y, m + 1, 1).getTime() : new Date(y, m, 16).getTime();
+  return { start, end };
+}
+
+function shifts() {
+  return Object.entries(recs())
+    .filter(([k, r]) => k.startsWith('s/') && live(r))
+    .map(([k, r]) => ({ k, start: Number(r.v.start), end: r.v.end == null ? null : Number(r.v.end) }))
+    .sort((a, b) => a.start - b.start);
+}
+
+/** Time clocked in between two times (shifts from different computers that overlap counted once) */
+function worked(from, to, now) {
+  const spans = shifts().map((s) => [Math.max(s.start, from), Math.min(s.end ?? now, to)]).filter(([a, b]) => b > a).sort((a, b) => a[0] - b[0]);
+  let total = 0;
+  let cur = null;
+  for (const [a, b] of spans) {
+    if (cur && a <= cur[1]) cur[1] = Math.max(cur[1], b);
+    else { if (cur) total += cur[1] - cur[0]; cur = [a, b]; }
+  }
+  if (cur) total += cur[1] - cur[0];
+  return total;
+}
+const hm = (ms) => { const m = Math.round(ms / 60000); return `${Math.floor(m / 60)} h ${String(m % 60).padStart(2, '0')} m`; };
+const clockTime = (ms) => new Date(ms).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+
+function renderHours() {
+  const now = Date.now();
+  const open = shifts().filter((s) => s.end === null).pop();
+  $('clock-card').classList.toggle('in', !!open);
+  const day = new Date(); day.setHours(0, 0, 0, 0);
+  const today = worked(day.getTime(), now + 1, now);
+  $('clock-title').textContent = open ? 'Clocked in' : 'Clocked out';
+  $('clock-sub').textContent = open
+    ? `Since ${clockTime(open.start)} · ${hm(now - open.start)}`
+    : today ? `${hm(today)} today` : hoursDoc ? 'Not clocked in today' : '';
+  $('b-clock').textContent = open ? 'Clock out' : 'Clock in';
+  $('b-clock').className = open ? 'ghost' : '';
+
+  const p = payPeriod(now, periodOffset);
+  const endDay = new Date(p.end - 1);
+  const fmt = (t) => new Date(t).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  $('per-title').textContent = `${fmt(p.start)} – ${fmt(endDay)}`;
+  $('per-sub').textContent = periodOffset === 0 ? 'This pay period' : periodOffset === -1 ? 'Last pay period' : `${-periodOffset} pay periods ago`;
+  $('b-next').disabled = periodOffset >= 0;
+
+  const flags = Object.entries(recs())
+    .filter(([k, r]) => k.startsWith('f/') && live(r) && r.v.flaggedAt >= p.start && r.v.flaggedAt < p.end)
+    .map(([k, r]) => { const [, ro, ...rest] = k.split('/'); return { k, ro, key: rest.join('/'), ...r.v, hours: Number(r.v.hours) || 0 }; })
+    .sort((a, b) => a.flaggedAt - b.flaggedAt);
+  const total = flags.reduce((s, f) => s + f.hours, 0);
+  const conf = flags.filter((f) => f.confirmed).reduce((s, f) => s + f.hours, 0);
+  const clocked = worked(p.start, Math.min(p.end, now + 1), now);
+  const eff = clocked > 0 ? `${Math.round((total / (clocked / 3600000)) * 100)}% efficiency` : 'not clocked in yet';
+  const stat = (v, label, cls = '') => `<div class="stat ${cls}"><b>${v}</b><span>${label}</span></div>`;
+  $('hr-stats').innerHTML = !hoursDoc ? '<p class="muted">Getting your hours…</p>'
+    : stat(`${fh(total)} h`, `flagged · ${flags.length} line${flags.length === 1 ? '' : 's'}`)
+    + stat(`${fh(conf)} h`, 'on your time sheet', conf && conf === total ? 'good' : '')
+    + stat(`${fh(total - conf)} h`, total - conf > 0 ? 'still to check' : 'all checked', total - conf > 0 ? 'warn' : '')
+    + stat(hm(clocked).replace(' m', 'm').replace(' h ', 'h '), eff);
+
+  // by RO, in the order first flagged
+  const box = $('hr-flags');
+  box.innerHTML = '';
+  if (hoursDoc && !flags.length) {
+    box.innerHTML = '<div class="card empty">Nothing flagged in this pay period yet.</div>';
+    return;
+  }
+  const ros = [...new Set(flags.map((f) => f.ro))];
+  if (ros.length) box.insertAdjacentHTML('beforeend', '<p class="muted" style="margin:4px 4px 10px">Switch a line on once it’s on your time sheet.</p>');
+  ros.forEach((ro, i) => {
+    const fs = flags.filter((f) => f.ro === ro).sort((a, b) => String(a.dms).localeCompare(String(b.dms)));
+    const sub = fs.reduce((s, f) => s + f.hours, 0);
+    const all = fs.every((f) => f.confirmed);
+    const card = document.createElement('div');
+    card.className = 'card';
+    card.style.animationDelay = `${Math.min(i, 10) * 0.035}s`;
+    card.innerHTML = `<div class="grp"><div class="what"><b>RO ${esc(ro)}</b><span>${esc(fs.find((f) => f.ymm)?.ymm || '')}</span></div>
+      <span class="hrs" style="font-weight:700">${fh(sub)} h</span>
+      <label class="switch" title="All on your time sheet"><input type="checkbox" ${all ? 'checked' : ''}><i></i></label></div>`;
+    card.querySelector('input').onchange = (e) => confirmFlags(fs.map((f) => f.k), e.target.checked);
+    for (const f of fs) {
+      const row = document.createElement('div');
+      row.className = 'fl';
+      row.innerHTML = `<span class="letter" style="flex:none;width:26px;height:26px;border-radius:7px;display:grid;place-items:center;font-weight:700;font-size:12px;background:var(--soft);color:var(--accent)">${esc(f.dms || '·')}</span>
+        <div class="what" style="flex:1;min-width:0"><b style="display:block;font-size:14px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(f.label || 'Line')}</b>
+        <span style="font-size:12px;color:var(--muted)">${fmt(f.flaggedAt)}</span></div>
+        <span style="font-weight:700;font-variant-numeric:tabular-nums">${fh(f.hours)}</span>
+        <label class="switch"><input type="checkbox" ${f.confirmed ? 'checked' : ''}><i></i></label>`;
+      row.querySelector('input').onchange = (e) => confirmFlags([f.k], e.target.checked);
+      card.append(row);
+    }
+    box.append(card);
+  });
+}
+
+function confirmFlags(keys, on) {
+  save((r, now) => {
+    let n = 0;
+    for (const k of keys) {
+      if (!live(r[k]) || !!r[k].v.confirmed === on) continue;
+      put(r, k, { ...r[k].v, confirmed: on }, now);
+      n++;
+    }
+    return n > 0;
+  });
+}
+
+$('b-clock').onclick = () => {
+  const open = shifts().filter((s) => s.end === null).pop();
+  save((r, now) => {
+    const o = Object.entries(r).filter(([k, x]) => k.startsWith('s/') && live(x) && x.v.end == null).sort((a, b) => a[1].v.start - b[1].v.start).pop();
+    if (open) {
+      if (!o) return false;
+      put(r, o[0], { ...o[1].v, end: now }, now);
+    } else {
+      if (o) return false;
+      put(r, `s/${now}`, { start: now, end: null, auto: false }, now);
+    }
+    return true;
+  }, open ? 'Clocked out.' : 'Clocked in.');
+};
+$('b-prev').onclick = () => { periodOffset--; renderHours(); };
+$('b-next').onclick = () => { if (periodOffset < 0) { periodOffset++; renderHours(); } };
+$('b-refresh-ros').onclick = () => refresh();
+document.querySelectorAll('#tabs button').forEach((b) => { b.onclick = () => show(b.dataset.tab); });
+
+// kept up to date while it's open
+setInterval(() => {
+  if (document.visibilityState !== 'visible' || !store.get('pair')) return;
+  if (TABS.includes(current)) refresh();
+}, 60000);
+setInterval(() => { if (current === 'hours') renderHours(); }, 30000);
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && store.get('pair') && TABS.includes(current)) refresh();
+});
 
 // ---------- starting ----------
 

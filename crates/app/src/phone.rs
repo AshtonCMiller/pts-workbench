@@ -5,6 +5,9 @@
 //! it, and registers itself with the server under the push ID and token worked out from it
 //! (sync-server/src/push.js). This side asks the server how many phones are paired, and sends to them.
 //!
+//! Your RO list goes to the phone too (`list_item`, sent by the app: crates/sync `Keys::ros`): each RO's number, tag,
+//! vehicle and where it is, as the sidebar has them; the phone reads your hours from what sync already carries.
+//!
 //! What's sent: a notification still unread here some minutes after it came (its card: how many, or never), once.
 //! The RO and what happened ("RO 820400: 2 lines approved"), the lines approved or declined, and a chat message's own
 //! words; not the vehicle, the tag, or who wrote. VINs are hidden. It's encrypted for the phone itself: the sync
@@ -49,6 +52,33 @@ pub struct PhoneState {
     /// When the server was last asked (s), and the QR code while the card's up (none: nothing to pair with)
     pub checked_at: Option<i64>,
     pub qr: Option<ui_kit::qr::Qr>,
+    /// Your RO list as last sent for the phone (its text), when, and whether it's being sent
+    pub list_sent: Option<String>,
+    pub list_sent_at: Option<i64>,
+    pub list_sending: bool,
+}
+
+/// How often the RO list is sent again when nothing changed (so the phone can say how fresh it is), in seconds
+pub const LIST_EVERY: i64 = 15 * 60;
+
+/// Xtime's colour for a pill, as the phone shows it ("#15803d")
+fn hex_color(c: [u8; 3]) -> String {
+    format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2])
+}
+
+/// One RO of your list, for the phone: its number, tag, vehicle and where it is (no VIN, no customer)
+pub fn list_item(r: &xtime::dashboard::AssignedRo, mine: bool, open: bool) -> Value {
+    let ymm = [r.year.as_str(), r.make.as_str(), r.model.as_str()]
+        .iter()
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.trim())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let tags: Vec<Value> = xtime_ui::my_ros::status_tags(r)
+        .into_iter()
+        .map(|(label, color)| json!([label, hex_color(color)]))
+        .collect();
+    json!({ "ro": r.ro, "tag": r.tag, "ymm": ymm, "mine": mine, "open": open, "tags": tags })
 }
 
 impl PhoneState {

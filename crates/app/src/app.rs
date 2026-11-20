@@ -547,6 +547,8 @@ pub enum Message {
     /// Notifications sent to the phone (their IDs, and how it went)
     PhoneSent(Vec<u64>, Result<usize, String>),
     SetPhoneAfter(u32),
+    /// Your RO list sent for the phone (its text, and how it went)
+    RoListSent(String, Result<(), String>),
     AdminKey(String),
     AdminUnlock,
     AdminChecked(Result<(), String>),
@@ -2100,6 +2102,13 @@ impl App {
                     self.phone.error = Some(e);
                 }
             }
+            Message::RoListSent(text, r) => {
+                self.phone.list_sending = false;
+                self.phone.list_sent_at = Some(self.now);
+                if r.is_ok() {
+                    self.phone.list_sent = Some(text);
+                }
+            }
             Message::SetPhoneAfter(m) => {
                 self.settings.phone_after = Some(m);
                 self.draft.phone_after = Some(m);
@@ -2387,7 +2396,7 @@ impl App {
                 } else {
                     Task::none()
                 };
-                let phone_send = self.send_to_phone();
+                let phone_send = Task::batch([self.send_to_phone(), self.send_ro_list()]);
                 // sync: every minute (and soon after a change, see SyncDue)
                 let sync_due = self.sync.last_run.is_none_or(|t| self.now - t >= crate::syncing::EVERY);
                 let sync = if sync_due { self.sync_now() } else { Task::none() };
@@ -3373,6 +3382,43 @@ impl App {
         }
         self.phone.checking = true;
         Task::perform(crate::phone::status(self.http.clone(), keys), Message::PhoneChecked)
+    }
+
+    /// Your RO list for the phone, as the sidebar has it: sent when it changed (or every quarter hour), while a phone's
+    /// paired. Each RO's number, tag, vehicle and where it is; never the VIN or the customer.
+    fn send_ro_list(&mut self) -> Task<Message> {
+        if !self.phone.paired() || self.phone.list_sending || self.settings.sync_off || self.ros_loaded_at.is_none() {
+            return Task::none();
+        }
+        let Some(keys) = self.phone_keys() else {
+            return Task::none();
+        };
+        let mut list: Vec<serde_json::Value> = Vec::new();
+        let open = |ro: &str| self.open.iter().any(|w| w.ro.ro == ro);
+        for r in &self.my_ros {
+            list.push(crate::phone::list_item(r, true, open(&r.ro)));
+        }
+        for w in self
+            .open
+            .iter()
+            .filter(|w| !w.is_sample() && !self.my_ros.iter().any(|r| r.ro == w.ro.ro))
+        {
+            list.push(crate::phone::list_item(&w.ro, false, true));
+        }
+        let text = serde_json::json!(list).to_string();
+        let same = self.phone.list_sent.as_deref() == Some(text.as_str());
+        let lately = self.phone.list_sent_at.is_some_and(|t| self.now - t < crate::phone::LIST_EVERY);
+        // (unchanged, and sent lately)
+        if same && lately {
+            return Task::none();
+        }
+        self.phone.list_sending = true;
+        let doc = serde_json::json!({ "format": 1, "at": timecard::now_ms(), "ros": list });
+        let http = self.http.clone();
+        Task::perform(
+            async move { workbench_sync::put_whole(&http, workbench_sync::URL, &keys.ros(), &doc).await },
+            move |r| Message::RoListSent(text.clone(), r),
+        )
     }
 
     /// Notifications unread here a while: sent to your phone (once each)
