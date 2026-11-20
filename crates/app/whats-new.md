@@ -8,6 +8,15 @@
   leave older ones here. (The same file format as the Electron app's src/whats-new.md.)
 -->
 
+## v0.5.1
+
+# Improvements
+- You will now receive a notification if your feedback report has been marked as 'Fixed' or if your receive a reply on your report.
+
+# Bug Fixes
+- In the mobile app, fixed *toast* notifications staying on-screen at all times.
+- Fixed an issue caused by pinning the app to the windows taskbar - The app is launched by a separate internal 'launcher' in order to improve automatic updates, which led to that specific version of the app being pinned instead of the launcher. This would prevent updates from being applied. Windows now respects this apps launch parameters and will pin the launcher instead of the app binary itself.
+
 ## The new PTS Workbench
 
 # Improvements

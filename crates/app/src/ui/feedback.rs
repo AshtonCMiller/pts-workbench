@@ -222,7 +222,8 @@ fn mine(r: &Reports) -> Element<'_, Message> {
 }
 
 fn mine_item(x: &Report) -> Element<'_, Message> {
-    let mut top = row![kind_tag(x.kind), text(x.title.as_str()).font(style::BOLD), horizontal_space()]
+    // (the title takes what's left and wraps: a long one never pushes the tags off the card)
+    let mut top = row![kind_tag(x.kind), text(x.title.as_str()).font(style::BOLD).width(Length::Fill)]
         .spacing(8)
         .align_y(Alignment::Center);
     if let Some(f) = fixed_tag(x) {
@@ -307,10 +308,10 @@ fn all(r: &Reports) -> Element<'_, Message> {
 
 fn report_item<'a>(r: &'a Reports, x: &'a Report) -> Element<'a, Message> {
     let id = x.id;
+    // (the title takes what's left and wraps: a long one never pushes the status off the card)
     let top = row![
         kind_tag(x.kind),
-        text(x.title.as_str()).font(style::BOLD),
-        horizontal_space(),
+        text(x.title.as_str()).font(style::BOLD).width(Length::Fill),
         pick_list(&Status::ALL[..], Some(x.status), move |s| msg(ReportMsg::SetStatus(id, s)))
             .padding([4, 8])
             .text_size(13),

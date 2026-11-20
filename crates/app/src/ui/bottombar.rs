@@ -1,6 +1,6 @@
 //! The bottom bar: the shift clock and your hours, what's going on (Xtime's state, the latest message), Feedback, your
 //! phone (Pair phone, or that it's paired), and sync's state in the corner (a light that pulses while syncing; hover for more, click for Settings).
-//! Keeps the top bar for getting around (Xtime / Workbench, Chat, My ROs, Settings).
+//! Keeps the top bar for getting around (Xtime / Workbench, Chat, Settings).
 
 use iced::widget::{button, container, horizontal_space, row, text, tooltip};
 use iced::{Alignment, Color, Element, Length};

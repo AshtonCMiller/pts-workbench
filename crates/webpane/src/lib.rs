@@ -32,6 +32,9 @@ mod logins;
 #[cfg(windows)]
 mod win;
 
+#[cfg(windows)]
+mod taskbar;
+
 /// A page to show: which one (the app's name for it: "xtime-ro:820400"), its address, and the sign-ins to hand it
 /// when it opens
 #[derive(Debug, Clone)]
@@ -60,6 +63,35 @@ pub fn show(page: Page, at: Rectangle) -> Task<Result<(), String>> {
             {
                 let _ = (&page, at);
                 Err("Xtime's and PTS's own pages show inside the app on Windows.".to_string())
+            }
+        })
+    })
+}
+
+/// What the app's window tells the Windows taskbar: pinning it pins `command` (the launcher), shown as `name` with
+/// `icon` ("C:\…\pts-workbench.exe,0"), and it shares a button with the windows carrying `app_id` (taskbar.rs)
+#[derive(Debug, Clone)]
+pub struct Taskbar {
+    pub app_id: String,
+    pub command: String,
+    pub icon: String,
+    pub name: String,
+}
+
+/// The app's (first) window says what pinning it pins (see [`Taskbar`]); nothing on other systems. Its error comes
+/// back.
+pub fn taskbar(t: Taskbar) -> Task<Result<(), String>> {
+    window::get_oldest().and_then(move |id| {
+        let t = t.clone();
+        window::run_with_handle(id, move |_handle| {
+            #[cfg(windows)]
+            {
+                taskbar::set(&_handle, &t)
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = &t;
+                Ok(())
             }
         })
     })

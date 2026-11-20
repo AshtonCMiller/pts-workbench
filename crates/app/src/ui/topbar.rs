@@ -1,4 +1,5 @@
-//! The top bar: getting around (Xtime / Workbench / Diagnostics, Chat, My ROs, Settings), and whose profile it is.
+//! The top bar: getting around (Xtime / Workbench / Diagnostics, Chat, Settings), and whose profile it is. (My ROs
+//! opens with the button beside the sidebar: sidebar.rs `handle`.)
 //! What's going on is in the bottom bar.
 
 use iced::widget::{button, container, horizontal_space, row, text};
@@ -64,7 +65,6 @@ pub fn view(app: &App) -> Element<'_, Message> {
         .push(super::profiles::switcher(app))
         .push(toggle(notes, app.notes_open, Message::ToggleNotes))
         .push(toggle(chat, app.chat, Message::ToggleChat))
-        .push(toggle("My ROs".into(), app.sidebar, Message::ToggleSidebar))
         .push(
             button(text("Settings"))
                 .padding([5, 10])

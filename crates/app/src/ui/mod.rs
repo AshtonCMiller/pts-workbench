@@ -1,7 +1,7 @@
 //! The app's screens. `view` puts them together: the top bar, then (with the sidebar and chat on either side) your
 //! Xtime dashboard or the Workbench. First setup and Settings fill the window instead.
 //!
-//!   topbar.rs     Xtime / Workbench / Diagnostics, Chat, My ROs, Settings
+//!   topbar.rs     Xtime / Workbench / Diagnostics, Chat, Settings (My ROs' button is beside it: sidebar.rs)
 //!   bottombar.rs  the shift clock, Xtime's state and the latest message, Feedback
 //!   sidebar.rs    open vehicles and your ROs
 //!   notes.rs      Notifications: the list, and the pop-up for a new one
@@ -51,9 +51,10 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 Mode::Workbench => anim::page(workbench::view(app), phase).into(),
                 Mode::Diagnostics => anim::page(diag_ui::view(&app.diag, app.diag_ro()).map(Message::Vci), phase).into(),
             };
-            // My ROs and Chat slide in and out of their sides
+            // My ROs and Chat slide in and out of their sides (My ROs' button right beside it, moving with it)
             row![
                 anim::side(sidebar::view(app), app.sidebar, anim::Edge::Left, sidebar::WIDTH),
+                sidebar::handle(app),
                 main,
                 anim::side(chat(app), app.chat, anim::Edge::Right, CHAT_WIDTH),
                 anim::side(notes::panel(app), app.notes_open, anim::Edge::Right, notes::WIDTH),

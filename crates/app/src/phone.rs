@@ -203,8 +203,8 @@ pub fn phone_note(n: &Note) -> (String, String, String) {
         format!("ro-{}-{}", n.ro, n.id)
     };
     let (title, body) = match n.kind {
-        // "RO 820400: 2 lines approved" / "Brakes; Front tires"
-        Kind::Approved | Kind::Declined => (n.title.clone(), n.body.clone()),
+        // "RO 820400: 2 lines approved" / "Brakes; Front tires"; a feedback reply: what it's about, and the reply
+        Kind::Approved | Kind::Declined | Kind::Feedback => (n.title.clone(), n.body.clone()),
         Kind::Message => {
             let mentioned = n.title.contains(" mentioned you");
             let title = match (n.ro.is_empty(), mentioned) {

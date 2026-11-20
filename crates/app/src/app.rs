@@ -581,6 +581,8 @@ pub enum Message {
     /// Every half minute (the clock's time)
     Tick,
     OpenFeedback,
+    /// Feedback opened on My reports (a reply's notification clicked)
+    OpenFeedbackMine,
     CloseFeedback,
     /// The Feedback screen's own messages
     Report(ReportMsg),
@@ -751,10 +753,31 @@ impl App {
         };
         // the admin's count of new reports (and every 15 minutes, see subscription)
         let count = Task::done(Message::Report(ReportMsg::Count));
+        // replies to your feedback, a little after starting (and every 5 minutes, see subscription)
+        let replies = Task::perform(tokio::time::sleep(std::time::Duration::from_secs(20)), |_| {
+            Message::Report(ReportMsg::CheckReplies)
+        });
         // your ROs, when there's a sign-in to ask with (and every minute, see subscription)
         let ros = Task::done(Message::LoadRos);
         let sync = app.sync_now();
-        (app, Task::batch([focus, count, ros, Task::batch(reopened), sync]))
+        (app, Task::batch([focus, count, replies, ros, Task::batch(reopened), sync]))
+    }
+
+    /// The window tells the taskbar to pin the launcher (in the installed folder), not this program (which can be a
+    /// downloaded update's). Only when started by the launcher: not during development.
+    fn taskbar(&self) -> Task<Message> {
+        let Ok(home) = std::env::var(launcher::ENV_HOME) else { return Task::none() };
+        let exe = std::path::Path::new(&home).join(launcher::LAUNCHER_EXE);
+        if !exe.is_file() {
+            return Task::none();
+        }
+        let exe = exe.display().to_string();
+        quiet(webpane::taskbar(webpane::Taskbar {
+            app_id: launcher::APP_ID.into(),
+            command: format!("\"{exe}\""),
+            icon: format!("{exe},0"),
+            name: "PTS Workbench".into(),
+        }))
     }
 
     pub fn title(&self) -> String {
@@ -2589,8 +2612,16 @@ impl App {
                 self.show_overlay(Overlay::Feedback);
                 return task.map(Message::Report);
             }
+            Message::OpenFeedbackMine => {
+                let task = self.reports.open_on(self.screen_name(), crate::reports::Tab::Mine, self.is_admin());
+                self.show_overlay(Overlay::Feedback);
+                return task.map(Message::Report);
+            }
             Message::CloseFeedback => return self.close_overlay(),
-            Message::WindowOpened => launcher::window_ready(),
+            Message::WindowOpened => {
+                launcher::window_ready();
+                return self.taskbar();
+            }
             Message::OverlayGone => {
                 if let Some((which, Phase::Leaving(_))) = self.overlay {
                     self.overlay = None;
@@ -2603,6 +2634,12 @@ impl App {
                         _ => {}
                     }
                 }
+            }
+            // your reports, looked at for new replies: each one a notification
+            Message::Report(ReportMsg::Replies(r)) => {
+                let Ok(list) = r else { return Task::none() };
+                let news: Vec<_> = self.reports.new_replies(&list).iter().map(crate::reports::reply_note).collect();
+                return self.notify(news);
             }
             Message::Report(msg) => {
                 let (admin, name) = (self.is_admin(), self.settings.name.clone());
@@ -3478,6 +3515,10 @@ impl App {
         if self.toast.is_some_and(|(t, _)| t == id) {
             self.toast = None;
         }
+        // a reply to your feedback: My reports
+        if n.kind == crate::notes::Kind::Feedback {
+            return self.update(Message::OpenFeedbackMine);
+        }
         let mut tasks = Vec::new();
         if !n.channel.is_empty() {
             self.chat = true;
@@ -3620,6 +3661,7 @@ impl App {
             },
             iced::window::open_events().map(|_| Message::WindowOpened),
             iced::time::every(std::time::Duration::from_secs(15 * 60)).map(|_| Message::Report(ReportMsg::Count)),
+            iced::time::every(std::time::Duration::from_secs(5 * 60)).map(|_| Message::Report(ReportMsg::CheckReplies)),
             // Pair phone: whether it's paired yet, every few seconds while its card is up
             if matches!(self.overlay, Some((Overlay::Phone, _))) {
                 iced::time::every(std::time::Duration::from_secs(4)).map(|_| Message::PhoneCheck)

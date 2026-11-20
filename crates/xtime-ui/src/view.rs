@@ -376,13 +376,14 @@ fn header<'a>(xv: &'a XtimeView, shown: &Shown, v: &'a RoView) -> Element<'a, Ms
     } else {
         Space::with_width(0).into()
     };
+    // (the title takes what's left, and wraps when it must: on a narrow window the rest keep their size, so Refresh
+    // never gets squeezed into a sliver)
     container(
         row![
-            column![text(title).size(20).font(style::BOLD), sub].spacing(6),
-            horizontal_space(),
+            column![text(title).size(20).font(style::BOLD), sub].spacing(6).width(Length::Fill),
             spiff,
-            text(updated).size(12).style(style::muted),
-            button(text("Refresh").size(13))
+            text(updated).size(12).style(style::muted).wrapping(text::Wrapping::None),
+            button(text("Refresh").size(13).wrapping(text::Wrapping::None))
                 .padding([5, 12])
                 .style(style::ghost)
                 .on_press_maybe((!xv.loading).then_some(Msg::Load(true))),

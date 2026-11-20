@@ -18,6 +18,8 @@ use splash::Splash;
 const SPLASH_AT_MOST: Duration = Duration::from_secs(30);
 
 fn main() -> ExitCode {
+    // the loading window shares the app's taskbar button (and a pinned one)
+    launcher::use_app_id();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let here = match std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())) {
         Some(d) => d,

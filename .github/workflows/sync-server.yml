@@ -89,6 +89,22 @@ jobs:
       - name: Set up the table
         run: npx wrangler d1 execute pts-sync --remote --file schema.sql
 
+      # Columns added after the table was first made (schema.sql only makes missing tables). Each is added once;
+      # after that SQLite says it's already there, which is fine.
+      - name: Add newer columns
+        shell: bash
+        run: |
+          add() {
+            if npx wrangler d1 execute pts-sync --remote --command "ALTER TABLE reports ADD COLUMN $1" > add.log 2>&1; then
+              echo "Added: $1"
+            elif grep -qi "duplicate column" add.log; then
+              echo "Already there: $1"
+            else
+              cat add.log; exit 1
+            fi
+          }
+          add "fixed_in TEXT NOT NULL DEFAULT ''"
+
       # Where the desktop app's releases are kept (src/releases.js): made the first time
       - name: Create the releases bucket (first time only)
         shell: bash

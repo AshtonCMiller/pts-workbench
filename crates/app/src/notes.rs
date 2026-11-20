@@ -32,6 +32,8 @@ pub enum Kind {
     Customer,
     Warranty,
     Message,
+    /// A reply to a bug report or idea you sent (Feedback › My reports)
+    Feedback,
 }
 
 impl Kind {
@@ -46,6 +48,7 @@ impl Kind {
             Kind::Customer => [0xb4, 0x53, 0x09],
             Kind::Warranty => [0x7c, 0x3a, 0xed],
             Kind::Message => [0x0e, 0x74, 0x90],
+            Kind::Feedback => [0xc0, 0x26, 0x6d],
         }
     }
 }

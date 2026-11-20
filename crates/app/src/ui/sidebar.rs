@@ -262,3 +262,72 @@ mod tests {
         assert_eq!(order, ["820500", "820200", "820400", "820100", "820600", "820300"]);
     }
 }
+
+/// How wide the strip with the sidebar's button is
+const HANDLE_WIDTH: f32 = 34.0;
+
+/// The sidebar's own button, in a slim strip right beside it (so it slides with it, and sits at the left edge while
+/// it's put away): a little sidebar picture, its side panel filled in while My ROs is showing
+pub fn handle(app: &App) -> Element<'_, Message> {
+    let open = app.sidebar;
+    let icon = iced::widget::canvas(SidebarIcon { open }).width(18).height(18);
+    let btn = button(icon).padding(5).style(style::tab(false)).on_press(Message::ToggleSidebar);
+    let tip = container(text(if open { "Hide My ROs" } else { "Show My ROs" }).size(12))
+        .padding([4, 8])
+        .style(style::floating_card);
+    container(
+        iced::widget::tooltip(btn, tip, iced::widget::tooltip::Position::Right)
+            .gap(6.0)
+            .snap_within_viewport(true),
+    )
+    .width(HANDLE_WIDTH)
+    .height(Length::Fill)
+    .padding(iced::Padding {
+        top: 8.0,
+        right: 3.0,
+        bottom: 0.0,
+        left: 3.0,
+    })
+    .into()
+}
+
+/// A window outline with a panel down its left side: the panel filled in (blue) when the sidebar's open
+struct SidebarIcon {
+    open: bool,
+}
+
+impl<M> iced::widget::canvas::Program<M> for SidebarIcon {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &(),
+        renderer: &iced::Renderer,
+        theme: &iced::Theme,
+        bounds: iced::Rectangle,
+        _cursor: iced::mouse::Cursor,
+    ) -> Vec<iced::widget::canvas::Geometry> {
+        use iced::widget::canvas::{Frame, Path, Stroke};
+        use iced::{Point, Size};
+        let c = style::colors(theme);
+        let ink = if self.open { c.accent } else { c.muted };
+        let mut frame = Frame::new(renderer, bounds.size());
+        let (w, h) = (bounds.width, bounds.height);
+        let pad = 1.5;
+        let outline = Path::rounded_rectangle(Point::new(pad, pad + 1.0), Size::new(w - pad * 2.0, h - pad * 2.0 - 2.0), 3.0.into());
+        // the side panel, about a third of the way across
+        let split = pad + (w - pad * 2.0) * 0.36;
+        if self.open {
+            let panel = Path::rounded_rectangle(
+                Point::new(pad + 1.5, pad + 2.5),
+                Size::new(split - pad - 2.0, h - pad * 2.0 - 5.0),
+                1.5.into(),
+            );
+            frame.fill(&panel, ink);
+        }
+        let stroke = Stroke::default().with_color(ink).with_width(1.5);
+        frame.stroke(&outline, stroke);
+        frame.stroke(&Path::line(Point::new(split, pad + 1.0), Point::new(split, h - pad - 1.0)), stroke);
+        vec![frame.into_geometry()]
+    }
+}

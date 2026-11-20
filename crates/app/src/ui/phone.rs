@@ -1,7 +1,7 @@
 //! Pair phone (bottom right): the QR code a phone scans, whether one's paired, and when it gets notifications
 //! (crate::phone)
 
-use iced::widget::{Column, Row, button, column, container, horizontal_space, row, text};
+use iced::widget::{Column, button, column, container, horizontal_space, row, text};
 use iced::{Alignment, Color, Element, Length};
 
 use super::{anim, pill, style};
@@ -151,14 +151,21 @@ pub fn card(app: &App) -> Element<'_, Message> {
 
     // after how long
     let after = app.settings.phone_after_min();
-    let choices = Row::with_children(AFTER_CHOICES.iter().map(|&m| {
-        button(text(if m == 0 { "Never".to_string() } else { format!("{m} min") }).size(12))
-            .padding([4, 10])
-            .style(style::tab(after == m))
-            .on_press(Message::SetPhoneAfter(m))
-            .into()
-    }))
-    .spacing(4);
+    // (in a tab row: the highlight slides to the one picked)
+    let choices = anim::tabs(
+        AFTER_CHOICES.iter().position(|&m| m == after).unwrap_or(0),
+        AFTER_CHOICES
+            .iter()
+            .map(|&m| {
+                button(text(if m == 0 { "Never".to_string() } else { format!("{m} min") }).size(12))
+                    .padding([4, 10])
+                    .style(style::tab(after == m))
+                    .on_press(Message::SetPhoneAfter(m))
+                    .into()
+            })
+            .collect(),
+    )
+    .spacing(2.0);
     right = right.push(
         column![
             text("Send a notification to your phone when it's still unread here after:").size(13),

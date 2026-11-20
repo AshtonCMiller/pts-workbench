@@ -45,6 +45,30 @@ pub const APP_EXE: &str = if cfg!(windows) {
     "pts-workbench-app"
 };
 
+/// The launcher's program file name (what the shortcuts start, and what's pinned to the taskbar)
+pub const LAUNCHER_EXE: &str = if cfg!(windows) { "pts-workbench.exe" } else { "pts-workbench" };
+
+/// Windows' name for the app (its "AppUserModelID"): the launcher's loading window and the app's windows all carry it,
+/// so they share one taskbar button, and pinning that button pins the launcher (the app's window says so too: the
+/// app's taskbar.rs). Never change it: pinned buttons are found by it.
+pub const APP_ID: &str = "ProDealer.Workbench";
+
+/// This program's windows carry [`APP_ID`] (call before making any). Nothing on other systems.
+pub fn use_app_id() {
+    #[cfg(windows)]
+    {
+        #[link(name = "shell32")]
+        unsafe extern "system" {
+            fn SetCurrentProcessExplicitAppUserModelID(id: *const u16) -> i32;
+        }
+        let id: Vec<u16> = APP_ID.encode_utf16().chain(Some(0)).collect();
+        // SAFETY: a NUL-terminated UTF-16 string that outlives the call (Windows copies it)
+        unsafe {
+            SetCurrentProcessExplicitAppUserModelID(id.as_ptr());
+        }
+    }
+}
+
 /// The app's own folder: Windows `%APPDATA%\PTS Workbench`, Linux `$XDG_CONFIG_HOME/pts-workbench` (or `~/.config/…`)
 pub fn app_dir() -> PathBuf {
     if cfg!(windows) {

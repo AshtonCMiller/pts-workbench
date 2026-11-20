@@ -48,5 +48,8 @@ onMounted(start);
     </button>
   </nav>
 
-  <div class="toast" :class="{ on: ui.toast.on, bad: ui.toast.bad }">{{ ui.toast.text }}</div>
+  <!-- only there while it's showing: it springs up, then sinks away -->
+  <Transition name="toast">
+    <div v-if="ui.toast.on" class="toast" :class="{ bad: ui.toast.bad }" role="status">{{ ui.toast.text }}</div>
+  </Transition>
 </template>

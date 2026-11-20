@@ -1,8 +1,17 @@
 //! The Feedback screen's state and what its buttons do: send a bug report or an idea, see your own reports (with
 //! their status and replies), and for the admin, everyone's (set status, reply, delete). The requests themselves are
 //! in the `feedback` crate. Its messages are wrapped in the app's `Message::Report`.
+//!
+//! Replies: every few minutes the app looks at your own reports, and a reply that's new (or changed) since it last
+//! looked becomes a notification (and so goes to your phone too, if it isn't seen on the computer). Which replies
+//! were seen is kept in `feedback-replies.json`; the first time there isn't one, the replies already there are just
+//! noted, not announced.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use feedback::{Change, Client, Error, Kind, NewReport, Report, Status};
 use iced::Task;
@@ -124,6 +133,85 @@ pub enum ReportMsg {
     /// Change the version a done one was fixed in
     EditFixedIn(i64),
     Counted(Result<Vec<Report>, Error>),
+    /// Look for new replies to your reports (every few minutes)
+    CheckReplies,
+    /// Your reports, for new replies (the app turns those into notifications: `Reports::new_replies`)
+    Replies(Result<Vec<Report>, Error>),
+}
+
+/// The replies seen already (in a notification, or on My reports): a hash of each report's reply, so a changed reply
+/// counts as new
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SeenReplies {
+    #[serde(default)]
+    replies: HashMap<i64, String>,
+}
+
+fn reply_hash(reply: &str) -> String {
+    Sha256::digest(reply.trim().as_bytes())[..12]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+impl SeenReplies {
+    fn file() -> PathBuf {
+        crate::settings::app_dir().join("feedback-replies.json")
+    }
+
+    /// What was seen (none: never looked yet)
+    fn load() -> Option<Self> {
+        serde_json::from_str(&std::fs::read_to_string(Self::file()).ok()?).ok()
+    }
+
+    fn save(&self) {
+        if let Ok(t) = serde_json::to_string(self) {
+            let _ = std::fs::write(Self::file(), t);
+        }
+    }
+
+    /// The reports with a reply not seen before (new, or changed), now counted as seen. `quiet`: counted, but none
+    /// answered (the first look, so older replies aren't all announced at once). Reports gone from the list are
+    /// forgotten.
+    pub fn fresh<'a>(&mut self, list: &'a [Report], quiet: bool) -> Vec<&'a Report> {
+        let mut out = Vec::new();
+        for r in list {
+            let reply = r.reply.as_deref().map(str::trim).unwrap_or("");
+            if reply.is_empty() {
+                continue;
+            }
+            let hash = reply_hash(reply);
+            if self.replies.get(&r.id) != Some(&hash) {
+                self.replies.insert(r.id, hash);
+                if !quiet {
+                    out.push(r);
+                }
+            }
+        }
+        self.replies.retain(|id, _| list.iter().any(|r| r.id == *id));
+        out
+    }
+}
+
+/// The notification for a reply: what it's about, and the reply (cut short; the whole of it is under My reports)
+pub fn reply_note(r: &Report) -> crate::notes::New {
+    let what = match r.kind {
+        Kind::Bug => "bug report",
+        Kind::Feature => "idea",
+    };
+    let reply: String = r.reply.as_deref().unwrap_or("").split_whitespace().collect::<Vec<_>>().join(" ");
+    let short = if reply.chars().count() > 240 {
+        format!("{}…", reply.chars().take(239).collect::<String>().trim_end())
+    } else {
+        reply
+    };
+    crate::notes::New {
+        kind: crate::notes::Kind::Feedback,
+        title: format!("Reply to your {what}: {}", r.title.trim()),
+        body: short,
+        ro: String::new(),
+        channel: String::new(),
+    }
 }
 
 /// Keyring entry for the admin's password (Windows Credential Manager / the Secret Service on Linux)
@@ -165,6 +253,8 @@ pub struct Reports {
     pub screen: String,
     /// The line at the top of the admin's list ("Saved", or what went wrong)
     pub note: Option<String>,
+    /// The replies seen already (none: never looked yet)
+    seen: Option<SeenReplies>,
 }
 
 impl Reports {
@@ -203,15 +293,34 @@ impl Reports {
             tab_phase: Phase::Still,
             mine_filter: MineFilter::All,
             pending_done: None,
+            seen: SeenReplies::load(),
         }
+    }
+
+    /// The replies in `list` not seen before, now counted as seen (the first look: none, they're just noted)
+    pub fn new_replies(&mut self, list: &[Report]) -> Vec<Report> {
+        let quiet = self.seen.is_none();
+        let seen = self.seen.get_or_insert_with(SeenReplies::default);
+        let fresh: Vec<Report> = seen.fresh(list, quiet).into_iter().cloned().collect();
+        seen.save();
+        // (My reports, when it's been loaded, shows them too)
+        if matches!(self.mine, Load::Ready(_)) {
+            self.mine = Load::Ready(list.to_vec());
+        }
+        fresh
     }
 
     /// Feedback opened from `screen`: the admin with new reports lands on them, everyone else on Send
     pub fn open(&mut self, screen: String, admin: bool) -> Task<ReportMsg> {
+        let tab = if admin && self.new_count > 0 { Tab::All } else { Tab::Send };
+        self.open_on(screen, tab, admin)
+    }
+
+    /// Feedback opened on a tab (a reply's notification: My reports)
+    pub fn open_on(&mut self, screen: String, tab: Tab, admin: bool) -> Task<ReportMsg> {
         self.screen = screen;
         self.sent = None;
         self.confirm_delete = None;
-        let tab = if admin && self.new_count > 0 { Tab::All } else { Tab::Send };
         // opening starts on its tab (no transition)
         self.shown_tab = tab;
         self.tab_phase = Phase::Still;
@@ -321,10 +430,20 @@ impl Reports {
             }
             ReportMsg::Mine(r) => {
                 self.mine = match r {
-                    Ok(list) => Load::Ready(list),
+                    Ok(list) => {
+                        // replies seen here aren't announced again
+                        let _ = self.new_replies(&list);
+                        Load::Ready(list)
+                    }
                     Err(e) => Load::Failed(format!("Couldn't load your reports: {e}")),
                 }
             }
+            ReportMsg::CheckReplies => {
+                let (client, reporter) = (self.client.clone(), self.reporter.clone());
+                return Task::perform(async move { client.mine(&reporter).await }, ReportMsg::Replies);
+            }
+            // (the app takes these first, for the notifications: see app.rs)
+            ReportMsg::Replies(_) => {}
             ReportMsg::All(r) => match r {
                 Ok(list) => {
                     self.new_count = list.iter().filter(|r| r.status == Status::New).count();
@@ -439,5 +558,71 @@ impl Reports {
         };
         let client = self.client.clone();
         Task::perform(async move { client.update(&key, id, change).await }, ReportMsg::Changed)
+    }
+}
+
+#[cfg(test)]
+mod reply_tests {
+    use super::*;
+
+    fn report(id: i64, reply: Option<&str>) -> Report {
+        Report {
+            id,
+            created_at: 1,
+            updated_at: None,
+            kind: Kind::Bug,
+            title: format!("Report {id}"),
+            status: Status::New,
+            reply: reply.map(str::to_string),
+            fixed_in: None,
+            body: None,
+            name: None,
+            version: None,
+            platform: None,
+            screen: None,
+        }
+    }
+
+    #[test]
+    fn a_reply_is_announced_once_and_again_when_it_changes() {
+        let mut seen = SeenReplies::default();
+        // the first look: noted, not announced
+        let list = vec![report(1, Some("Looking into it")), report(2, None), report(3, Some("  "))];
+        assert!(seen.fresh(&list, true).is_empty());
+        assert!(seen.fresh(&list, false).is_empty());
+        // a new reply, and a changed one
+        let list = vec![
+            report(1, Some("Fixed in 0.5.1")),
+            report(2, Some("Good idea")),
+            report(3, Some("  ")),
+        ];
+        let ids: Vec<i64> = seen.fresh(&list, false).iter().map(|r| r.id).collect();
+        assert_eq!(ids, vec![1, 2]);
+        assert!(seen.fresh(&list, false).is_empty());
+        // only spaces changed: the same reply
+        let list = vec![report(1, Some(" Fixed in 0.5.1 ")), report(2, Some("Good idea"))];
+        assert!(seen.fresh(&list, false).is_empty());
+        // a deleted report is forgotten
+        assert!(!seen.replies.contains_key(&3));
+        // kept and read back
+        let back: SeenReplies = serde_json::from_str(&serde_json::to_string(&seen).unwrap()).unwrap();
+        assert_eq!(back, seen);
+    }
+
+    #[test]
+    fn the_notification_says_what_its_about() {
+        let mut r = report(7, Some("Thanks!\nThis is fixed   in the next version."));
+        r.title = "Chat jumps ".into();
+        let n = reply_note(&r);
+        assert_eq!(n.kind, crate::notes::Kind::Feedback);
+        assert_eq!(n.title, "Reply to your bug report: Chat jumps");
+        assert_eq!(n.body, "Thanks! This is fixed in the next version.");
+        assert!(n.ro.is_empty() && n.channel.is_empty());
+        r.kind = Kind::Feature;
+        r.reply = Some("x".repeat(500));
+        let n = reply_note(&r);
+        assert!(n.title.starts_with("Reply to your idea"));
+        assert_eq!(n.body.chars().count(), 240);
+        assert!(n.body.ends_with('…'));
     }
 }

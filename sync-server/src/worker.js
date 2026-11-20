@@ -7,7 +7,7 @@
 //   POST   /v1/reports                 { kind, title, body, name, reporter, version, platform, screen } -> { id }
 //   GET    /v1/reports/mine?reporter=… -> { reports }  what this computer sent, with status and reply
 //   GET    /v1/reports                 -> { reports }  everything        (admin: Authorization: Bearer ADMIN_KEY)
-//   PATCH  /v1/reports/<id>  { status?, reply? }                          (admin)
+//   PATCH  /v1/reports/<id>  { status?, reply?, fixed_in? }               (admin)
 //   DELETE /v1/reports/<id>                                               (admin)
 //
 //   /v1/push/…                         phone notifications (src/push.js)
@@ -132,7 +132,7 @@ async function reports(request, env, url) {
   if (path === '/v1/reports/mine' && request.method === 'GET') {
     const reporter = url.searchParams.get('reporter') || '';
     if (!REPORTER.test(reporter)) return json({ error: 'bad request' }, 400);
-    const { results } = await env.DB.prepare(`SELECT id, created_at, updated_at, kind, title, status, reply FROM reports
+    const { results } = await env.DB.prepare(`SELECT id, created_at, updated_at, kind, title, status, reply, fixed_in FROM reports
       WHERE reporter = ? ORDER BY created_at DESC LIMIT 100`).bind(reporter).all();
     return json({ reports: results || [] });
   }
@@ -142,7 +142,7 @@ async function reports(request, env, url) {
   if (!isAdmin(request, env)) return json({ error: 'not allowed' }, 401);
 
   if (path === '/v1/reports' && request.method === 'GET') {
-    const { results } = await env.DB.prepare(`SELECT id, created_at, updated_at, kind, title, body, name, version, platform, screen, status, reply
+    const { results } = await env.DB.prepare(`SELECT id, created_at, updated_at, kind, title, body, name, version, platform, screen, status, reply, fixed_in
       FROM reports ORDER BY created_at DESC LIMIT 1000`).all();
     return json({ reports: results || [] });
   }
@@ -159,6 +159,8 @@ async function reports(request, env, url) {
       sets.push('status = ?'); vals.push(b.status);
     }
     if (b?.reply !== undefined) { sets.push('reply = ?'); vals.push(text(b.reply, 3000)); }
+    // the version it was fixed in ("0.5.0"; a leading "v" is dropped), or '' to clear it
+    if (b?.fixed_in !== undefined) { sets.push('fixed_in = ?'); vals.push(text(b.fixed_in, 40).replace(/^v/i, '')); }
     if (!sets.length) return json({ error: 'nothing to change' }, 400);
     const r = await env.DB.prepare(`UPDATE reports SET ${sets.join(', ')}, updated_at = ? WHERE id = ?`).bind(...vals, Date.now(), id).run();
     return r.meta.changes ? json({ ok: true }) : json({ error: 'not found' }, 404);

@@ -253,11 +253,14 @@ button.round.spin svg { animation: spin .8s linear infinite; }
 
 .toast {
   position: fixed; left: 50%; bottom: calc(18px + env(safe-area-inset-bottom)); z-index: 9;
-  transform: translate(-50%, 140%); max-width: calc(100% - 32px);
+  transform: translate(-50%, 0); max-width: calc(100% - 32px); width: max-content;
   background: var(--ink); color: var(--bg); padding: 12px 18px; border-radius: 14px; font-size: 15px; font-weight: 500;
-  box-shadow: var(--shadow); transition: transform .5s var(--spring);
+  box-shadow: var(--shadow);
 }
-.toast.on { transform: translate(-50%, 0); }
+/* (PhoneApp's <Transition name="toast">: in with a spring, out quickly) */
+.toast-enter-active { transition: transform .5s var(--spring), opacity .2s var(--ease); }
+.toast-leave-active { transition: transform .3s var(--ease), opacity .25s var(--ease); }
+.toast-enter-from, .toast-leave-to { opacity: 0; transform: translate(-50%, 24px) scale(.94); }
 body.tabbed .toast { bottom: calc(100px + env(safe-area-inset-bottom)); }
 .toast.bad { background: var(--bad); color: #fff; }
 

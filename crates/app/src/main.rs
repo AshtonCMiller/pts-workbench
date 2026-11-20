@@ -41,6 +41,8 @@ mod whats_new;
 mod workspace;
 
 fn main() -> iced::Result {
+    // its windows share the launcher's taskbar button (and a pinned one: see App::taskbar)
+    launcher::use_app_id();
     // the profile in use (its folder: everything the app reads and keeps)
     profiles::Profiles::start();
     // how the window's drawn (Settings → Graphics), before it opens
