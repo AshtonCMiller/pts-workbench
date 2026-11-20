@@ -22,6 +22,7 @@ on:
 
 permissions:
   contents: write # create releases and upload the files
+  id-token: write # code signing: signs in to Azure without a stored password (OpenID Connect)
 
 concurrency:
   group: release-${{ github.ref }}
@@ -30,6 +31,9 @@ concurrency:
 jobs:
   release:
     runs-on: windows-latest
+    # (Azure trusts this environment's builds for code signing, whichever branch they're from: see "Sign the program
+    # files")
+    environment: release
     env:
       CARGO_TERM_COLOR: always
     steps:
@@ -128,6 +132,53 @@ jobs:
           done
           ls -la dist/app
 
+      # Code signing, with Azure Artifact Signing: every program file and the installer carry a signature with the
+      # name it was validated under, so Windows (Smart App Control, SmartScreen) and antivirus programs know where they
+      # came from and that nobody changed them. Signed before the installer packs them, and before workbench.json
+      # records their SHA-256 (signing changes the files).
+      #
+      # Turned on by these repository variables (GitHub: Settings › Secrets and variables › Actions › Variables):
+      #   AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_SUBSCRIPTION_ID   the app registration that signs, and where it is
+      #   ARTIFACT_SIGNING_ENDPOINT   the account's region, e.g. https://eus.codesigning.azure.net/
+      #   ARTIFACT_SIGNING_ACCOUNT    the Artifact Signing account's name
+      #   ARTIFACT_SIGNING_PROFILE    its certificate profile's name
+      # The app registration has a federated credential for this repository's "release" environment (no password
+      # kept anywhere) and the "Artifact Signing Certificate Profile Signer" role on the account. Without the
+      # variables, builds go on unsigned.
+      - name: Code signing set up?
+        if: steps.version.outputs.exists == 'false'
+        id: signing
+        shell: bash
+        run: |
+          if [ -n "${{ vars.ARTIFACT_SIGNING_ACCOUNT }}" ]; then
+            echo "on=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "on=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Not code-signed: the ARTIFACT_SIGNING_* repository variables aren't set yet (see the comment above this step)."
+          fi
+
+      - name: Sign in to Azure (for code signing)
+        if: steps.version.outputs.exists == 'false' && steps.signing.outputs.on == 'true'
+        uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Sign the program files
+        if: steps.version.outputs.exists == 'false' && steps.signing.outputs.on == 'true'
+        uses: azure/artifact-signing-action@v2
+        with:
+          endpoint: ${{ vars.ARTIFACT_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.ARTIFACT_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.ARTIFACT_SIGNING_PROFILE }}
+          files-folder: ${{ github.workspace }}\dist\app
+          files-folder-filter: exe,dll
+          file-digest: SHA256
+          # (the signing certificate lasts three days; the timestamp keeps the signature good after that)
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
       # The installer maker, kept between builds (installing it takes a while)
       - name: Reuse the installer maker
         if: steps.version.outputs.exists == 'false'
@@ -151,6 +202,36 @@ jobs:
             "-DICON=$(cygpath -w "$PWD/assets/icon.ico")" \
             "-DOUT=$(cygpath -w "$PWD/dist/PTS-Workbench-Setup-${{ steps.version.outputs.number }}.exe")" \
             installer/pts-workbench.nsi
+
+      - name: Sign the installer
+        if: steps.version.outputs.exists == 'false' && steps.signing.outputs.on == 'true'
+        uses: azure/artifact-signing-action@v2
+        with:
+          endpoint: ${{ vars.ARTIFACT_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.ARTIFACT_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.ARTIFACT_SIGNING_PROFILE }}
+          files: ${{ github.workspace }}\dist\PTS-Workbench-Setup-${{ steps.version.outputs.number }}.exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      # Every file really is signed (and the signature checks out), or nothing is released
+      - name: Check the signatures
+        if: steps.version.outputs.exists == 'false' && steps.signing.outputs.on == 'true'
+        shell: pwsh
+        run: |
+          $files = @(Get-ChildItem dist/app -File) + @(Get-ChildItem dist -Filter *.exe -File)
+          $bad = 0
+          foreach ($f in $files) {
+            $sig = Get-AuthenticodeSignature $f.FullName
+            if ($sig.Status -ne 'Valid') {
+              Write-Host "::error::$($f.Name) isn't signed properly: $($sig.Status) $($sig.StatusMessage)"
+              $bad++
+            } else {
+              Write-Host "$($f.Name): signed by $($sig.SignerCertificate.Subject)"
+            }
+          }
+          if ($bad) { exit 1 }
 
       - uses: actions/setup-node@v4
         if: steps.version.outputs.exists == 'false'
