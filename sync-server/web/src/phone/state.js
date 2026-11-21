@@ -18,6 +18,36 @@ export const desktop = !standalone
   && !/Android|iPhone|iPad|iPod|Mobile|webOS|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent)
   && !(navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 
+export const android = /Android/i.test(navigator.userAgent);
+
+// ---------- installing (Android) ----------
+
+// Chrome on Android offers installing the page (manifest.webmanifest) with its own prompt, which the page can show
+// when it likes: kept here when it's offered (it's offered early, so this listens as soon as the page loads)
+export const install = reactive({ offer: null, done: standalone });
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault();
+  install.offer = e;
+});
+window.addEventListener('appinstalled', () => {
+  install.offer = null;
+  install.done = true;
+  toast('Workbench is on your Home screen.');
+});
+
+export async function installApp() {
+  const offer = install.offer;
+  if (!offer) return;
+  install.offer = null;
+  try {
+    await offer.prompt();
+    const { outcome } = await offer.userChoice;
+    if (outcome === 'accepted') install.done = true;
+  } catch {
+    /* it can only be shown once: Chrome offers it again later */
+  }
+}
+
 // ---------- the views ----------
 
 const ORDER = ['desktop', 'install', 'pair', 'type', 'scan', 'ros', 'hours', 'home', 'sheet'];

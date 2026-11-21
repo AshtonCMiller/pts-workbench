@@ -1,5 +1,6 @@
 <script setup>
 import { show } from '../state.js';
+import InstallCard from '../parts/InstallCard.vue';
 </script>
 
 <template>
@@ -10,5 +11,6 @@ import { show } from '../state.js';
       <button @click="show('scan')">Scan the code</button>
       <button class="plain" @click="show('type')">Type it in instead</button>
     </div>
+    <InstallCard />
   </section>
 </template>

@@ -3,6 +3,7 @@
 import { computed } from 'vue';
 import { notify, ios, standalone, canPush, turnOnNotifications, sendTest, unpair } from '../state.js';
 import Icon from '../parts/Icon.vue';
+import InstallCard from '../parts/InstallCard.vue';
 
 const permission = () => (canPush ? Notification.permission : 'unsupported');
 const about = computed(() => {
@@ -45,6 +46,7 @@ const canTurnOn = computed(() => !notify.on && canPush && permission() !== 'deni
         <li v-for="n in notify.log" :key="n.id"><b>{{ n.title }}</b><span>{{ n.body }}</span></li>
       </TransitionGroup>
     </div>
+    <InstallCard />
     <button class="danger" @click="unpair">Unpair this phone</button>
   </section>
 </template>
