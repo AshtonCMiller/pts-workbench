@@ -145,7 +145,7 @@ jobs:
       # The app registration has a federated credential for this repository's "release" environment (no password
       # kept anywhere) and the "Artifact Signing Certificate Profile Signer" role on the account. Without the
       # variables, builds go on unsigned.
-      - name: Code signing set up?
+      - name: Check code signing status
         if: steps.version.outputs.exists == 'false'
         id: signing
         shell: bash
@@ -233,10 +233,11 @@ jobs:
           }
           if ($bad) { exit 1 }
 
+      # (22: what Wrangler 4 wants, for putting the release on prodealer.works)
       - uses: actions/setup-node@v4
         if: steps.version.outputs.exists == 'false'
         with:
-          node-version: 20
+          node-version: 22
 
       - name: Make the update files
         if: steps.version.outputs.exists == 'false'
@@ -295,7 +296,8 @@ jobs:
           cd dist
           put() { # <file> <key in the bucket> <type>
             for try in 1 2 3; do
-              npx --yes wrangler@3 r2 object put "pts-releases/$2" --file "$1" --content-type "$3" && return 0
+              # (--remote: Wrangler 4 otherwise only puts it in a local test copy of the bucket)
+              npx --yes wrangler@4 r2 object put "pts-releases/$2" --file "$1" --content-type "$3" --remote && return 0
               echo "::warning::Uploading $2 failed (try $try of 3)"
               sleep 15
             done
