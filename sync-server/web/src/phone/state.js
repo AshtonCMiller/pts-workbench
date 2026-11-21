@@ -19,6 +19,10 @@ export const desktop = !standalone
   && !(navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 
 export const android = /Android/i.test(navigator.userAgent);
+// On a phone, it only works once it's installed (iPhone: on the Home Screen; Android: installed from Chrome): until
+// then it says how. (Android's installed copy shares what's saved with Chrome, so a pairing carries over; the
+// iPhone's doesn't, so it's scanned again there.)
+export const mustInstall = (ios || android) && !standalone;
 
 // ---------- installing (Android) ----------
 
@@ -260,7 +264,7 @@ export async function paired(pair) {
   data.pair = pair;
   // a pairing in the address isn't left there (it'd be in the history, and shared if the page is)
   if (location.hash) history.replaceState(null, '', location.pathname);
-  if (ios && !standalone) {
+  if (mustInstall) {
     show('install');
     return;
   }
@@ -388,5 +392,5 @@ export function begin() {
   const fromLink = readPairCode(location.hash);
   if (fromLink) paired(fromLink);
   else if (data.pair) paired(data.pair);
-  else show(ios && !standalone ? 'install' : 'pair');
+  else show(mustInstall ? 'install' : 'pair');
 }
