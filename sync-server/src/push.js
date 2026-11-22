@@ -2,9 +2,10 @@
 //
 //   GET  /v1/push/key                                   -> { key }       the server's public key, for subscribing
 //   POST /v1/push/subscribe { pid, token, subscription, name } -> { ok }  a phone (re)registering itself
-//   POST /v1/push/status    { pid, token }              -> { phones: [{ name, since, seen }] }
+//   POST /v1/push/status    { pid, token }              -> { phones: [{ id, name, since, seen }] }
 //   POST /v1/push/send      { pid, token, title, body, tag, url } -> { sent, phones }
-//   POST /v1/push/unpair    { pid, token, endpoint? }   -> { removed }   one phone (its endpoint) or all of them
+//   POST /v1/push/unpair    { pid, token, endpoint?, phone? } -> { removed }   one phone (its endpoint, or its id from
+//                                                       status), or all of them
 //
 // Who's who: the desktop app and the phone both work out, from the person's sync key, a push ID (`pid`, a hash of
 // their sync ID) and a send token. The server keeps only a hash of the token, so even with the database in hand
@@ -130,6 +131,9 @@ function okService(endpoint) {
   }
 }
 
+/** A phone's id for the computer (from its push address, which isn't given out: anyone with it can send to it) */
+const phoneId = async (endpoint) => (await sha256hex(`phone|${endpoint}`)).slice(0, 16);
+
 async function phonesOf(env, pid, tokenHash) {
   const { results } = await env.DB.prepare(
     'SELECT endpoint, p256dh, auth, name, created_at, seen_at FROM push_subs WHERE pid = ? AND token = ? ORDER BY created_at',
@@ -174,11 +178,21 @@ export async function push(request, env, url) {
 
   if (path === '/v1/push/status') {
     const phones = await phonesOf(env, pid, tokenHash);
-    return json({ phones: phones.map((p) => ({ name: p.name, since: p.created_at, seen: p.seen_at })) });
+    return json({ phones: await Promise.all(phones.map(async (p) => ({
+      id: await phoneId(p.endpoint), name: p.name, since: p.created_at, seen: p.seen_at,
+    }))) });
   }
 
   if (path === '/v1/push/unpair') {
-    const endpoint = b?.endpoint ? String(b.endpoint) : null;
+    let endpoint = b?.endpoint ? String(b.endpoint) : null;
+    // one phone, by its id (the computer's Unpair beside it)
+    if (!endpoint && b?.phone) {
+      const want = String(b.phone);
+      for (const p of await phonesOf(env, pid, tokenHash)) {
+        if ((await phoneId(p.endpoint)) === want) endpoint = p.endpoint;
+      }
+      if (!endpoint) return json({ removed: 0 });
+    }
     const r = endpoint
       ? await env.DB.prepare('DELETE FROM push_subs WHERE pid = ? AND token = ? AND endpoint = ?').bind(pid, tokenHash, endpoint).run()
       : await env.DB.prepare('DELETE FROM push_subs WHERE pid = ? AND token = ?').bind(pid, tokenHash).run();

@@ -1,4 +1,6 @@
-// What a scanned pay sheet says to change on your flags: confirmed, the hours paid, the day it was booked.
+// What a scanned pay sheet says to change on your flags: confirmed, the hours paid, the day it was booked; and a
+// line you'd marked as on your time sheet that this pay period's sheet doesn't have, marked not on it again (it
+// wasn't paid on this one: the next sheet it's on marks it, and moves it to the day it was booked).
 // Each: { k (the flag's record), set (its fields to change), text, why, on (switched on to start with), id }
 
 import { h2, niceDay, dayOfMs } from './hours.js';
@@ -12,6 +14,14 @@ export function proposed(r) {
   for (const d of r.different) {
     add(d.flag, { hours: d.sold, confirmed: true }, `RO ${d.flag.ro} line ${d.line.ln}: ${h2(d.flag.hours)} → ${h2(d.sold)}`,
       d.unsure ? 'What the sheet says was paid, but the photo wasn’t clear: check the paper first' : 'What the sheet says was paid', !d.unsure);
+  }
+  // (only when it's known which pay period the sheet is: a flag from another one is never touched)
+  if (r.period) {
+    for (const m of r.missing) {
+      if (!m.flag.confirmed) continue;
+      add(m.flag, { confirmed: false }, `RO ${m.flag.ro} line ${m.flag.dms || '?'}: not on the sheet`,
+        `Marked as not on your time sheet (${h2(m.flag.hours)}, flagged ${niceDay(dayOfMs(m.flag.flaggedAt))}). Scan every page first.`, true);
+    }
   }
   for (const p of [...r.paid, ...r.different]) {
     const booked = p.line.booked;

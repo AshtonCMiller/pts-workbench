@@ -5,7 +5,7 @@ import { reactive, shallowRef, triggerRef, toRaw } from 'vue';
 import { store } from './lib/store.js';
 import { readPairCode, pushIds } from './lib/keys.js';
 import { api, b64urlBytes } from './lib/server.js';
-import { readStore, writeStore, readRos, live, put, flagsOf, changeFlags } from './lib/doc.js';
+import { readStore, writeStore, readRos, readPay, live, put, flagsOf, changeFlags } from './lib/doc.js';
 import { shiftsOf } from './lib/hours.js';
 import { readPage } from './lib/ocr.js';
 import { Sheet } from './lib/sheet.js';
@@ -84,6 +84,8 @@ export const data = reactive({
   pair: store.get('pair'),
   rosDoc: null,
   rosError: '',
+  // Predictive Pay's setup (from your computer; none: not set up)
+  pay: null,
   refreshing: false,
   // the ROs opened up on the RO tab (kept while switching tabs)
   open: new Set(),
@@ -98,7 +100,8 @@ export async function refresh() {
   if (!pair || data.refreshing) return;
   data.refreshing = true;
   try {
-    const [h, r] = await Promise.allSettled([readStore(pair), readRos(pair)]);
+    const [h, r, p] = await Promise.allSettled([readStore(pair), readRos(pair), readPay(pair)]);
+    if (p.status === 'fulfilled') data.pay = p.value;
     if (h.status === 'fulfilled') hours.value = h.value;
     else toast(`Couldn't get your hours (${h.reason.message}).`, true);
     if (r.status === 'fulfilled') {
@@ -295,6 +298,7 @@ export async function unpair() {
   store.drop('endpoint');
   data.pair = null;
   data.rosDoc = null;
+  data.pay = null;
   hours.value = null;
   notify.on = false;
   show('pair');

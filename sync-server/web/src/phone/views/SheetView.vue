@@ -9,13 +9,17 @@ import { h2, niceDay, dayOfMs } from '../lib/hours.js';
 import Switch from '../parts/Switch.vue';
 
 const pages = computed(() => sheet.sheet.pages || 0);
-const title = computed(() => {
-  const p = Sheet.periodOf(toRaw(sheet.sheet));
-  return p ? `Pay sheet · ${niceDay(p.from)} – ${niceDay(p.to)}` : 'Pay sheet';
+const period = computed(() => Sheet.periodOf(toRaw(sheet.sheet)));
+const title = computed(() => (period.value ? `Pay sheet · ${niceDay(period.value.from)} – ${niceDay(period.value.to)}` : 'Pay sheet'));
+// which pay period it's for: the sheet's own header, or (that unreadable) the days most of its lines were booked
+const about = computed(() => {
+  if (!pages.value) return 'Scan each page of your Technician Payroll Report.';
+  const p = period.value;
+  const which = p
+    ? ` For the pay period ${niceDay(p.from)} – ${niceDay(p.to)} (${p.read ? 'from the top of the sheet' : 'going by the days its lines were booked'}): only your flags from then are checked.`
+    : '';
+  return `${pages.value} page${pages.value === 1 ? '' : 's'} scanned, ${sheet.sheet.rows.length} rows read.${which}${sheet.flagsError ? ` ${sheet.flagsError}` : ''}`;
 });
-const about = computed(() => (pages.value
-  ? `${pages.value} page${pages.value === 1 ? '' : 's'} scanned, ${sheet.sheet.rows.length} rows read.${sheet.flagsError ? ` ${sheet.flagsError}` : ''}`
-  : 'Scan each page of your Technician Payroll Report.'));
 
 const result = computed(() => (pages.value ? Sheet.compare(toRaw(sheet.sheet), toRaw(sheet.flags) || []) : null));
 
@@ -43,7 +47,7 @@ const sections = computed(() => {
       code: d.unsure ? raw(d.line.rows) : [], hrs: h2(d.sold) })) },
     { title: 'Not on these pages', open: true, items: r.missing.map((m) => ({
       title: `RO ${m.flag.ro} · line ${m.flag.dms || '?'}`,
-      sub: [`${m.flag.label} · flagged ${niceDay(dayOfMs(m.flag.flaggedAt))}`, 'On another page, or not paid yet'],
+      sub: [`${m.flag.label} · flagged ${niceDay(dayOfMs(m.flag.flaggedAt))}${m.flag.confirmed ? ' · marked as on your time sheet' : ''}`, 'On another page, or not paid yet'],
       code: [], hrs: h2(m.flag.hours) })) },
     { title: 'Paid, but not flagged here', open: false, items: r.unflagged.map((u) => ({
       title: `RO ${u.line.ro} · line ${u.line.ln}`,
@@ -60,6 +64,7 @@ const sections = computed(() => {
 const changes = ref([]);
 watch(result, (r) => (changes.value = r && sheet.flags ? proposed(r) : []), { immediate: true });
 const picked = computed(() => changes.value.filter((c) => c.on));
+const unconfirming = computed(() => changes.value.filter((c) => c.set.confirmed === false).length);
 const applying = ref(false);
 async function apply() {
   if (!picked.value.length) return;
@@ -103,6 +108,7 @@ function chosen(e) {
     <div v-if="!sheet.busy && changes.length" class="card">
       <h2>Changes to make</h2>
       <p>Here’s what the sheet says to change. Nothing changes until you tap Apply; turn off any you don’t want. Your computer picks them up at its next sync.</p>
+      <p v-if="unconfirming" class="warn-note">{{ unconfirming }} line{{ unconfirming === 1 ? '' : 's' }} you’d marked as on your time sheet {{ unconfirming === 1 ? 'isn’t' : 'aren’t' }} on these pages. If the sheet has more pages, scan them before you apply.</p>
       <ul class="items">
         <li v-for="(c, i) in changes" :key="c.id" :style="{ animationDelay: `${Math.min(i, 12) * 0.03}s` }">
           <Switch v-model="c.on" />
@@ -131,3 +137,7 @@ function chosen(e) {
     </template>
   </section>
 </template>
+
+<style scoped>
+.warn-note { color: #b45309; font-size: 14px; font-weight: 600; }
+</style>

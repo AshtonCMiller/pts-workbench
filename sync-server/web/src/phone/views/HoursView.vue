@@ -1,10 +1,12 @@
 <script setup>
-// Your hours: clocked in or out, the pay period's flagged hours (step back through earlier ones), each RO's flags
-// with a switch for "on your time sheet", and scanning the pay sheet
+// Your hours: clocked in or out, the pay period's flagged hours (step back through earlier ones), what the check
+// should come to (Predictive Pay, set up on the computer), each RO's flags with a switch for "on your time sheet",
+// and scanning the pay sheet
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue';
-import { hours, records, confirmFlags, clockInOrOut, scanSheet } from '../state.js';
+import { hours, records, data, confirmFlags, clockInOrOut, scanSheet } from '../state.js';
 import { payPeriod, shiftsOf, worked, fh, hm, clockTime, shortDay } from '../lib/hours.js';
 import { live } from '../lib/doc.js';
+import { learn, predict, money, checkNote } from '../lib/pay.js';
 import Switch from '../parts/Switch.vue';
 
 const offset = ref(0);
@@ -55,6 +57,39 @@ const stats = computed(() => {
   ];
 });
 
+// Predictive Pay: this period's flagged hours, at your rate, less what comes out
+const learned = computed(() => (data.pay ? learn(data.pay) : null));
+const guess = computed(() => {
+  if (!learned.value) return null;
+  return predict(data.pay, learned.value, flags.value.reduce((s, f) => s + f.hours, 0));
+});
+const payOpen = ref(false);
+const payRows = computed(() => {
+  const g = guess.value;
+  if (!g) return [];
+  const p = data.pay;
+  const rows = [{ name: 'Gross pay', v: money(g.gross), bold: true }];
+  if (Number(p.retirement) > 0) {
+    rows.push({ name: `Retirement (${Number(p.retirement)}%${p.roth ? ', Roth' : ''})`, v: `−${money(g.retirement)}` });
+  }
+  for (const l of g.lines) rows.push({ name: l.name, sub: `${l.how}, ${l.pretax ? 'before' : 'after'} taxes`, v: `−${money(l.amount)}` });
+  const t = g.taxes;
+  rows.push({ name: 'Federal income tax', v: `−${money(t.federal)}` }, { name: 'Social Security', v: `−${money(t.social)}` },
+    { name: 'Medicare', v: `−${money(t.medicare)}` }, { name: 'Missouri income tax', v: `−${money(t.state)}` });
+  rows.push({ name: 'Take-home', v: money(g.net), bold: true, top: true });
+  return rows;
+});
+const payNotes = computed(() => {
+  const l = learned.value;
+  if (!l) return [];
+  const notes = l.checks.map(checkNote);
+  if (l.netOff !== null && Math.abs(l.netOff) >= 1) {
+    notes.push(`Your stubs' take-home was ${money(Math.abs(l.netOff))} ${l.netOff > 0 ? 'more' : 'less'} than all this comes to: is a benefit or fee missing?`);
+  }
+  if (!l.checks.length) notes.push('Taxes are figured from your W-4s.');
+  return notes;
+});
+
 // by RO, in the order first flagged
 const groups = computed(() => {
   const ros = [...new Set(flags.value.map((f) => f.ro))];
@@ -94,6 +129,34 @@ function picked(e) {
       </div>
     </div>
 
+    <div v-if="hours" class="card pay">
+      <template v-if="guess">
+        <div class="row">
+          <div>
+            <span class="pay-label">Predicted take-home</span>
+            <b :key="`${offset}-${guess.net}`" class="pay-net">{{ guess.hours > 0 ? money(guess.net) : '$0.00' }}</b>
+          </div>
+          <button class="plain" @click="payOpen = !payOpen">{{ payOpen ? 'Hide' : 'Details' }}</button>
+        </div>
+        <p class="muted">{{ fh(guess.hours) }} h at {{ money(guess.rate) }}/h · {{ money(guess.gross) }} before anything comes out · spiffs not counted</p>
+        <div v-if="payOpen" class="pay-list">
+          <div v-for="r in payRows" :key="r.name" class="pay-row" :class="{ bold: r.bold, top: r.top }">
+            <div><span>{{ r.name }}</span><small v-if="r.sub">{{ r.sub }}</small></div>
+            <span class="pay-v">{{ r.v }}</span>
+          </div>
+          <p v-for="n in payNotes" :key="n" class="muted pay-note">{{ n }}</p>
+        </div>
+      </template>
+      <template v-else-if="data.pay">
+        <h2>Predictive Pay</h2>
+        <p>It needs your hourly rate. Finish setting it up on your computer: <b>Hours › Predictive Pay › Change</b>.</p>
+      </template>
+      <template v-else>
+        <h2>Predictive Pay</h2>
+        <p>See what this check should come to from the hours you've flagged. Set it up once on your computer, from two of your pay stubs: <b>Hours › Predictive Pay</b>.</p>
+      </template>
+    </div>
+
     <div v-if="hours && !flags.length" class="card empty">Nothing flagged in this pay period yet.</div>
     <p v-if="groups.length" class="muted" style="margin: 4px 4px 10px">Switch a line on once it’s on your time sheet.</p>
     <div v-for="(g, i) in groups" :key="g.ro" class="card" :style="{ animationDelay: `${Math.min(i, 10) * 0.035}s` }">
@@ -120,6 +183,20 @@ function picked(e) {
 </template>
 
 <style scoped>
+.pay .row { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.pay-label { display: block; font-size: 13px; color: var(--muted); }
+.pay-net {
+  display: block; font-size: 32px; letter-spacing: -.02em; font-variant-numeric: tabular-nums; margin: 2px 0 4px;
+  animation: rise .5s var(--spring) both;
+}
+.pay .muted { margin-bottom: 0; font-size: 13px; }
+.pay-list { margin-top: 14px; animation: rise .45s var(--spring) both; }
+.pay-row { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 5px 0; font-size: 14px; }
+.pay-row small { display: block; font-size: 12px; color: var(--muted); }
+.pay-row.bold { font-weight: 700; }
+.pay-row.top { border-top: 1px solid color-mix(in srgb, var(--muted) 25%, transparent); margin-top: 4px; padding-top: 9px; }
+.pay-v { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.pay-note { font-size: 12px !important; margin-top: 8px !important; }
 .fl-letter {
   flex: none; width: 26px; height: 26px; border-radius: 7px; display: grid; place-items: center;
   font-weight: 700; font-size: 12px; background: var(--soft); color: var(--accent);

@@ -39,3 +39,6 @@ export async function pushIds(pair) {
 
 /** The RO list's document ID */
 export const rosId = (pair) => sha256hex(`ros|${pair.id}`);
+
+/** Predictive Pay's setup's document ID (crates/sync Keys::pay) */
+export const payId = (pair) => sha256hex(`pay|${pair.id}`);

@@ -5,8 +5,9 @@
 // The hours document's records: l/RO an RO's lines, o/RO/LINE your hours for a line, n/RO/LINE your name for it,
 // r/RO the RO, f/RO/LINE a flag ({ dms, label, ymm, hours, flaggedAt, confirmed }), s/START a shift.
 // The RO list is a document of its own that the desktop app writes: { at, ros: [{ ro, tag, ymm, open, mine, tags }] }.
+// So is Predictive Pay's setup: { format, pay } (lib/pay.js).
 
-import { enc, fromHex, rosId } from './keys.js';
+import { enc, fromHex, rosId, payId } from './keys.js';
 
 function b64(bytes) {
   let s = '';
@@ -71,6 +72,14 @@ export async function readRos(pair) {
   if (!res.ok) throw new Error(`the server said ${res.status}`);
   const got = await res.json();
   return got.data ? openDoc(pair, got.data) : null;
+}
+
+/** Predictive Pay's setup, as your computer set it up (none: not set up) */
+export async function readPay(pair) {
+  const res = await fetch(`/v1/store/${await payId(pair)}`, { cache: 'no-store' });
+  if (!res.ok) throw new Error(`the server said ${res.status}`);
+  const got = await res.json();
+  return got.data ? (await openDoc(pair, got.data)).pay || null : null;
 }
 
 export const live = (r) => !!r && !r.del && r.v !== undefined && r.v !== null;
