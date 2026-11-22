@@ -101,9 +101,10 @@ const groups = computed(() => {
 
 const picker = ref(null);
 function picked(e) {
-  const file = e.target.files && e.target.files[0];
+  // (every picture picked: the pages, all at once)
+  const files = [...(e.target.files || [])];
   e.target.value = '';
-  if (file) scanSheet(file);
+  if (files.length) scanSheet(files);
 }
 </script>
 
@@ -121,11 +122,11 @@ function picked(e) {
       <div class="row">
         <div>
           <h2>Your pay sheet</h2>
-          <p class="muted">See which flagged lines were paid. Read on this phone only.</p>
+          <p class="muted">Pick or take a picture of each page, and see which flagged lines were paid. Read on this phone only.</p>
         </div>
         <button class="ghost" @click="picker.click()">Scan</button>
       </div>
-      <input ref="picker" type="file" accept="image/*" hidden @change="picked">
+      <input ref="picker" type="file" accept="image/*" multiple hidden @change="picked">
     </div>
 
     <div class="card">

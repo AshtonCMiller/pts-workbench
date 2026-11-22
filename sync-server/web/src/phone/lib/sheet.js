@@ -197,9 +197,11 @@ function parse(text, lines) {
         if (c !== r.ro && fits(c)) found.push({ c, i });
       }
     }
-    // (only when one place could be wrong)
-    if (found.length && found.every((f) => f.i === found[0].i) && found.length <= 2) {
-      r.ro = found[0].c;
+    // (the row before's or after's RO, a digit off: that one; else only when one place could be wrong)
+    const same = found.find((f) => f.c === prev.ro || (next && f.c === next.ro));
+    const pick = same || (found.length && found.every((f) => f.i === found[0].i) && found.length <= 2 ? found[0] : null);
+    if (pick) {
+      r.ro = pick.c;
       r.fixed = r.filled = true;
     }
   });

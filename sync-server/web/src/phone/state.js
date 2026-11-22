@@ -328,18 +328,29 @@ async function loadFlags() {
   }
 }
 
-export async function scanSheet(file) {
+/** Reads pictures of the pay sheet's pages (one or several, picked together), one after another */
+export async function scanSheet(files) {
+  const list = Array.isArray(files) ? files : [files];
   show('sheet');
+  let read = 0;
   try {
-    const page = await readPage(file, (text, pct) => (sheet.busy = { text, pct }));
-    if (!page.rows.length) {
-      toast('No rows found. Take the picture straight on, with the whole page in it.', true);
-      return;
+    for (const [i, file] of list.entries()) {
+      // (the bar goes across once for all of them)
+      const page = await readPage(file, (text, pct) => {
+        sheet.busy = { text: list.length > 1 ? `Page ${i + 1} of ${list.length}: ${text}` : text, pct: (i + pct) / list.length };
+      });
+      if (!page.rows.length) {
+        toast(`${list.length > 1 ? `Picture ${i + 1}: n` : 'N'}o rows found. Take the picture straight on, with the whole page in it.`, true);
+        continue;
+      }
+      sheet.sheet = Sheet.addPage(toRaw(sheet.sheet), page);
+      store.set('sheet', toRaw(sheet.sheet));
+      read++;
     }
-    sheet.sheet = Sheet.addPage(toRaw(sheet.sheet), page);
-    store.set('sheet', toRaw(sheet.sheet));
-    sheet.busy = { text: 'Checking it against your flags…', pct: 0.97 };
-    await loadFlags();
+    if (read) {
+      sheet.busy = { text: 'Checking it against your flags…', pct: 0.98 };
+      await loadFlags();
+    }
   } catch (e) {
     toast(`Couldn't read it (${e.message}).`, true);
   } finally {
