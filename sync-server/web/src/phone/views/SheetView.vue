@@ -55,8 +55,6 @@ const sections = computed(() => {
     { title: 'Paid', open: false, items: r.paid.map((p) => ({
       title: `RO ${p.flag.ro} · line ${p.line.ln}`,
       sub: [`${p.flag.label} · booked ${niceDay(p.line.booked)}${p.flag.confirmed ? ' · already marked' : ''}`], code: [], hrs: h2(p.sold) })) },
-    { title: 'Rows that couldn’t be read', open: false, items: r.unread.map((x) => ({
-      title: x.ro ? `RO ${x.ro}…` : 'A row', sub: ['Check this one on the paper'], code: [x.raw], hrs: '' })) },
   ].filter((s) => s.items.length);
 });
 
@@ -65,6 +63,10 @@ const changes = ref([]);
 watch(result, (r) => (changes.value = r && sheet.flags ? proposed(r) : []), { immediate: true });
 const picked = computed(() => changes.value.filter((c) => c.on));
 const unconfirming = computed(() => changes.value.filter((c) => c.set.confirmed === false).length);
+// what needs checking on the paper (the photo wasn't clear): first, where it's easy to see
+const toCheck = computed(() => changes.value.filter((c) => c.check));
+const sure = computed(() => changes.value.filter((c) => !c.check));
+const unread = computed(() => (result.value ? result.value.unread : []));
 const applying = ref(false);
 async function apply() {
   if (!picked.value.length) return;
@@ -105,12 +107,31 @@ function chosen(e) {
       <input ref="picker" type="file" accept="image/*" hidden @change="chosen">
     </div>
 
+    <div v-if="!sheet.busy && (toCheck.length || unread.length)" class="card check">
+      <h2>Check these on the paper<span class="count">{{ toCheck.length + unread.length }}</span></h2>
+      <p>The photo wasn’t clear on these. Look at the sheet, and switch on the ones that are right.</p>
+      <ul class="items">
+        <li v-for="(c, i) in toCheck" :key="c.id" :style="{ animationDelay: `${Math.min(i, 12) * 0.03}s` }">
+          <Switch v-model="c.on" />
+          <div class="what"><b>{{ c.text }}</b><span>{{ c.why }}</span></div>
+        </li>
+        <li v-for="(x, i) in unread" :key="`u${i}`" :style="{ animationDelay: `${Math.min(toCheck.length + i, 12) * 0.03}s` }">
+          <div class="what">
+            <b>{{ x.ro ? `RO ${x.ro}…` : 'A row' }}</b>
+            <span>Couldn’t be read: if it’s one of your lines, change it on the Hours tab</span>
+            <code>{{ x.raw }}</code>
+          </div>
+        </li>
+      </ul>
+    </div>
+
     <div v-if="!sheet.busy && changes.length" class="card">
       <h2>Changes to make</h2>
       <p>Here’s what the sheet says to change. Nothing changes until you tap Apply; turn off any you don’t want. Your computer picks them up at its next sync.</p>
       <p v-if="unconfirming" class="warn-note">{{ unconfirming }} line{{ unconfirming === 1 ? '' : 's' }} you’d marked as on your time sheet {{ unconfirming === 1 ? 'isn’t' : 'aren’t' }} on these pages. If the sheet has more pages, scan them before you apply.</p>
+      <p v-if="toCheck.length" class="muted">Plus {{ toCheck.length }} to check on the paper, above ({{ toCheck.filter((c) => c.on).length }} switched on).</p>
       <ul class="items">
-        <li v-for="(c, i) in changes" :key="c.id" :style="{ animationDelay: `${Math.min(i, 12) * 0.03}s` }">
+        <li v-for="(c, i) in sure" :key="c.id" :style="{ animationDelay: `${Math.min(i, 12) * 0.03}s` }">
           <Switch v-model="c.on" />
           <div class="what"><b>{{ c.text }}</b><span>{{ c.why }}</span></div>
         </li>
@@ -140,4 +161,6 @@ function chosen(e) {
 
 <style scoped>
 .warn-note { color: #b45309; font-size: 14px; font-weight: 600; }
+.check { box-shadow: inset 4px 0 0 #d97706; }
+.check h2 { color: #b45309; }
 </style>

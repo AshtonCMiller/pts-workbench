@@ -115,6 +115,9 @@ function parse(text) {
 }
 
 const key = (r) => `${r.ro}|${r.ln}|${r.seq}`;
+/** Two readings of a row with the same hours (either reading of either, when a photo wasn't clear) */
+const sameHours = (a, b) => [a.sold, a.alt].some((x) => x !== null && x !== undefined && [b.sold, b.alt].some((y) => y !== null && y !== undefined && Math.abs(x - y) < 0.001))
+  || (a.sold === null && b.sold === null);
 
 /** How alike two readings of a row are (0 to 5: RO, booked date, line, sequence, sold hours) */
 function alike(a, b) {
@@ -200,13 +203,25 @@ function combine(a, b) {
   return { rows: out, period: a.period || b.period };
 }
 
-/** Adds a page's rows to those so far (the same row from another photo of the same page counts once) */
+/**
+ * Adds a page's rows to those so far. The same row from another photo of the same page counts once: each row is
+ * matched to at most one from the pages before (never to another on its own page: an RO can list a line more than
+ * once, in sections, and those all count: compare adds them up).
+ */
 function addPage(sofar, page) {
   const rows = [...sofar.rows];
+  const before = rows.length;
+  const taken = new Set();
   for (const r of page.rows) {
-    const same = r.roOk && r.ln && r.seq ? rows.findIndex((y) => key(y) === key(r)) : -1;
-    if (same < 0) rows.push(r);
-    else if (!rows[same].sure && r.sure) rows[same] = r;
+    const same = r.roOk && r.ln && r.seq
+      ? rows.findIndex((y, i) => i < before && !taken.has(i) && key(y) === key(r) && y.booked === r.booked && sameHours(y, r))
+      : -1;
+    if (same < 0) {
+      rows.push(r);
+      continue;
+    }
+    taken.add(same);
+    if (!rows[same].sure && r.sure) rows[same] = r;
   }
   rows.sort((x, y) => (x.ro || '').localeCompare(y.ro || '') || (x.ln || '').localeCompare(y.ln || '') || Number(x.seq || 0) - Number(y.seq || 0));
   return { rows, period: sofar.period || page.period, pages: (sofar.pages || 0) + 1 };

@@ -117,6 +117,17 @@ function picked(e) {
       <button :class="{ ghost: !!openShift }" @click="clockInOrOut">{{ openShift ? 'Clock out' : 'Clock in' }}</button>
     </div>
 
+    <div class="card scan">
+      <div class="row">
+        <div>
+          <h2>Your pay sheet</h2>
+          <p class="muted">See which flagged lines were paid. Read on this phone only.</p>
+        </div>
+        <button class="ghost" @click="picker.click()">Scan</button>
+      </div>
+      <input ref="picker" type="file" accept="image/*" hidden @change="picked">
+    </div>
+
     <div class="card">
       <div class="period">
         <button class="round" aria-label="The pay period before" @click="offset--">‹</button>
@@ -173,16 +184,14 @@ function picked(e) {
       </div>
     </div>
 
-    <div class="card">
-      <h2>Your pay sheet</h2>
-      <p>Take a picture of your Technician Payroll Report to see which of your flagged lines were paid. The picture is read on this phone, and never leaves it.</p>
-      <button class="ghost" @click="picker.click()">Scan a page</button>
-      <input ref="picker" type="file" accept="image/*" hidden @change="picked">
-    </div>
   </section>
 </template>
 
 <style scoped>
+.scan .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.scan h2 { margin-bottom: 2px; }
+.scan p { margin: 0; font-size: 13px; }
+.scan button { width: auto; flex: none; padding-left: 22px; padding-right: 22px; }
 .pay .row { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .pay-label { display: block; font-size: 13px; color: var(--muted); }
 .pay-net {
