@@ -35,6 +35,21 @@ const stats = computed(() => {
   ];
 });
 
+// whether the whole sheet was read: its rows against the total under the last one
+const totalNote = computed(() => {
+  const r = result.value;
+  if (!r) return null;
+  if (r.sheetTotal === null) return { bad: true, text: `${h2(r.readTotal)} read so far. Scan the last page too: its total checks everything was read.` };
+  if (r.complete) return { bad: false, text: `All ${h2(r.sheetTotal)} on the sheet read.` };
+  const off = Math.round((r.sheetTotal - r.readTotal) * 100) / 100;
+  return {
+    bad: true,
+    text: off > 0
+      ? `The sheet’s total is ${h2(r.sheetTotal)}, but only ${h2(r.readTotal)} was read: ${h2(off)} is on rows the photo lost (or a page not scanned yet). Retake that page flat and straight on, or check below.`
+      : `The sheet’s total is ${h2(r.sheetTotal)}, but ${h2(r.readTotal)} was read: some hours were misread. Check the ones below.`,
+  };
+});
+
 // the sections, each a list of rows: { title, sub[], code[], hrs }
 const sections = computed(() => {
   const r = result.value;
@@ -97,6 +112,7 @@ function chosen(e) {
           <p class="muted">{{ sheet.busy.text }}</p>
         </div>
       </Transition>
+      <p v-if="!sheet.busy && totalNote" class="total-note" :class="{ bad: totalNote.bad }">{{ totalNote.text }}</p>
       <div v-if="!sheet.busy && stats.length" class="stats">
         <div v-for="s in stats" :key="s.label" class="stat" :class="s.cls">
           <b>{{ s.v }}<span v-if="s.of" class="count">{{ s.of }}</span></b><span>{{ s.label }}</span>
@@ -118,7 +134,7 @@ function chosen(e) {
         <li v-for="(x, i) in unread" :key="`u${i}`" :style="{ animationDelay: `${Math.min(toCheck.length + i, 12) * 0.03}s` }">
           <div class="what">
             <b>{{ x.ro ? `RO ${x.ro}…` : 'A row' }}</b>
-            <span>Couldn’t be read: if it’s one of your lines, change it on the Hours tab</span>
+            <span>{{ x.sold !== null && x.sold !== undefined ? `${h2(x.sold)} · ` : '' }}Not all of it could be read: if it’s one of your lines, change it on the Hours tab</span>
             <code>{{ x.raw }}</code>
           </div>
         </li>
@@ -163,4 +179,6 @@ function chosen(e) {
 .warn-note { color: #b45309; font-size: 14px; font-weight: 600; }
 .check { box-shadow: inset 4px 0 0 #d97706; }
 .check h2 { color: #b45309; }
+.total-note { font-size: 14px; font-weight: 600; color: var(--good); }
+.total-note.bad { color: #b45309; }
 </style>

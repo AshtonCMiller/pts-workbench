@@ -17,11 +17,16 @@ export function proposed(r) {
       d.unsure ? 'What the sheet says was paid, but the photo wasn’t clear: check the paper first' : 'What the sheet says was paid', !d.unsure);
   }
   // (only when it's known which pay period the sheet is: a flag from another one is never touched)
+  // (switched on to start with only when the whole sheet was read: its rows add up to its total; else it may be a
+  // row the photo lost, so it's one to check on the paper)
   if (r.period) {
     for (const m of r.missing) {
       if (!m.flag.confirmed) continue;
       add(m.flag, { confirmed: false }, `RO ${m.flag.ro} line ${m.flag.dms || '?'}: not on the sheet`,
-        `Marked as not on your time sheet (${h2(m.flag.hours)}, flagged ${niceDay(dayOfMs(m.flag.flaggedAt))}). Scan every page first.`, true);
+        r.complete
+          ? `Marked as not on your time sheet (${h2(m.flag.hours)}, flagged ${niceDay(dayOfMs(m.flag.flaggedAt))})`
+          : `Marked as not on your time sheet (${h2(m.flag.hours)}, flagged ${niceDay(dayOfMs(m.flag.flaggedAt))}). Not every row was read: check it’s not on the paper`,
+        r.complete);
     }
   }
   for (const p of [...r.paid, ...r.different]) {

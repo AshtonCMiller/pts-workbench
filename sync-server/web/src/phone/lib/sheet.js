@@ -18,56 +18,87 @@ const DIGIT = { O: '0', o: '0', D: '0', Q: '0', U: '0', C: '0', I: '1', l: '1', 
 
 const digits = (t) => [...String(t)].map((c) => (/\d/.test(c) ? c : DIGIT[c] || '')).join('');
 
-/** "04NOV26" (as a photo reads it: "O4NOV26", "TINOV26") → "2026-11-04" (none: not a date) */
+/** "04NOV26" (as a photo reads it: "O4NOV26", "TINOV26", "OS5NOV26") → "2026-11-04" (none: not a date) */
 function date(t) {
-  const m = String(t).match(/^[^A-Za-z0-9]*([0-9A-Za-z|!]{1,2})([A-Za-z0-9]{3})([0-9A-Za-z]{2})[^A-Za-z0-9]*$/);
-  if (!m) return '';
-  const mon = m[2].toUpperCase().replace(/0/g, 'O').replace(/1/g, 'I');
-  const mi = MONTHS.indexOf(mon);
-  if (mi < 0) return '';
-  const day = Number(digits(m[1]));
-  const yy = digits(m[3]);
-  if (!day || day > 31 || yy.length !== 2) return '';
-  return `20${yy}-${String(mi + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+  const forms = [
+    /^[^A-Za-z0-9]*([0-9A-Za-z|!]{1,3})([A-Za-z0-9]{3})([0-9A-Za-z]{2})[^A-Za-z0-9]*$/,
+    // (a letter too many in the month, "NoOv")
+    /^[^A-Za-z0-9]*([0-9A-Za-z|!]{1,2})([A-Za-z0-9]{4})([0-9A-Za-z]{2})[^A-Za-z0-9]*$/,
+  ];
+  for (const form of forms) {
+    const m = String(t).match(form);
+    if (!m) continue;
+    const mon = m[2].toUpperCase().replace(/0/g, 'O').replace(/1/g, 'I');
+    const tries = mon.length === 3 ? [mon] : [...mon].map((_, i) => mon.slice(0, i) + mon.slice(i + 1));
+    const mi = tries.map((x) => MONTHS.indexOf(x)).find((i) => i >= 0) ?? -1;
+    if (mi < 0) continue;
+    // (a letter too many before the month, "OS5": the two digits of it that make a day)
+    const d = digits(m[1]);
+    const day = [d.slice(0, 2), d.slice(-2)].map(Number).find((x) => x >= 1 && x <= 31);
+    const yy = digits(m[3]);
+    if (!day || yy.length !== 2) continue;
+    return `20${yy}-${String(mi + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+  }
+  return '';
 }
-const looksLikeDate = (t) => /^[^A-Za-z0-9]*[0-9A-Za-z|!]{1,2}(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC|N0V|0CT)/i.test(t);
+const looksLikeDate = (t) => /^[^A-Za-z0-9]*[0-9A-Za-z|!]{1,3}(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC|N0V|0CT|N\w?OV|NO\w?V)/i.test(t);
 
-/** The line letter from what a photo made of it ("Cc", "<C°", "¢") ('' when it's not a letter) */
+/** The line letter from what a photo made of it ("Cc", "<C°", "¢", "1" for I) ('' when it's not a letter) */
 function lineLetter(t) {
   const s = String(t).replace(/¢/g, 'C').replace(/[^A-Za-z0-9]/g, '');
-  if (!s) return '';
+  if (!s || s.length > 2) return '';
   const c = s[0];
+  if (c === '1') return 'I';
+  if (c === '0') return 'O';
   return /[A-Za-z]/.test(c) ? c.toUpperCase() : '';
 }
 
-const HOURS = /(\d{1,2})[.,](\d{2})(?!\d)/g;
+// hours: "1.30", and as a photo reads them: "1,30", "1-30", "0«30"
+const HOURS = /(\d{1,2})[.,\-«·:](\d{2})(?!\d)/g;
+// the pay type, ROP (as a photo reads it: "RoP", "nop", "pop", "mop", "prop", "ROR")
+const PAY = /^[^A-Za-z0-9]*[A-Za-z]{1,2}[Oo0][PpRrEe][^A-Za-z0-9]*$/;
+// the hours type before it (ST: "SF", "5T", "$T")
+const HT = /^[^A-Za-z0-9]*[Ss5$][TtFf7][^A-Za-z0-9]*$/;
+// the tech number (five digits, or four with one lost: an RO number has six)
+const TECH = /^\d{4,5}$/;
 
 /** One row of the report from a line of text (none: not a row) */
 function row(text) {
   const line = String(text).replace(/[“”"'`]/g, ' ').trim();
   const toks = line.split(/\s+/);
-  // the pay type ("ROP", as "RoP", "rop", "pop", "nop"…), with the hours after it
-  const pay = toks.findIndex((t, i) => i > 1 && /^[^A-Za-z]*[A-Za-z][Oo0][Pp][^A-Za-z]*$/.test(t));
-  if (pay < 0) return null;
-  // the RO: the first thing on the line
-  const roRaw = toks[0];
-  let ro = digits(roRaw.replace(/[^0-9A-Za-z|!]/g, ''));
-  // the dates, the tech number, then the line and its sequence number
-  let i = 1;
-  const dates = [];
-  while (i < pay && looksLikeDate(toks[i])) dates.push(date(toks[i++]));
-  if (!dates.length) return null;
-  // DT ("S1"), then the tech number
-  let tech = -1;
-  for (let j = i; j < pay; j++) {
-    if (/^\d{4,6}$/.test(digits(toks[j])) && digits(toks[j]) === toks[j].replace(/[^0-9]/g, '') && toks[j].replace(/[^0-9]/g, '').length >= 4) { tech = j; break; }
+  let pay = toks.findIndex((t, i) => i > 1 && PAY.test(t));
+  // (ROP unreadable: just after ST, and the C a line can have between them)
+  if (pay < 0) {
+    const ht = toks.findIndex((t, i) => i > 3 && HT.test(t));
+    if (ht < 0) return null;
+    pay = /^[Cc¢]$/.test(toks[ht + 1] || '') ? ht + 2 : ht + 1;
+    if (pay >= toks.length) return null;
   }
+  // the dates (where they could be read)
+  const firstDate = toks.findIndex((t, i) => i < pay && looksLikeDate(t));
+  const dates = [];
+  if (firstDate >= 0) for (let i = firstDate; i < pay && looksLikeDate(toks[i]); i++) dates.push(date(toks[i]));
+  // the tech number (5 digits, as read), then the line and its sequence number
+  let tech = -1;
+  for (let j = Math.max(firstDate, 0); j < pay; j++) {
+    const raw = toks[j].replace(/[^0-9]/g, '');
+    if (j > 0 && TECH.test(raw) && /^[^A-Za-z]*\d+[^A-Za-z]*$/.test(toks[j])) { tech = j; break; }
+  }
+  // a row has its dates or its tech number (else it's not a row)
+  if (!dates.length && tech < 0) return null;
+  // the RO: the number before the dates (or the tech number): the last one there with most of its digits
+  const before = toks.slice(0, firstDate >= 0 ? firstDate : tech);
+  const cand = before.map((t) => digits(t.replace(/[^0-9A-Za-z|!]/g, ''))).filter((d) => d.length >= 4);
+  let ro = cand.length ? cand[cand.length - 1] : '';
+  if (ro.length === 7 && /^[3-9]/.test(ro)) ro = ro.slice(1); // (a mark before it read as a digit)
   let ln = '';
   let seq = '';
   if (tech >= 0 && tech + 1 < pay) {
     ln = lineLetter(toks[tech + 1]);
     const s = (toks[tech + 2] || '').replace(/[^0-9]/g, '');
     if (tech + 2 < pay && /^\d{1,2}$/.test(s)) seq = String(Number(s));
+    // (the letter lost: the sequence number right after the tech number)
+    if (!ln && /^\d{1,2}[.*]?$/.test(toks[tech + 1])) seq = String(Number(toks[tech + 1].replace(/[^0-9]/g, '')));
   }
   // the hours: actual, then sold
   const rest = toks.slice(pay + 1).join(' ');
@@ -85,7 +116,7 @@ function row(text) {
   return {
     ro,
     roOk: ro.length === 6,
-    booked: dates[0] || '',
+    booked: dates.find(Boolean) || '',
     ln,
     seq,
     sold,
@@ -102,16 +133,82 @@ function header(text) {
   return from && to ? { from, to } : null;
 }
 
-/** Every row on a page's text (RO numbers with a digit lost filled in from the rows around them) */
-function parse(text) {
-  const rows = String(text).split(/\r?\n/).map(row).filter(Boolean);
+/**
+ * Your total sold hours: the line under the last row ("***   25.21   93.30": actual, then sold; the stars often
+ * unreadable), the first line after a row that's only hours. (The one after it is the whole shop's.)
+ */
+function totalOf(text) {
+  let afterRow = false;
+  for (const line of String(text).split(/\r?\n/)) {
+    if (row(line)) { afterRow = true; continue; }
+    if (!afterRow) continue;
+    // (the stars before them, however they're read: the shop's total under it has none)
+    const m = line.match(/^\W*[A-Za-z*%#]{1,5}\W*(?:\d{1,3}[.,]\d{1,2}\W{0,2})?\s+(\d{1,3})[.,](\d{2})\s*$/)
+      || line.match(/^\s*[^\sA-Za-z0-9]{1,5}\s+(?:\d{1,3}[.,]\d{1,2}\W{0,2})?\s+(\d{1,3})[.,](\d{2})\s*$/);
+    if (m) return Number(`${m[1]}.${m[2]}`);
+  }
+  return null;
+}
+
+/** Your total from the right half of the last page read on its own (the stars are in the left half): the first of
+ *  the two lines under the rows that are only two hours each (the second is the whole shop's) */
+function totalOfStrip(text) {
+  // (lines with no letters that end in hours: "25:.24:.7°-93.30", then "197.93 371.73")
+  const only = String(text).split(/\r?\n/)
+    .filter((l) => !/[A-Za-z]/.test(l))
+    .map((l) => l.match(/(\d{1,3})[.,](\d{2})\W*$/))
+    .filter(Boolean);
+  return only.length >= 2 ? Number(`${only[0][1]}.${only[0][2]}`) : null;
+}
+
+/**
+ * Every row on a page's text. An RO number that couldn't be read (or lost a digit) is filled in from the rows
+ * around it (they're in RO order: the same RO before and after it), and so is a booked date that couldn't be read.
+ */
+function parse(text, lines) {
+  // (the rows from the lines rows.js put together from where the words are, when there are those)
+  const rows = (lines || String(text).split(/\r?\n/)).map(row).filter(Boolean);
   rows.forEach((r, k) => {
-    if (r.roOk || !r.ro) return;
-    const near = [rows[k - 1], rows[k + 1], rows[k - 2], rows[k + 2]].filter((x) => x && x.roOk);
-    const hit = near.find((x) => x.ro.endsWith(r.ro) || x.ro.startsWith(r.ro));
+    if (r.roOk) return;
+    const prev = rows.slice(0, k).reverse().find((x) => x.roOk);
+    const next = rows.slice(k + 1).find((x) => x.roOk);
+    const partial = r.ro && [rows[k - 1], rows[k + 1], rows[k - 2], rows[k + 2]]
+      .find((x) => x && x.roOk && (x.ro.endsWith(r.ro) || x.ro.startsWith(r.ro)));
+    const hit = partial || (prev && next && prev.ro === next.ro ? prev : null);
     if (hit) { r.ro = hit.ro; r.roOk = true; r.filled = true; }
   });
-  return { rows, period: header(text) };
+  // RO numbers go up down the page: one that's a digit off from fitting between the rows around it is fixed ("920449"
+  // between 820425 and 820476: 820449), and one missing its first digit gets the row before's ("20425": 820425)
+  rows.forEach((r, k) => {
+    const prev = rows.slice(0, k).reverse().find((x) => x.roOk && !x.fixed);
+    const next = rows.slice(k + 1).find((x) => x.roOk && !x.fixed);
+    if (!prev || !r.ro) return;
+    const fits = (c) => c >= prev.ro && (!next || next.ro < prev.ro || c <= next.ro);
+    if (r.ro.length === 5 && !r.roOk && fits(prev.ro[0] + r.ro)) {
+      r.ro = prev.ro[0] + r.ro;
+      r.roOk = r.filled = true;
+      return;
+    }
+    if (!r.roOk || fits(r.ro) || !next || next.ro < prev.ro) return;
+    const found = [];
+    for (let i = 0; i < 6; i++) {
+      for (let d = 0; d <= 9; d++) {
+        const c = r.ro.slice(0, i) + d + r.ro.slice(i + 1);
+        if (c !== r.ro && fits(c)) found.push({ c, i });
+      }
+    }
+    // (only when one place could be wrong)
+    if (found.length && found.every((f) => f.i === found[0].i) && found.length <= 2) {
+      r.ro = found[0].c;
+      r.fixed = r.filled = true;
+    }
+  });
+  rows.forEach((r, k) => {
+    if (r.booked || !r.roOk) return;
+    const same = [rows[k - 1], rows[k + 1]].find((x) => x && x.ro === r.ro && x.booked);
+    if (same) { r.booked = same.booked; r.bookedGuessed = true; }
+  });
+  return { rows, period: header(text), total: totalOf(text) };
 }
 
 const key = (r) => `${r.ro}|${r.ln}|${r.seq}`;
@@ -128,8 +225,10 @@ function alike(a, b) {
   }
   if (a.booked && a.booked === b.booked) n += 1;
   if (a.ln && a.ln === b.ln) n += 1;
+  // (the same RO and day, and one reading lost the line letter: likely the same row)
+  else if ((!a.ln || !b.ln) && a.ro === b.ro && a.booked && a.booked === b.booked) n += 0.5;
   if (a.seq && a.seq === b.seq) n += 1;
-  if (a.sold !== null && a.sold === b.sold) n += 1;
+  if (a.sold !== null && a.sold === b.sold) n += a.sold > 0 ? 1.5 : 1;
   return n;
 }
 
@@ -200,7 +299,11 @@ function combine(a, b) {
       }
     }
   });
-  return { rows: out, period: a.period || b.period };
+  // a row only one reading has, that's another row the two readings agreed on (the same RO, line and sequence
+  // number: never twice on a sheet): the same row, read again out of place
+  const agreed = new Set(out.filter((r) => r.reads === 2 && r.roOk && r.ln && r.seq).map(key));
+  const kept = out.filter((r) => r.reads === 2 || !(r.roOk && r.ln && r.seq && agreed.has(key(r))));
+  return { rows: kept, period: a.period || b.period, total: a.total ?? b.total ?? null };
 }
 
 /**
@@ -224,7 +327,7 @@ function addPage(sofar, page) {
     if (!rows[same].sure && r.sure) rows[same] = r;
   }
   rows.sort((x, y) => (x.ro || '').localeCompare(y.ro || '') || (x.ln || '').localeCompare(y.ln || '') || Number(x.seq || 0) - Number(y.seq || 0));
-  return { rows, period: sofar.period || page.period, pages: (sofar.pages || 0) + 1 };
+  return { rows, period: sofar.period || page.period, total: page.total ?? sofar.total ?? null, pages: (sofar.pages || 0) + 1 };
 }
 
 /** The pay period (1st–15th, or 16th–end): the report's own, else the one most rows were booked in */
@@ -307,7 +410,12 @@ function compare(sheet, flags) {
   const unread = sheet.rows.filter((r) => !r.roOk || !r.ln || r.sold === null);
   const soldTotal = Math.round(sheet.rows.reduce((s, r) => s + (r.roOk ? r.sold || 0 : 0), 0) * 100) / 100;
   const flaggedTotal = Math.round(inPeriod.reduce((s, f) => s + (f.hours || 0), 0) * 100) / 100;
-  return { period, paid, different, missing, unflagged, unread, soldTotal, flaggedTotal, flags: inPeriod.length };
+  // every row's hours, read (with an RO number or not), against the total under the last row: all of it read when
+  // they match (and every page scanned: the total is on the last one)
+  const readTotal = Math.round(sheet.rows.reduce((s, r) => s + (r.sold || 0), 0) * 100) / 100;
+  const sheetTotal = sheet.total ?? null;
+  const complete = sheetTotal !== null && Math.abs(readTotal - sheetTotal) < 0.051;
+  return { period, paid, different, missing, unflagged, unread, soldTotal, readTotal, sheetTotal, complete, flaggedTotal, flags: inPeriod.length };
 }
 
-export const Sheet = { parse, row, date, header, combine, addPage, periodOf, compare, totals };
+export const Sheet = { parse, row, date, header, totalOfStrip, combine, addPage, periodOf, compare, totals };
