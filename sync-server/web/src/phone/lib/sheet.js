@@ -214,6 +214,13 @@ function parse(text, lines) {
 }
 
 const key = (r) => `${r.ro}|${r.ln}|${r.seq}`;
+/** Two readings of one row: the same RO and hours, and the same line, sequence number and day where both have them */
+const sameRow = (a, b) => a.ro === b.ro
+  && (!a.ln || !b.ln || a.ln === b.ln)
+  && (!a.seq || !b.seq || a.seq === b.seq)
+  && (!a.booked || !b.booked || a.booked === b.booked)
+  && (a.ln || a.seq) && (b.ln || b.seq) // (at least something besides the hours to go on)
+  && sameHours(a, b);
 /** Two readings of a row with the same hours (either reading of either, when a photo wasn't clear) */
 const sameHours = (a, b) => [a.sold, a.alt].some((x) => x !== null && x !== undefined && [b.sold, b.alt].some((y) => y !== null && y !== undefined && Math.abs(x - y) < 0.001))
   || (a.sold === null && b.sold === null);
@@ -303,8 +310,9 @@ function combine(a, b) {
   });
   // a row only one reading has, that's another row the two readings agreed on (the same RO, line and sequence
   // number: never twice on a sheet): the same row, read again out of place
-  const agreed = new Set(out.filter((r) => r.reads === 2 && r.roOk && r.ln && r.seq).map(key));
-  const kept = out.filter((r) => r.reads === 2 || !(r.roOk && r.ln && r.seq && agreed.has(key(r))));
+  // (also one with its line or sequence number lost that's otherwise an agreed row: the same RO and hours)
+  const agreed = out.filter((r) => r.reads === 2 && r.roOk);
+  const kept = out.filter((r) => r.reads === 2 || !r.roOk || !agreed.some((p) => sameRow(p, r)));
   return { rows: kept, period: a.period || b.period, total: a.total ?? b.total ?? null };
 }
 
@@ -318,9 +326,7 @@ function addPage(sofar, page) {
   const before = rows.length;
   const taken = new Set();
   for (const r of page.rows) {
-    const same = r.roOk && r.ln && r.seq
-      ? rows.findIndex((y, i) => i < before && !taken.has(i) && key(y) === key(r) && y.booked === r.booked && sameHours(y, r))
-      : -1;
+    const same = rows.findIndex((y, i) => i < before && !taken.has(i) && (sameRow(y, r) || (y.raw && y.raw === r.raw)));
     if (same < 0) {
       rows.push(r);
       continue;

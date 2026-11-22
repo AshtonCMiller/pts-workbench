@@ -4,9 +4,9 @@
 import { ref, computed, watch, toRaw } from 'vue';
 import { sheet, show, scanSheet, clearSheet, applyChanges } from '../state.js';
 import { Sheet } from '../lib/sheet.js';
-import { proposed } from '../lib/proposed.js';
+import { proposed, setOf, unansweredOf } from '../lib/proposed.js';
+import SheetItem from '../parts/SheetItem.vue';
 import { h2, niceDay, dayOfMs } from '../lib/hours.js';
-import Switch from '../parts/Switch.vue';
 
 const pages = computed(() => sheet.sheet.pages || 0);
 const period = computed(() => Sheet.periodOf(toRaw(sheet.sheet)));
@@ -76,15 +76,9 @@ const sections = computed(() => {
 // what to change, shown first; each can be switched off
 const changes = ref([]);
 watch(result, (r) => (changes.value = r && sheet.flags ? proposed(r) : []), { immediate: true });
-const picked = computed(() => changes.value.filter((c) => c.on));
-const unanswered = computed(() => changes.value.filter((c) => c.check && c.pick === null).length);
-// an answer to a question (tapped again: not answered): its change made, or none
-function answer(c, j) {
-  c.pick = c.pick === j ? null : j;
-  const ch = c.pick === null ? null : c.choices[c.pick];
-  c.on = !!(ch && ch.set);
-  if (ch && ch.set) c.set = ch.set;
-}
+// the changes, as they're answered and switched now: { k, set }
+const picked = computed(() => changes.value.map((c) => ({ k: c.k, set: setOf(c) })).filter((c) => c.set));
+const unanswered = computed(() => changes.value.reduce((n, c) => n + unansweredOf(c), 0));
 // what needs checking on the paper (the photo wasn't clear): first, where it's easy to see
 const toCheck = computed(() => changes.value.filter((c) => c.check));
 const sure = computed(() => changes.value.filter((c) => !c.check));
@@ -133,14 +127,9 @@ function chosen(e) {
 
     <div v-if="!sheet.busy && (toCheck.length || unread.length)" class="card check">
       <h2>Check these on the paper<span class="count">{{ toCheck.length + unread.length }}</span></h2>
-      <p>The photo wasn’t clear on these. Look at the paper, and pick what it says. Nothing changes until you tap Apply.</p>
+      <p>The photo wasn’t clear on these. Look at the paper, and pick (or type) what it says. Nothing changes until you tap Apply.</p>
       <ul class="items">
-        <li v-for="(c, i) in toCheck" :key="c.id" class="ask" :style="{ animationDelay: `${Math.min(i, 12) * 0.03}s` }">
-          <div class="what"><b>{{ c.text }}</b><span>{{ c.why }}</span></div>
-          <div class="answers">
-            <button v-for="(ch, j) in c.choices" :key="j" :class="{ picked: c.pick === j }" @click="answer(c, j)">{{ ch.label }}</button>
-          </div>
-        </li>
+        <SheetItem v-for="(c, i) in toCheck" :key="c.id" :item="c" :style="{ animationDelay: `${Math.min(i, 12) * 0.03}s` }" />
         <li v-for="(x, i) in unread" :key="`u${i}`" :style="{ animationDelay: `${Math.min(toCheck.length + i, 12) * 0.03}s` }">
           <div class="what">
             <b>{{ x.ro ? `RO ${x.ro}…` : 'A row' }}</b>
@@ -153,16 +142,13 @@ function chosen(e) {
 
     <div v-if="!sheet.busy && changes.length" class="card">
       <h2>Changes to make</h2>
-      <p>Here’s what the sheet says to change. A switch that’s on is a change that will be made; turn off any you don’t want. Nothing changes until you tap Apply. Your computer picks them up at its next sync.</p>
+      <p>Here’s what the sheet says to change, one line each. A switch that’s on is a change that will be made; turn off any you don’t want, or change the hours it paid. Nothing changes until you tap Apply. Your computer picks them up at its next sync.</p>
       <p v-if="unanswered" class="warn-note">{{ unanswered }} still to answer in “Check these on the paper”, above. Ones you don’t answer are left as they are.</p>
       <ul class="items">
-        <li v-for="(c, i) in sure" :key="c.id" :style="{ animationDelay: `${Math.min(i, 12) * 0.03}s` }">
-          <Switch v-model="c.on" />
-          <div class="what"><b>{{ c.text }}</b><span>{{ c.why }}</span></div>
-        </li>
+        <SheetItem v-for="(c, i) in sure" :key="c.id" :item="c" :style="{ animationDelay: `${Math.min(i, 12) * 0.03}s` }" />
       </ul>
       <button :disabled="!picked.length || applying" @click="apply">
-        {{ applying ? 'Applying…' : picked.length ? `Apply ${picked.length} change${picked.length === 1 ? '' : 's'}` : 'Nothing to apply' }}
+        {{ applying ? 'Applying…' : picked.length ? `Apply changes to ${picked.length} line${picked.length === 1 ? '' : 's'}` : 'Nothing to apply' }}
       </button>
     </div>
 
@@ -188,13 +174,6 @@ function chosen(e) {
 .warn-note { color: #b45309; font-size: 14px; font-weight: 600; }
 .check { box-shadow: inset 4px 0 0 #d97706; }
 .check h2 { color: #b45309; }
-.items li.ask { flex-direction: column; align-items: stretch; gap: 10px; }
-.answers { display: flex; flex-wrap: wrap; gap: 8px; }
-.answers button {
-  flex: 1 1 30%; margin: 0; padding: 10px 8px; font-size: 14px; background: var(--soft); color: var(--accent);
-  transition: background .25s, color .25s, transform .3s var(--spring);
-}
-.answers button.picked { background: var(--accent); color: var(--accent-ink); transform: scale(1.03); }
 .total-note { font-size: 14px; font-weight: 600; color: var(--good); }
 .total-note.bad { color: #b45309; }
 </style>
