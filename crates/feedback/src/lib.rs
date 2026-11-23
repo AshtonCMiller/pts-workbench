@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use workbench_net::{Http, Method, NetError, Response, Url};
 
 /// Where the sync server is
-pub const SERVER: &str = "https://prodealer.works";
+pub const SERVER: &str = "https://pts-sync.parkourdev.workers.dev"; //"https://prodealer.works";
 /// The employee number that sees everyone's reports (with the server's password)
 pub const ADMIN_EMPLOYEE: &str = "95385";
 

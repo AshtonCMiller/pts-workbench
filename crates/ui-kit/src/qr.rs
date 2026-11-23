@@ -483,7 +483,7 @@ mod tests {
     fn sizes() {
         assert_eq!(encode(b"hello", Level::M).map(|q| q.size), Some(21));
         let link = format!(
-            "https://prodealer.works/phone/#pair=v1.{}.{}",
+            "https://pts-sync.parkourdev.workers.dev/phone/$pair=v1.{}.{}", //"https://prodealer.works/phone/#pair=v1.{}.{}",
             "a".repeat(64),
             "b".repeat(64)
         );
