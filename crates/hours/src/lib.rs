@@ -5,6 +5,8 @@
 //! Times are milliseconds since 1970 (as in the Electron app). Days and pay periods are the computer's local ones;
 //! the functions that need them take the time zone, so tests can use UTC.
 
+pub mod pay;
+
 use std::collections::BTreeMap;
 use std::path::Path;
 

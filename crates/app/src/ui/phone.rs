@@ -43,21 +43,38 @@ fn ago(ms: i64, now_ms: i64) -> String {
     }
 }
 
-fn phone_line(p: &PhoneInfo, now_ms: i64) -> Element<'_, Message> {
-    container(
-        row![
-            anim::dot(Color::from_rgb8(0x16, 0xa3, 0x4a), false),
-            column![
-                text(p.name.as_str()).font(style::BOLD),
-                text(format!("Paired {} · last opened {}", ago(p.since, now_ms), ago(p.seen, now_ms)))
-                    .size(11)
-                    .style(style::muted),
-            ]
-            .spacing(1),
+/// A paired phone, with its own Unpair (pressed once it asks "Really?", pressed again it's done)
+fn phone_line<'a>(p: &'a PhoneInfo, now_ms: i64, asked: bool, busy: bool) -> Element<'a, Message> {
+    let mut line = row![
+        anim::dot(Color::from_rgb8(0x16, 0xa3, 0x4a), false),
+        column![
+            text(p.name.as_str()).font(style::BOLD),
+            text(format!("Paired {} · last opened {}", ago(p.since, now_ms), ago(p.seen, now_ms)))
+                .size(11)
+                .style(style::muted),
         ]
-        .spacing(10)
-        .align_y(Alignment::Center),
-    )
+        .spacing(1)
+        .width(Length::Fill),
+    ]
+    .spacing(10)
+    .align_y(Alignment::Center);
+    // (a server from before phones had ids can only unpair them all)
+    if !p.id.is_empty() {
+        let label = if busy {
+            "Unpairing…"
+        } else if asked {
+            "Really?"
+        } else {
+            "Unpair"
+        };
+        line = line.push(
+            button(text(label).size(12).wrapping(text::Wrapping::None))
+                .padding([4, 10])
+                .style(if asked { button::danger } else { style::ghost })
+                .on_press_maybe((!busy).then(|| Message::PhoneUnpairOne(p.id.clone()))),
+        );
+    }
+    container(line)
     .padding([6, 10])
     .width(Length::Fill)
     .style(style::panel)
@@ -135,7 +152,13 @@ pub fn card(app: &App) -> Element<'_, Message> {
 
     // whether one's paired
     let status: Element<'_, Message> = match &p.phones {
-        Some(list) if !list.is_empty() => Column::with_children(list.iter().map(|x| phone_line(x, now_ms))).spacing(4).into(),
+        Some(list) if !list.is_empty() => Column::with_children(list.iter().map(|x| {
+            let asked = p.unpair_one.as_deref() == Some(x.id.as_str());
+            let busy = p.unpairing.as_deref() == Some(x.id.as_str());
+            phone_line(x, now_ms, asked, busy)
+        }))
+        .spacing(4)
+        .into(),
         _ => match &p.error {
             Some(e) => text(format!("Couldn't reach the server: {e}")).size(13).style(style::muted).into(),
             None => row![
@@ -196,7 +219,15 @@ pub fn card(app: &App) -> Element<'_, Message> {
             None => {}
         }
         actions = actions.push(horizontal_space()).push(
-            button(text(if p.unpair_asked { "Really unpair?" } else { "Unpair phones" }).size(13))
+            button(
+                text(match (p.unpair_asked, p.phones.as_ref().map_or(0, Vec::len)) {
+                    (true, n) if n > 1 => "Really unpair all?",
+                    (true, _) => "Really unpair?",
+                    (false, n) if n > 1 => "Unpair all",
+                    (false, _) => "Unpair phone",
+                })
+                .size(13),
+            )
                 .padding([6, 12])
                 .style(if p.unpair_asked { button::danger } else { style::ghost })
                 .on_press(Message::PhoneUnpair),

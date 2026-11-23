@@ -1,12 +1,12 @@
 //! Profiles (crate::profiles) on screen: the switcher at the top right (whose profile, by their initials), its menu
 //! (everyone's, a PIN when one has it, adding one), the question of a new profile's kind (Main Shop or Quick Lane),
-//! and the profile's part of Settings.
+//! and Settings' Profiles tab (yours to change; everyone's, to switch to; admin mode's Reset PIN and Delete).
 
 use iced::widget::{Column, Space, button, column, container, horizontal_space, mouse_area, row, text, text_input};
 use iced::{Alignment, Color, Element, Length};
 
 use super::{anim, style};
-use crate::app::{App, Message, ProfileAsk, admin_field_id, profile_field_id};
+use crate::app::{App, Message, ProfileAsk, profile_field_id};
 use crate::profiles::{Kind, Profile};
 
 const MENU_WIDTH: f32 = 300.0;
@@ -133,7 +133,7 @@ fn pin_field<'a>(typed: &str, wrong: bool) -> Element<'a, Message> {
             .on_submit(Message::SubmitProfilePin)
             .padding(8),
         text(if wrong {
-            "That's not its PIN (forgotten: an admin can reset it, in Settings → Admin mode)"
+            "That's not its PIN (forgotten: an admin can reset it, in Settings › About Workbench › Admin mode)"
         } else {
             "Its PIN (four digits)"
         })
@@ -227,32 +227,67 @@ pub fn kind_card(app: &App) -> Element<'_, Message> {
     .into()
 }
 
-/// Settings' Profile part: its name, its kind, its PIN, the others (to take off the list)
-pub fn settings_part(app: &App) -> Element<'_, Message> {
-    let p = app.profiles.active();
-    let kind = |k: Kind| {
-        button(text(k.label()).size(13))
-            .padding([5, 12])
-            .style(style::toggle(p.kind == Some(k)))
-            .on_press(Message::SetProfileKind(k))
+/// When something happened, in words: "today at 3:41 PM", "yesterday at 9:02 AM", "Mon at 8:15 AM", "Nov 3"
+fn when(ms: i64) -> String {
+    use chrono::{Datelike, Local, TimeZone};
+    let Some(t) = Local.timestamp_millis_opt(ms).single() else {
+        return String::new();
     };
-    let pin_row = row![
-        text_input(if p.pin.is_some() { "New PIN" } else { "Four digits" }, &app.pin_draft)
-            .secure(true)
-            .on_input(Message::SettingsPin)
-            .on_submit(Message::SaveSettingsPin)
-            .padding(6)
-            .width(140),
-        button(text(if p.pin.is_some() { "Change PIN" } else { "Set PIN" }))
-            .padding([5, 10])
-            .style(style::ghost)
-            .on_press_maybe(crate::profiles::valid_pin(&app.pin_draft).then_some(Message::SaveSettingsPin)),
+    let now = Local::now();
+    let clock = t.format("%-I:%M %p").to_string();
+    match now.date_naive().signed_duration_since(t.date_naive()).num_days() {
+        0 => format!("today at {clock}"),
+        1 => format!("yesterday at {clock}"),
+        2..=6 => format!("{} at {clock}", t.format("%a")),
+        _ if t.year() == now.year() => t.format("%b %-d").to_string(),
+        _ => t.format("%b %-d, %Y").to_string(),
+    }
+}
+
+/// Settings' Profiles tab: yours (its name, kind, PIN, employee number), the dealership's details, sync, and everyone
+/// on this computer (whether they've a PIN, when they were last used; switching to them; adding one; with admin mode
+/// on, their PIN reset or them deleted)
+pub fn settings_tab(app: &App) -> Element<'_, Message> {
+    use super::settings::{dealership, employee, from_xtime, section, sync};
+    let me = app.profiles.active();
+
+    // yours
+    let kinds = anim::tabs(
+        match me.kind {
+            Some(Kind::Quick) => 1,
+            _ => 0,
+        },
+        [Kind::Main, Kind::Quick]
+            .into_iter()
+            .map(|k| {
+                button(text(k.label()).size(13))
+                    .padding([6, 14])
+                    .style(style::tab(me.kind == Some(k)))
+                    .on_press(Message::SetProfileKind(k))
+                    .into()
+            })
+            .collect(),
+    )
+    .spacing(2.0);
+    let mut pin = column![
+        row![
+            text_input(if me.pin.is_some() { "New PIN" } else { "Four digits" }, &app.pin_draft)
+                .secure(true)
+                .on_input(Message::SettingsPin)
+                .on_submit(Message::SaveSettingsPin)
+                .padding(6)
+                .width(140),
+            button(text(if me.pin.is_some() { "Change PIN" } else { "Set PIN" }))
+                .padding([5, 10])
+                .style(style::ghost)
+                .on_press_maybe(crate::profiles::valid_pin(&app.pin_draft).then_some(Message::SaveSettingsPin)),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center)
     ]
-    .spacing(6)
-    .align_y(Alignment::Center);
-    let mut pin = column![pin_row].spacing(4);
-    if p.pin.is_some() {
-        pin = pin.push(
+    .spacing(4);
+    pin = pin.push(if me.pin.is_some() {
+        Element::from(
             row![
                 text("Switching to this profile asks for its PIN.").size(12).style(style::muted),
                 horizontal_space(),
@@ -262,142 +297,153 @@ pub fn settings_part(app: &App) -> Element<'_, Message> {
                     .on_press(Message::ClearSettingsPin),
             ]
             .align_y(Alignment::Center),
-        );
-    }
-    let mut c = column![
-        text("Profile").font(style::BOLD),
-        text_input("Name", &app.profile_name)
-            .on_input(Message::ProfileName)
-            .on_submit(Message::SaveSettings)
-            .padding(8),
-        row![kind(Kind::Main), kind(Kind::Quick)].spacing(4),
-        pin,
-    ]
-    .spacing(8);
-    let others: Vec<&Profile> = app.profiles.list.iter().filter(|o| o.id != p.id).collect();
-    if !others.is_empty() {
-        let mut list = Column::new().spacing(2);
-        for o in others {
-            list = list.push(
-                row![
-                    badge(o, 22.0),
-                    text(o.name.as_str()).size(13).width(Length::Fill),
-                    button(text("Take off the list").size(12))
-                        .padding([3, 8])
-                        .style(style::ghost)
-                        .on_press(Message::RemoveProfile(o.id.clone())),
-                ]
-                .spacing(8)
-                .align_y(Alignment::Center),
-            );
-        }
-        c = c.push(
-            text("Other profiles on this computer (taking one off keeps its files)")
+        )
+    } else {
+        text("No PIN: anyone at this computer can switch to it.")
+            .size(12)
+            .style(style::muted)
+            .into()
+    });
+    let you = column![
+        row![
+            badge(me, 52.0),
+            column![
+                text_input("Name", &app.profile_name)
+                    .on_input(Message::ProfileName)
+                    .on_submit(Message::SaveSettings)
+                    .padding(8),
+                text(format!(
+                    "{} · {}",
+                    me.kind.map_or("Not set up yet", Kind::label),
+                    if me.pin.is_some() { "PIN-locked" } else { "No PIN" }
+                ))
                 .size(12)
                 .style(style::muted),
-        );
-        c = c.push(list);
-    }
-    c.into()
-}
-
-/// Admin mode (from Settings): the Feedback password, then every profile on this computer (its PIN reset, it
-/// deleted with its files)
-pub fn admin_card(app: &App) -> Element<'_, Message> {
-    let a = &app.admin;
-    let head = row![
-        text("Admin mode").size(20).font(style::BOLD),
-        horizontal_space(),
-        button(text(if a.unlocked { "Lock" } else { "Close" }))
-            .padding([5, 12])
-            .style(style::ghost)
-            .on_press(if a.unlocked { Message::AdminLock } else { Message::CloseAdmin }),
-    ]
-    .align_y(Alignment::Center);
-    let body: Element<'_, Message> = if !a.unlocked {
-        let mut c = column![
-            text("The Feedback password (the one for everyone's reports). It's checked with the feedback server.").size(13),
-            row![
-                text_input("Password", &a.key)
-                    .id(admin_field_id())
-                    .secure(true)
-                    .on_input(Message::AdminKey)
-                    .on_submit(Message::AdminUnlock)
-                    .padding(8)
-                    .width(Length::Fill),
-                button(text(if a.checking { "Checking…" } else { "Unlock" }).font(style::BOLD))
-                    .padding([7, 16])
-                    .style(button::primary)
-                    .on_press_maybe((!a.checking && !a.key.trim().is_empty()).then_some(Message::AdminUnlock)),
             ]
-            .spacing(8)
-            .align_y(Alignment::Center),
+            .spacing(4)
+            .width(Length::Fill),
         ]
-        .spacing(10);
-        if let Some(e) = &a.error {
-            c = c.push(text(format!("Couldn't unlock: {e}")).size(13));
+        .spacing(14)
+        .align_y(Alignment::Center),
+        column![text("Part of the shop").font(style::BOLD), kinds].spacing(6),
+        column![text("PIN").font(style::BOLD), pin].spacing(6),
+        employee(app),
+        from_xtime(app),
+    ]
+    .spacing(16);
+
+    // everyone's
+    let admin = app.admin.unlocked;
+    let mut list = Column::new().spacing(6);
+    for p in &app.profiles.list {
+        let here = p.id == app.profiles.active;
+        let first = p.id == crate::profiles::FIRST;
+        let mut facts = vec![
+            p.kind.map_or("Not set up yet", Kind::label).to_string(),
+            if p.pin.is_some() { "PIN-locked" } else { "No PIN" }.to_string(),
+        ];
+        match (here, p.last_used) {
+            (true, _) => facts.push("in use now".into()),
+            (false, Some(t)) => facts.push(format!("last used {}", when(t))),
+            (false, None) => {}
         }
-        c.into()
-    } else {
-        let mut list = Column::new().spacing(4);
-        for p in &app.profiles.list {
-            let here = p.id == app.profiles.active;
-            let first = p.id == crate::profiles::FIRST;
-            let mut about = vec![p.kind.map_or("Not set up yet", Kind::label).to_string()];
-            if p.pin.is_some() {
-                about.push("PIN".into());
-            }
-            if here {
-                about.push("in use".into());
-            }
-            if first {
-                about.push("the app's own folder".into());
-            }
-            let asked = a.confirm_delete.as_deref() == Some(p.id.as_str());
-            let delete = button(text(if asked { "Really delete?" } else { "Delete" }).size(12))
-                .padding([4, 10])
-                .style(if asked { button::danger } else { style::ghost })
-                .on_press_maybe((!here && !first).then(|| Message::AdminDelete(p.id.clone())));
-            list = list.push(
-                container(
-                    row![
-                        badge(p, 30.0),
-                        column![
-                            text(p.name.as_str()).font(style::BOLD),
-                            text(about.join("  ·  ")).size(11).style(style::muted)
-                        ]
-                        .spacing(1)
-                        .width(Length::Fill),
-                        button(text("Reset PIN").size(12))
-                            .padding([4, 10])
-                            .style(style::ghost)
-                            .on_press_maybe(p.pin.is_some().then(|| Message::AdminResetPin(p.id.clone()))),
-                        delete,
-                    ]
-                    .spacing(8)
-                    .align_y(Alignment::Center),
-                )
-                .padding([6, 10])
-                .style(style::panel),
+        if let Some(t) = p.added() {
+            facts.push(format!("added {}", when(t)));
+        }
+        let mut actions = row![].spacing(6).align_y(Alignment::Center);
+        if here {
+            actions = actions.push(super::pill("In use", [0x1a, 0x5f, 0xb4]));
+        } else {
+            actions = actions.push(
+                button(text("Switch").size(12))
+                    .padding([4, 12])
+                    .style(button::primary)
+                    .on_press(Message::PickProfile(p.id.clone())),
             );
         }
-        let mut c = column![
-            text(
-                "Every profile on this computer. Deleting one deletes its folder too: its hours, ROs, settings and \
-                  sign-ins on this computer (anything synced stays on the sync server)."
-            )
-            .size(13),
-            list,
-        ]
-        .spacing(10);
-        if let Some(n) = &a.note {
-            c = c.push(text(n.as_str()).size(13).font(style::BOLD));
+        if admin {
+            if p.pin.is_some() {
+                actions = actions.push(
+                    button(text("Reset PIN").size(12))
+                        .padding([4, 10])
+                        .style(style::ghost)
+                        .on_press(Message::AdminResetPin(p.id.clone())),
+                );
+            }
+            let asked = app.admin.confirm_delete.as_deref() == Some(p.id.as_str());
+            actions = actions.push(
+                button(text(if asked { "Really delete?" } else { "Delete" }).size(12))
+                    .padding([4, 10])
+                    .style(if asked { button::danger } else { style::ghost })
+                    .on_press_maybe((!here && !first).then(|| Message::AdminDelete(p.id.clone()))),
+            );
+        } else if !here {
+            actions = actions.push(
+                button(text("Take off the list").size(12))
+                    .padding([4, 10])
+                    .style(style::ghost)
+                    .on_press(Message::RemoveProfile(p.id.clone())),
+            );
         }
-        c.into()
+        let mut item = column![
+            row![
+                badge(p, 36.0),
+                column![
+                    text(p.name.as_str()).font(style::BOLD),
+                    text(facts.join("  ·  ")).size(11).style(style::muted)
+                ]
+                .spacing(2)
+                .width(Length::Fill),
+                actions,
+            ]
+            .spacing(12)
+            .align_y(Alignment::Center)
+        ]
+        .spacing(6);
+        // its PIN, asked for right under it
+        if let Some(ProfileAsk::Pin { id, typed, wrong }) = &app.profile_ask {
+            if *id == p.id {
+                item = item.push(pin_field(typed, *wrong));
+            }
+        }
+        list = list.push(container(item).padding([8, 10]).width(Length::Fill).style(style::card));
+    }
+    let add: Element<'_, Message> = match &app.profile_ask {
+        Some(ProfileAsk::Add { name, number, pin, error }) => container(add_form(name, number, pin, error.as_deref()))
+            .padding(10)
+            .style(style::card)
+            .into(),
+        _ => button(text("+ Add a profile"))
+            .padding([8, 12])
+            .style(style::ghost)
+            .on_press(Message::AddProfileStart)
+            .into(),
     };
-    container(column![head, body].spacing(16))
-        .padding(24)
-        .width(560)
-        .style(style::floating_card)
-        .into()
+    let mut everyone = column![list, add].spacing(10);
+    if let Some(n) = &app.admin.note {
+        everyone = everyone.push(text(n.as_str()).size(13).font(style::BOLD));
+    }
+    everyone = everyone.push(
+        text(if admin {
+            "Deleting a profile deletes its folder too: its hours, ROs, settings and sign-ins on this computer (anything \
+             synced stays on the sync server)."
+        } else {
+            "Each has its own hours, ROs, sign-ins and settings. Taking one off the list keeps its files."
+        })
+        .size(12)
+        .style(style::muted),
+    );
+
+    column![
+        section("Your profile", None, you),
+        section(
+            "Dealership",
+            Some("The same for everyone at this dealership: new profiles start with them."),
+            dealership(app),
+        ),
+        section("Sync", None, sync(app)),
+        section("Everyone on this computer", None, everyone),
+    ]
+    .spacing(22)
+    .into()
 }

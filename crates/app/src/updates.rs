@@ -10,10 +10,13 @@
 //! launcher starts it on "Restart to update" (or the next start). One that needs a newer launcher downloads the
 //! installer instead, which "Restart to update" runs (silently: it puts everything in place and starts the app).
 //!
-//! The Beta updates choice is `updates.json` in the app's folder, the Electron app's file: a computer that had it on
-//! keeps it on. Leaving beta goes back to the newest regular version, even though it's "older". A beta running
-//! when a regular version newer than it comes out goes to that regular version (not a newer beta) and turns Beta
-//! updates off: the beta's done its job.
+//! The update channel ([`Updates::channel`], picked in Settings › About Workbench) is kept in `updates.json` in the app's
+//! folder (the computer's, not a profile's): Stable (regular versions), the newest beta of any, or one public beta
+//! channel: each branch the workflow builds betas from is one (`/updates/beta/<channel>/workbench.json`, listed at
+//! `/updates/channels`), so a big change can be tried before it's out. A computer that had "Beta updates" on before
+//! there were channels gets the newest beta of any. Leaving a beta goes back to the newest regular version, even though
+//! it's "older". A beta running when a regular version newer than it comes out goes to that regular version (not a
+//! newer beta) and back to Stable: the beta's done its job.
 //!
 //! Only on Windows, and only when started by the launcher (not while developing).
 
@@ -54,11 +57,37 @@ pub struct FileInfo {
     pub sha256: String,
 }
 
-/// `updates.json` (shared with the Electron app)
+/// `updates.json` (shared with the Electron app, which only knew `beta`)
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct Prefs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     beta: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    channel: Option<String>,
+}
+
+/// The Stable channel: regular versions only
+pub const STABLE: &str = "";
+/// The newest beta, whichever channel it's from (what "Beta updates" was)
+pub const ANY_BETA: &str = "beta";
+
+/// A public beta channel (one branch's betas), as `/updates/channels` lists them
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Channel {
+    /// Its name in addresses ("rust-rewrite")
+    pub id: String,
+    /// As it's shown ("Rust rewrite")
+    pub name: String,
+    /// Its newest version, and when it came out (ms)
+    pub version: String,
+    pub at: i64,
+}
+
+/// A channel's name as it can be used in an address: lowercase letters, digits and dashes (none: not one)
+pub fn channel_id(s: &str) -> Option<&str> {
+    let ok = !s.is_empty() && s.len() <= 40 && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+    ok.then_some(s)
 }
 
 fn prefs_file() -> PathBuf {
@@ -101,7 +130,8 @@ pub enum State {
 #[derive(Debug, Clone)]
 pub struct Updates {
     pub state: State,
-    pub beta: bool,
+    /// Which updates: [`STABLE`], [`ANY_BETA`] or a public beta channel's id
+    pub channel: String,
     /// The version running
     pub running: String,
     /// When it last looked (seconds since 1970)
@@ -130,10 +160,10 @@ impl Updates {
             .ok()
             .and_then(|t| serde_json::from_str(&t).ok())
             .unwrap_or_default();
-        let beta = saved.beta.unwrap_or(running.contains('-'));
+        let channel = channel_from(&saved, &running);
         Self {
             state,
-            beta,
+            channel,
             running,
             checked_at: None,
         }
@@ -154,16 +184,28 @@ impl Updates {
         matches!(self.state, State::Checking | State::Downloading(_))
     }
 
-    /// Beta updates on or off, kept in `updates.json` (keeping anything else the Electron app wrote there)
-    pub fn set_beta(&mut self, on: bool) {
-        self.beta = on;
+    /// Getting betas (any channel but Stable)
+    pub fn beta(&self) -> bool {
+        self.channel != STABLE
+    }
+
+    /// The update channel picked, kept in `updates.json` (keeping anything else the Electron app wrote there; its own
+    /// `beta` too, so a computer that goes back to it keeps getting betas or not)
+    pub fn set_channel(&mut self, channel: &str) {
+        let channel = if channel == ANY_BETA {
+            ANY_BETA
+        } else {
+            channel_id(channel).unwrap_or(STABLE)
+        };
+        self.channel = channel.to_string();
         let file = prefs_file();
         let mut v: serde_json::Value = std::fs::read_to_string(&file)
             .ok()
             .and_then(|t| serde_json::from_str(&t).ok())
             .filter(|v: &serde_json::Value| v.is_object())
             .unwrap_or_else(|| serde_json::json!({}));
-        v["beta"] = serde_json::Value::Bool(on);
+        v["beta"] = serde_json::Value::Bool(channel != STABLE);
+        v["channel"] = serde_json::Value::String(channel.to_string());
         if let Some(d) = file.parent() {
             let _ = std::fs::create_dir_all(d);
         }
@@ -206,6 +248,40 @@ fn url(s: &str) -> Result<Url, String> {
     Url::parse(s).map_err(|_| format!("bad address {s}"))
 }
 
+/// The channel saved (from before there were channels: "Beta updates" on is the newest beta of any; none saved: a beta
+/// running keeps getting betas, it was installed on purpose)
+fn channel_from(saved: &Prefs, running: &str) -> String {
+    match (&saved.channel, saved.beta) {
+        (Some(c), _) if c == ANY_BETA => ANY_BETA.into(),
+        (Some(c), _) => channel_id(c).unwrap_or(STABLE).into(),
+        (None, Some(true)) => ANY_BETA.into(),
+        (None, Some(false)) => STABLE.into(),
+        (None, None) if running.contains('-') => ANY_BETA.into(),
+        (None, None) => STABLE.into(),
+    }
+}
+
+/// The public beta channels (`/updates/channels`), newest first
+pub async fn channels(http: Http) -> Result<Vec<Channel>, String> {
+    let address = format!("{}/channels", updates_base());
+    let res = http
+        .send(Http::request(Method::GET, url(&address)?).header("Accept", "application/json, */*"))
+        .await
+        .map_err(|e| format!("couldn't reach the update server ({e})"))?;
+    if !res.ok() {
+        return Err(format!("the update server answered {}", res.status.as_u16()));
+    }
+    #[derive(Deserialize)]
+    struct List {
+        #[serde(default)]
+        channels: Vec<Channel>,
+    }
+    let list: List = serde_json::from_str(&res.body).map_err(|e| format!("the list couldn't be read ({e})"))?;
+    let mut out: Vec<Channel> = list.channels.into_iter().filter(|c| channel_id(&c.id).is_some()).collect();
+    out.sort_by(|a, b| b.at.cmp(&a.at));
+    Ok(out)
+}
+
 /// The beta channel's pick: the newer of the newest regular version and the newest beta, as long as it's newer than
 /// what's running
 pub fn beta_pick(latest: Option<Manifest>, beta: Option<Manifest>, running: &str) -> Option<Manifest> {
@@ -246,11 +322,11 @@ async fn manifest_at(http: &Http, address: &str) -> Result<Option<Manifest>, Str
         .map_err(|e| format!("its file list couldn't be read ({e})"))
 }
 
-/// Looks for a newer version (see the top of this file)
-pub async fn check(http: Http, beta: bool, running: String) -> Result<Option<Found>, String> {
+/// Looks for a newer version on a channel (see the top of this file)
+pub async fn check(http: Http, channel: String, running: String) -> Result<Option<Found>, String> {
     let base = updates_base();
     let latest = manifest_at(&http, &format!("{base}/latest/{MANIFEST}")).await?;
-    if !beta {
+    if channel == STABLE {
         let Some(m) = latest else {
             return Ok(None);
         };
@@ -261,7 +337,7 @@ pub async fn check(http: Http, beta: bool, running: String) -> Result<Option<Fou
             leave_beta: false,
         }));
     }
-    // a beta running, and a regular version newer than it out: that one (not a newer beta), and Beta updates off
+    // a beta running, and a regular version newer than it out: that one (not a newer beta), and back to Stable
     if let Some(m) = latest.as_ref().filter(|m| beta_replaced(&m.version, &running)) {
         return Ok(Some(Found {
             tag: tag_of(&m.version),
@@ -270,7 +346,11 @@ pub async fn check(http: Http, beta: bool, running: String) -> Result<Option<Fou
             leave_beta: true,
         }));
     }
-    let newest_beta = manifest_at(&http, &format!("{base}/beta/{MANIFEST}")).await?;
+    // the newest beta of any, or this channel's (a channel that's gone: none, so regular versions)
+    let newest_beta = match channel_id(&channel).filter(|c| *c != ANY_BETA) {
+        Some(c) => manifest_at(&http, &format!("{base}/beta/{c}/{MANIFEST}")).await?,
+        None => manifest_at(&http, &format!("{base}/beta/{MANIFEST}")).await?,
+    };
     Ok(beta_pick(latest, newest_beta, &running).map(|m| Found {
         tag: tag_of(&m.version),
         manifest: m,
@@ -452,6 +532,28 @@ mod tests {
         assert_eq!(v(beta_pick(Some(m("0.5.0")), Some(m("0.5.1-beta.3")), "0.5.1-beta.3")), None);
         assert_eq!(v(beta_pick(None, None, "0.5.0")), None);
         assert_eq!(tag_of("0.5.1-beta.3"), "v0.5.1-beta.3");
+    }
+
+    #[test]
+    fn channels_saved() {
+        let p = |beta: Option<bool>, channel: Option<&str>| Prefs {
+            beta,
+            channel: channel.map(str::to_string),
+        };
+        // from before channels: Beta updates on is the newest beta of any
+        assert_eq!(channel_from(&p(Some(true), None), "0.5.0"), ANY_BETA);
+        assert_eq!(channel_from(&p(Some(false), None), "0.5.0-beta.3"), STABLE);
+        // nothing saved: a beta keeps getting betas
+        assert_eq!(channel_from(&p(None, None), "0.5.0-beta.3"), ANY_BETA);
+        assert_eq!(channel_from(&p(None, None), "0.5.0"), STABLE);
+        // a channel picked
+        assert_eq!(channel_from(&p(Some(true), Some("rust-rewrite")), "0.5.0"), "rust-rewrite");
+        assert_eq!(channel_from(&p(Some(false), Some("")), "0.5.0-beta.3"), STABLE);
+        // nothing that could leave the address
+        assert_eq!(channel_from(&p(Some(true), Some("../latest")), "0.5.0"), STABLE);
+        assert_eq!(channel_id("rust-rewrite"), Some("rust-rewrite"));
+        assert_eq!(channel_id("Rust_Rewrite"), None);
+        assert_eq!(channel_id(""), None);
     }
 
     #[test]

@@ -14,6 +14,9 @@ use ui_kit::scroll::scrollable;
 
 use ui_kit::{anim, pill, style};
 
+mod pay;
+pub use pay::{Field as PayField, PayForm, PayMsg, RateForm, StubField, rate_field_id};
+
 /// The box a flag's hours are typed in
 pub fn edit_id() -> text_input::Id {
     text_input::Id::new("flag-hours")
@@ -77,9 +80,24 @@ fn cell<'a>(e: impl Into<Element<'a, HoursMsg>>, w: f32) -> Element<'a, HoursMsg
     container(e).width(if w == 0.0 { Length::Fill } else { Length::Fixed(w) }).into()
 }
 
-/// The report, as a card (the app shows it over everything). `now`: milliseconds since 1970; `spiff_over`: what
-/// approved recommendations must come to for a spiff; `can_print`: nothing's printing (Print Spiff can be pressed).
-pub fn card<'a>(hv: &'a HoursView, h: &'a Hours, now: i64, spiff_over: f64, can_print: bool) -> Element<'a, HoursMsg> {
+/// The report, as a card (the app shows it over everything). `pay`: Predictive Pay's setup (none: not set up);
+/// `now`: milliseconds since 1970; `spiff_over`: what approved recommendations must come to for a spiff;
+/// `can_print`: nothing's printing (Print Spiff can be pressed).
+pub fn card<'a>(
+    hv: &'a HoursView,
+    h: &'a Hours,
+    pay: Option<&'a hours::pay::PaySetup>,
+    now: i64,
+    spiff_over: f64,
+    can_print: bool,
+) -> Element<'a, HoursMsg> {
+    // Predictive Pay's setup, in place of the report
+    if let Some(form) = &hv.pay_form {
+        return container(scrollable(container(pay::form(form)).padding(24)))
+            .width(900)
+            .style(style::floating_card)
+            .into();
+    }
     let r = h.report(&chrono::Local, now, hv.offset, spiff_over);
 
     let head = row![
@@ -137,7 +155,13 @@ pub fn card<'a>(hv: &'a HoursView, h: &'a Hours, now: i64, spiff_over: f64, can_
     ]
     .spacing(10);
 
-    let body = column![stats, flags_table(h, hv, &r), spiffs(&r, !can_print)].spacing(18);
+    let body = column![
+        stats,
+        pay::predicted(pay, r.total, r.period.start, hv.pay_open, hv.rate_form.as_ref()),
+        flags_table(h, hv, &r),
+        spiffs(&r, !can_print)
+    ]
+    .spacing(18);
     let phase = hv.changed.map(anim::Phase::Entering).unwrap_or_default();
     container(scrollable(
         container(column![head, anim::page(body, phase).on_card()].spacing(16)).padding(24),
@@ -365,6 +389,12 @@ pub struct HoursView {
     pub removing: Option<u64>,
     /// When the pay period changed (it slides in)
     pub changed: Option<std::time::Instant>,
+    /// Predictive Pay's details are showing
+    pub pay_open: bool,
+    /// Predictive Pay being set up (the form shows in place of the report)
+    pub pay_form: Option<PayForm>,
+    /// A new hourly rate being typed
+    pub rate_form: Option<RateForm>,
 }
 
 /// What the report does
@@ -385,6 +415,8 @@ pub enum HoursMsg {
     PrintSpiff(String),
     MarkSpiffed(String),
     Close,
+    /// Predictive Pay: its details, and setting it up
+    Pay(PayMsg),
 }
 
 /// What the app does after an update
@@ -397,6 +429,8 @@ pub enum HoursOut {
     PrintSpiff(String),
     MarkSpiffed(String),
     Close,
+    /// Predictive Pay set up: keep it (and send it to your other computers and phone). Its `at` is left to the app.
+    PaySaved(hours::pay::PaySetup),
 }
 
 impl HoursView {
@@ -405,14 +439,105 @@ impl HoursView {
         Self::default()
     }
 
-    pub fn update(&mut self, h: &mut Hours, msg: HoursMsg) -> (Task<HoursMsg>, Vec<HoursOut>) {
+    /// `pay`: Predictive Pay's setup as it is (the form starts from it)
+    pub fn update(&mut self, h: &mut Hours, pay: Option<&hours::pay::PaySetup>, msg: HoursMsg) -> (Task<HoursMsg>, Vec<HoursOut>) {
         let out = match msg {
             HoursMsg::Period(offset) => {
                 *self = HoursView {
                     offset: offset.min(0),
                     changed: Some(std::time::Instant::now()),
+                    pay_open: self.pay_open,
                     ..HoursView::default()
                 };
+                vec![]
+            }
+            HoursMsg::Pay(PayMsg::Edit) => {
+                self.pay_form = Some(PayForm::from_setup(pay));
+                self.editing = None;
+                self.removing = None;
+                vec![]
+            }
+            HoursMsg::Pay(PayMsg::Cancel) => {
+                self.pay_form = None;
+                self.changed = Some(std::time::Instant::now());
+                vec![]
+            }
+            HoursMsg::Pay(PayMsg::Details) => {
+                self.pay_open = !self.pay_open;
+                vec![]
+            }
+            HoursMsg::Pay(PayMsg::NewRate) => {
+                self.rate_form = if self.rate_form.is_some() {
+                    None
+                } else {
+                    Some(RateForm::default())
+                };
+                let focus = if self.rate_form.is_some() {
+                    text_input::focus(rate_field_id())
+                } else {
+                    Task::none()
+                };
+                return (focus, vec![]);
+            }
+            HoursMsg::Pay(PayMsg::RateText(v)) => {
+                if let Some(f) = &mut self.rate_form {
+                    f.text = v;
+                    f.error = None;
+                }
+                vec![]
+            }
+            HoursMsg::Pay(PayMsg::RateNext(next)) => {
+                if let Some(f) = &mut self.rate_form {
+                    f.next = next;
+                }
+                vec![]
+            }
+            HoursMsg::Pay(PayMsg::RateCancel) => {
+                self.rate_form = None;
+                vec![]
+            }
+            HoursMsg::Pay(PayMsg::RateSave) => {
+                let (Some(f), Some(p)) = (&mut self.rate_form, pay) else {
+                    return (Task::none(), vec![]);
+                };
+                match hours::pay::parse_amount(&f.text) {
+                    Ok(Some(rate)) if rate > 0.0 && rate < 1000.0 => {
+                        // from this pay period (the one it is now, whichever's shown), or the next
+                        let now = chrono::Local::now().timestamp_millis();
+                        let from = hours::pay_period(&chrono::Local, now, if f.next { 1 } else { 0 }).start;
+                        let mut p = p.clone();
+                        p.set_rate(from, rate);
+                        self.rate_form = None;
+                        self.pay_open = true;
+                        vec![HoursOut::PaySaved(p)]
+                    }
+                    _ => {
+                        f.error = Some("Type the new rate an hour, like 27.50".into());
+                        vec![]
+                    }
+                }
+            }
+            HoursMsg::Pay(PayMsg::Save) => match self.pay_form.as_mut().map(|f| f.to_setup()) {
+                Some(Ok(mut setup)) => {
+                    // (the new rates since the stubs stay)
+                    setup.rates = pay.map(|p| p.rates.clone()).unwrap_or_default();
+                    self.pay_form = None;
+                    self.pay_open = true;
+                    self.changed = Some(std::time::Instant::now());
+                    vec![HoursOut::PaySaved(setup)]
+                }
+                Some(Err(e)) => {
+                    if let Some(f) = &mut self.pay_form {
+                        f.error = Some(e);
+                    }
+                    vec![]
+                }
+                None => vec![],
+            },
+            HoursMsg::Pay(m) => {
+                if let Some(f) = &mut self.pay_form {
+                    f.update(m);
+                }
                 vec![]
             }
             HoursMsg::Confirm(ids, on) => {
@@ -470,17 +595,7 @@ impl HoursView {
 
 /// $1,234.50
 fn money(n: f64) -> String {
-    let cents = (n * 100.0).round() as i64;
-    let (whole, part) = (cents.abs() / 100, cents.abs() % 100);
-    let digits = whole.to_string();
-    let mut grouped = String::new();
-    for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
-            grouped.push(',');
-        }
-        grouped.push(c);
-    }
-    format!("{}${grouped}.{part:02}", if cents < 0 { "-" } else { "" })
+    hours::pay::money(n)
 }
 
 #[cfg(test)]

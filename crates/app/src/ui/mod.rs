@@ -85,12 +85,12 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 Overlay::WhatsNew => (whats_new::card(app), Message::CloseWhatsNew),
                 // (answered, not put away)
                 Overlay::ProfileKind => (profiles::kind_card(app), Message::Ignore),
-                Overlay::Admin => (profiles::admin_card(app), Message::CloseAdmin),
                 Overlay::Phone => (phone::card(app), Message::ClosePhone),
                 Overlay::Hours => (
                     hours_ui::card(
                         &app.hours_view,
                         &app.hours,
+                        app.pay.as_ref(),
                         app.now * 1000,
                         xtime::ro::SPIFF_OVER,
                         app.print_job.is_none(),

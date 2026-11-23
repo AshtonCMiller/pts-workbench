@@ -80,17 +80,50 @@ pub enum Overlay {
     WhatsNew,
     /// A profile's kind: Main Shop or Quick Lane (asked once, when it's first used)
     ProfileKind,
-    /// Admin mode: the Feedback password, then every profile (delete one, reset its PIN)
-    Admin,
     /// Pair phone (bottom right): its QR code, the phones paired, when they get notifications
     Phone,
 }
 
+/// Settings' tabs, down its left side (as Chrome's settings)
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SettingsTab {
+    /// Everyone's profiles on this computer: yours to change, the others to switch to
+    #[default]
+    Profiles,
+    /// Light or dark, and how the window's drawn
+    Appearance,
+    /// Signing in to Xtime and Ford PTS
+    Accounts,
+    /// The version, updates and their channel, what's new, admin mode
+    About,
+}
+
+impl SettingsTab {
+    pub const ALL: [SettingsTab; 4] = [
+        SettingsTab::Profiles,
+        SettingsTab::Appearance,
+        SettingsTab::Accounts,
+        SettingsTab::About,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SettingsTab::Profiles => "Profiles",
+            SettingsTab::Appearance => "Appearance",
+            SettingsTab::Accounts => "Linked accounts",
+            SettingsTab::About => "About Workbench",
+        }
+    }
+}
+
 /// Admin mode (the Feedback password, checked by the feedback server; unlocked until it's locked, the app closes or
-/// the profile's switched)
+/// the profile's switched). Turned on in Settings › About Workbench; while it's on, Settings › Profiles can reset a
+/// profile's PIN or delete it.
 #[derive(Debug, Clone, Default)]
 pub struct Admin {
     pub unlocked: bool,
+    /// The switch turned on: its password asked for
+    pub asking: bool,
     pub key: String,
     pub checking: bool,
     pub error: Option<String>,
@@ -186,6 +219,11 @@ pub struct App {
     pub hours: hours::Hours,
     /// The hours report (a card over everything): which pay period, what's being changed
     pub hours_view: hours_ui::HoursView,
+    /// Predictive Pay's setup (crate::pay; none: not set up), when it was last looked for from your other
+    /// computers and phone (seconds), and whether it's being looked for or sent now
+    pub pay: Option<hours::pay::PaySetup>,
+    pay_checked_at: Option<i64>,
+    pay_busy: bool,
     /// What's in the app's Print window (its preview, printer, copies), while it's up
     pub print_job: Option<crate::print::Job>,
     /// The Add / Edit Service window, while it's up
@@ -258,6 +296,10 @@ pub struct App {
     /// Every task started (stopped when switching profiles: nothing of one profile's lands in another's)
     tasks: Vec<iced::task::Handle>,
     pub admin: Admin,
+    /// Settings' tab showing (and since when: its page springs in), and the public beta channels (none: not asked yet)
+    pub settings_tab: SettingsTab,
+    pub settings_since: std::time::Instant,
+    pub channels: Option<Result<Vec<crate::updates::Channel>, String>>,
     /// Your phone (crate::phone): paired or not, its card's state
     pub phone: crate::phone::PhoneState,
 }
@@ -375,7 +417,12 @@ pub enum Message {
     CheckUpdates,
     UpdateFound(Result<Option<crate::updates::Found>, String>),
     UpdateDownloaded(Result<crate::updates::Ready, String>),
-    SetBetaUpdates(bool),
+    /// The update channel picked (crate::updates: Stable, the newest beta, or a public beta channel's id)
+    SetChannel(String),
+    /// The public beta channels, from the update server
+    ChannelsLoaded(Result<Vec<crate::updates::Channel>, String>),
+    /// One of Settings' tabs picked
+    SettingsTab(SettingsTab),
     RestartToUpdate,
     /// The sidebar's lines: fold an RO's away (or back); change a line's hours or flag date (start, type, save,
     /// cancel); flag a line or take its flag off
@@ -531,10 +578,10 @@ pub enum Message {
     RemoveProfile(String),
     /// Nothing (a card that can't be put away by clicking beside it)
     Ignore,
-    /// Admin mode: opened (from Settings), put away; its password typed, tried, checked; a profile's PIN reset; a
-    /// profile deleted (pressed twice); locked
-    OpenAdmin,
-    CloseAdmin,
+    /// Admin mode (Settings › About Workbench): its switch turned on (the password asked for), the question put away;
+    /// its password typed, tried, checked; a profile's PIN reset; a profile deleted (pressed twice); turned off
+    AdminAsk,
+    AdminCancel,
     /// Your phone: the card, asking the server which phones are paired, a test, unpairing, when they're sent to
     OpenPhone,
     ClosePhone,
@@ -544,11 +591,17 @@ pub enum Message {
     PhoneTested(Result<usize, String>),
     PhoneUnpair,
     PhoneUnpaired(Result<(), String>),
+    /// One phone's Unpair (its id): pressed once it asks, pressed again it's done
+    PhoneUnpairOne(String),
+    PhoneUnpairedOne(String, Result<(), String>),
     /// Notifications sent to the phone (their IDs, and how it went)
     PhoneSent(Vec<u64>, Result<usize, String>),
     SetPhoneAfter(u32),
     /// Your RO list sent for the phone (its text, and how it went)
     RoListSent(String, Result<(), String>),
+    /// Predictive Pay's setup from your other computers and phone (none: nothing synced yet); sent to them
+    PayFetched(Result<Option<serde_json::Value>, String>),
+    PaySent(Result<(), String>),
     AdminKey(String),
     AdminUnlock,
     AdminChecked(Result<(), String>),
@@ -683,6 +736,9 @@ impl App {
             signing_in: None,
             hours: opened.hours,
             hours_view: hours_ui::HoursView::new(),
+            pay: crate::pay::load(),
+            pay_checked_at: None,
+            pay_busy: false,
             print_job: None,
             service: None,
             catalogs: Default::default(),
@@ -727,6 +783,9 @@ impl App {
             profile_name: String::new(),
             tasks: Vec::new(),
             admin: Admin::default(),
+            settings_tab: SettingsTab::default(),
+            settings_since: std::time::Instant::now(),
+            channels: None,
             phone: crate::phone::PhoneState::default(),
         };
         // (straight onto the vehicle showing, no transition in)
@@ -998,7 +1057,7 @@ impl App {
         }
         self.updates.checked_at = Some(self.now);
         Task::perform(
-            crate::updates::check(self.http.clone(), self.updates.beta, self.updates.running.clone()),
+            crate::updates::check(self.http.clone(), self.updates.channel.clone(), self.updates.running.clone()),
             Message::UpdateFound,
         )
     }
@@ -1825,7 +1884,7 @@ impl App {
             }
             Message::FlagLine(line_id, on) => return self.flag_line(&line_id, on),
             Message::Hr(msg) => {
-                let (task, outs) = self.hours_view.update(&mut self.hours, msg);
+                let (task, outs) = self.hours_view.update(&mut self.hours, self.pay.as_ref(), msg);
                 let mut tasks = vec![task.map(Message::Hr)];
                 for out in outs {
                     match out {
@@ -1833,6 +1892,15 @@ impl App {
                         hours_ui::HoursOut::Notice(n) => self.notice = Some(n),
                         hours_ui::HoursOut::PrintSpiff(ro) => tasks.push(Task::done(Message::PrintSpiffFor(ro))),
                         hours_ui::HoursOut::MarkSpiffed(ro) => tasks.push(Task::done(Message::MarkSpiffed(ro, true))),
+                        hours_ui::HoursOut::PaySaved(mut p) => {
+                            p.at = timecard::now_ms();
+                            self.notice = Some(match crate::pay::save(&p) {
+                                Ok(()) => "Predictive Pay is set up".into(),
+                                Err(e) => format!("Couldn't save Predictive Pay: {e}"),
+                            });
+                            self.pay = Some(p);
+                            tasks.push(self.send_pay());
+                        }
                         hours_ui::HoursOut::Close => {
                             if matches!(self.overlay, Some((Overlay::Hours, _))) {
                                 tasks.push(self.close_overlay());
@@ -1845,6 +1913,7 @@ impl App {
             Message::OpenHours => {
                 self.hours_view = hours_ui::HoursView::new();
                 self.show_overlay(Overlay::Hours);
+                return self.fetch_pay(true);
             }
             Message::MarkSpiffed(ro, on) => {
                 let spiff = on.then(|| self.spiff_record(&ro));
@@ -2043,19 +2112,19 @@ impl App {
             Message::ProfileName(t) => self.profile_name = t,
             Message::RemoveProfile(id) => self.profiles.remove(&id),
             Message::Ignore => {}
-            Message::OpenAdmin => {
+            Message::AdminAsk => {
+                if self.admin.unlocked {
+                    return Task::none();
+                }
                 self.admin.key.clear();
                 self.admin.error = None;
-                self.admin.confirm_delete = None;
-                self.admin.note = None;
-                self.show_overlay(Overlay::Admin);
-                if !self.admin.unlocked {
-                    return iced::widget::text_input::focus(admin_field_id());
-                }
+                self.admin.asking = true;
+                return iced::widget::text_input::focus(admin_field_id());
             }
-            Message::CloseAdmin => {
+            Message::AdminCancel => {
                 self.admin.key.clear();
-                return self.close_overlay();
+                self.admin.error = None;
+                self.admin.asking = false;
             }
             Message::OpenPhone => {
                 self.profile_menu = false;
@@ -2064,12 +2133,14 @@ impl App {
                     .and_then(|k| ui_kit::qr::encode(crate::phone::pair_link(&k).as_bytes(), ui_kit::qr::Level::L));
                 self.phone.tested = None;
                 self.phone.unpair_asked = false;
+                self.phone.unpair_one = None;
                 self.show_overlay(Overlay::Phone);
                 return self.check_phone();
             }
             Message::ClosePhone => {
                 // (the code isn't kept around once it's put away)
                 self.phone.unpair_asked = false;
+                self.phone.unpair_one = None;
                 return self.close_overlay();
             }
             Message::PhoneCheck => return self.check_phone(),
@@ -2106,11 +2177,38 @@ impl App {
             Message::PhoneUnpair => {
                 if !self.phone.unpair_asked {
                     self.phone.unpair_asked = true;
+                    self.phone.unpair_one = None;
                     return Task::none();
                 }
                 self.phone.unpair_asked = false;
                 let Some(keys) = self.phone_keys() else { return Task::none() };
                 return Task::perform(crate::phone::unpair(self.http.clone(), keys), Message::PhoneUnpaired);
+            }
+            Message::PhoneUnpairOne(id) => {
+                if self.phone.unpair_one.as_deref() != Some(id.as_str()) {
+                    self.phone.unpair_one = Some(id);
+                    self.phone.unpair_asked = false;
+                    return Task::none();
+                }
+                self.phone.unpair_one = None;
+                let Some(keys) = self.phone_keys() else { return Task::none() };
+                self.phone.unpairing = Some(id.clone());
+                let http = self.http.clone();
+                return Task::perform(crate::phone::unpair_one(http, keys, id.clone()), move |r| {
+                    Message::PhoneUnpairedOne(id.clone(), r)
+                });
+            }
+            Message::PhoneUnpairedOne(id, r) => {
+                self.phone.unpairing = None;
+                match r {
+                    Ok(()) => {
+                        if let Some(list) = &mut self.phone.phones {
+                            list.retain(|p| p.id != id);
+                        }
+                        self.phone.tested = None;
+                    }
+                    Err(e) => self.phone.error = Some(e),
+                }
             }
             Message::PhoneUnpaired(r) => match r {
                 Ok(()) => {
@@ -2123,6 +2221,29 @@ impl App {
                 if let Err(e) = r {
                     // (they stay marked sent: not tried over and over; the next ones try again)
                     self.phone.error = Some(e);
+                }
+            }
+            Message::PayFetched(r) => {
+                self.pay_busy = false;
+                match r {
+                    Ok(Some(doc)) => {
+                        if let Some(p) = crate::pay::newer(&doc, self.pay.as_ref()) {
+                            let _ = crate::pay::save(&p);
+                            self.pay = Some(p);
+                        } else if self.pay.as_ref().is_some_and(|p| doc["pay"]["at"].as_i64().unwrap_or(0) < p.at) {
+                            // (changed here while it couldn't be sent)
+                            return self.send_pay();
+                        }
+                    }
+                    Ok(None) if self.pay.is_some() => return self.send_pay(),
+                    _ => {}
+                }
+            }
+            Message::PaySent(r) => {
+                self.pay_busy = false;
+                if r.is_err() {
+                    // (tried again the next time it's looked for)
+                    self.pay_checked_at = None;
                 }
             }
             Message::RoListSent(text, r) => {
@@ -2168,7 +2289,9 @@ impl App {
                 match r {
                     Ok(()) => {
                         self.admin.unlocked = true;
+                        self.admin.asking = false;
                         self.admin.error = None;
+                        self.admin.note = Some("Admin mode is on: Profiles can reset a PIN or delete a profile".into());
                     }
                     Err(e) => self.admin.error = Some(e),
                 }
@@ -2195,10 +2318,8 @@ impl App {
                     Err(e) => format!("{name}: {e}"),
                 });
             }
-            Message::AdminLock => {
-                self.admin = Admin::default();
-                return self.close_overlay();
-            }
+            // (Settings stays open)
+            Message::AdminLock => self.admin = Admin::default(),
             Message::MaintRead(ro, r) => {
                 if let Some(ws) = self.open.iter_mut().find(|w| w.ro.ro == ro) {
                     ws.maint = match r {
@@ -2223,11 +2344,27 @@ impl App {
             Message::OpenSettings => {
                 self.draft = self.settings.clone();
                 self.profile_menu = false;
+                self.profile_ask = None;
                 self.pin_draft.clear();
                 self.profile_name = self.profiles.active().name.clone();
+                self.settings_tab = SettingsTab::Profiles;
+                self.settings_since = std::time::Instant::now();
+                self.notice = None;
                 self.show_overlay(Overlay::Settings);
-                return ui::focus_first_field();
+                // the public beta channels, for About Workbench's list
+                return Task::perform(crate::updates::channels(self.http.clone()), Message::ChannelsLoaded);
             }
+            Message::SettingsTab(tab) => {
+                if tab != self.settings_tab {
+                    self.settings_since = std::time::Instant::now();
+                }
+                self.settings_tab = tab;
+                self.profile_ask = None;
+                if tab == SettingsTab::About && !matches!(self.channels, Some(Ok(_))) {
+                    return Task::perform(crate::updates::channels(self.http.clone()), Message::ChannelsLoaded);
+                }
+            }
+            Message::ChannelsLoaded(r) => self.channels = Some(r),
             Message::CloseSettings => {
                 self.draft = self.settings.clone();
                 return self.close_overlay();
@@ -2240,12 +2377,22 @@ impl App {
                 };
                 *f = value;
             }
-            Message::SetGraphics(g) => self.draft.graphics = g,
+            // (Settings › Appearance: kept the moment they're picked, as Chrome's settings are)
+            Message::SetGraphics(g) => {
+                self.draft.graphics = g;
+                self.settings.graphics = g;
+                if let Err(e) = self.settings.save() {
+                    self.notice = Some(format!("Couldn't save it: {e}"));
+                }
+            }
             Message::SetTheme(t) => {
                 self.draft.theme = t;
-                self.settings.theme = t; // shown right away; kept with Save
+                self.settings.theme = t;
                 if t == ThemeChoice::Auto {
                     self.system_dark = crate::system_theme::is_dark();
+                }
+                if let Err(e) = self.settings.save() {
+                    self.notice = Some(format!("Couldn't save it: {e}"));
                 }
             }
             Message::CheckSystemTheme => {
@@ -2288,13 +2435,11 @@ impl App {
                         } else {
                             Task::none()
                         };
-                        // first setup goes on to the app; Settings closes
+                        // first setup goes on to the app; Settings stays open (as Chrome's does), saying it's saved
                         if self.screen == Screen::Setup {
                             self.screen = Screen::Main;
-                            return reload;
-                        } else {
-                            return Task::batch([reload, self.close_overlay()]);
                         }
+                        return reload;
                     }
                     Err(e) => self.notice = Some(format!("Couldn't save the settings: {e}")),
                 }
@@ -2522,8 +2667,8 @@ impl App {
                     Ok(Some(f)) => {
                         // a beta replaced by a regular version: back to regular updates
                         if f.leave_beta {
-                            self.updates.set_beta(false);
-                            self.notice = Some(format!("v{} is out: going to it, and Beta updates are off", f.manifest.version));
+                            self.updates.set_channel(crate::updates::STABLE);
+                            self.notice = Some(format!("v{} is out: going to it, back on the Stable channel", f.manifest.version));
                         }
                         self.updates.state = State::Downloading(f.manifest.version.clone());
                         return Task::perform(crate::updates::download(self.http.clone(), f), Message::UpdateDownloaded);
@@ -2590,9 +2735,11 @@ impl App {
                 }
                 return self.close_overlay();
             }
-            Message::SetBetaUpdates(on) => {
-                self.updates.set_beta(on);
-                return self.check_updates();
+            Message::SetChannel(c) => {
+                if c != self.updates.channel {
+                    self.updates.set_channel(&c);
+                    return self.check_updates();
+                }
             }
             Message::RestartToUpdate => {
                 if let crate::updates::State::Ready(r) = self.updates.state.clone() {
@@ -3024,7 +3171,48 @@ impl App {
         if std::mem::take(&mut self.sync.again) {
             tasks.push(self.sync_now());
         }
+        tasks.push(self.fetch_pay(false));
         Task::batch(tasks)
+    }
+
+    /// Predictive Pay's setup from your other computers and phone (every few minutes; `now`: now, as when Hours
+    /// opens). Not with sync off.
+    fn fetch_pay(&mut self, now: bool) -> Task<Message> {
+        if self.pay_busy || self.settings.sync_off || self.sample_data {
+            return Task::none();
+        }
+        if !now && self.pay_checked_at.is_some_and(|t| self.now - t < crate::pay::EVERY) {
+            return Task::none();
+        }
+        let Some(keys) = crate::syncing::derive_keys(&self.settings.store_id, &self.settings.employee_number) else {
+            return Task::none();
+        };
+        self.pay_busy = true;
+        self.pay_checked_at = Some(self.now);
+        let http = self.http.clone();
+        Task::perform(
+            async move { workbench_sync::get_whole(&http, workbench_sync::URL, &keys.pay()).await },
+            Message::PayFetched,
+        )
+    }
+
+    /// Predictive Pay's setup, to your other computers and phone (encrypted)
+    fn send_pay(&mut self) -> Task<Message> {
+        if self.settings.sync_off || self.sample_data {
+            return Task::none();
+        }
+        let (Some(p), Some(keys)) =
+            (&self.pay, crate::syncing::derive_keys(&self.settings.store_id, &self.settings.employee_number))
+        else {
+            return Task::none();
+        };
+        let doc = crate::pay::doc(p);
+        self.pay_busy = true;
+        let http = self.http.clone();
+        Task::perform(
+            async move { workbench_sync::put_whole(&http, workbench_sync::URL, &keys.pay(), &doc).await },
+            Message::PaySent,
+        )
     }
 
     /// ROs opened on another computer open here (once their VIN is known: from your ROs in Xtime); ROs closed on

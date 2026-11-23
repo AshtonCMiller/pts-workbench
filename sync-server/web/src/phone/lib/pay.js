@@ -140,11 +140,18 @@ export function learn(s) {
   };
 }
 
-/** The check for `hours` flagged: { hours, rate, gross, retirement, lines: [{ name, amount, pretax, how }], taxes,
- *  net } (null: no rate yet) */
-export function predict(s, l, hours) {
-  if (l.rate === null) return null;
-  const rate = l.rate;
+/** The hourly rate for the pay period starting at `start` (ms): the newest new rate from then or before (null:
+ *  the stubs') */
+export function rateFrom(s, start) {
+  const r = (s.rates || []).filter((x) => x.from <= start && x.rate > 0).sort((a, b) => b.from - a.from)[0];
+  return r ? r.rate : null;
+}
+
+/** The check for `hours` flagged in the pay period starting at `start` (ms; none: at the stubs' rate):
+ *  { hours, rate, gross, retirement, lines: [{ name, amount, pretax, how }], taxes, net } (null: no rate yet) */
+export function predict(s, l, hours, start) {
+  const rate = (start !== undefined ? rateFrom(s, start) : null) ?? l.rate;
+  if (rate === null) return null;
   const gross = cents(Math.max(hours, 0) * rate);
   const retirement = cents((gross * Math.max(num(s.retirement), 0)) / 100);
   const lines = l.lines.map((f) => ({ name: f.name, amount: fitOn(f, gross), pretax: f.pretax, how: describe(f) }));

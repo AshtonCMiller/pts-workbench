@@ -61,7 +61,7 @@ const stats = computed(() => {
 const learned = computed(() => (data.pay ? learn(data.pay) : null));
 const guess = computed(() => {
   if (!learned.value) return null;
-  return predict(data.pay, learned.value, flags.value.reduce((s, f) => s + f.hours, 0));
+  return predict(data.pay, learned.value, flags.value.reduce((s, f) => s + f.hours, 0), period.value.start);
 });
 const payOpen = ref(false);
 const payRows = computed(() => {
@@ -87,6 +87,13 @@ const payNotes = computed(() => {
     notes.push(`Your stubs' take-home was ${money(Math.abs(l.netOff))} ${l.netOff > 0 ? 'more' : 'less'} than all this comes to: is a benefit or fee missing?`);
   }
   if (!l.checks.length) notes.push('Taxes are figured from your W-4s.');
+  // (raises since the stubs: each from its pay period on)
+  const rates = data.pay.rates || [];
+  if (rates.length) {
+    const day = (ms) => new Date(ms).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+    const parts = [...(l.rate !== null ? [`${money(l.rate)} from your stubs`] : []), ...rates.map((r) => `${money(r.rate)} from ${day(r.from)}`)];
+    notes.push(`Hourly rate: ${parts.join(', ')}`);
+  }
   return notes;
 });
 

@@ -292,6 +292,7 @@ jobs:
           WRANGLER_SEND_METRICS: 'false'
           TAG: v${{ steps.version.outputs.number }}
           SETUP: PTS-Workbench-Setup-${{ steps.version.outputs.number }}.exe
+          BRANCH: ${{ github.ref_name }}
         run: |
           cd dist
           put() { # <file> <key in the bucket> <type>
@@ -308,9 +309,21 @@ jobs:
             put "$f" "releases/$TAG/$(basename "$f")" application/octet-stream
           done
           put workbench.json "releases/$TAG/workbench.json" application/json
-          if [ "${{ steps.version.outputs.beta }}" = "true" ]; then CHANNEL=beta; else CHANNEL=latest; fi
-          put workbench.json "channels/$CHANNEL/workbench.json" application/json
-          echo "::notice::$TAG is on prodealer.works ($CHANNEL)"
+          if [ "${{ steps.version.outputs.beta }}" = "true" ]; then
+            put workbench.json "channels/beta/workbench.json" application/json
+            # its branch's own public beta channel too (Settings › About Workbench › Update channel): the branch's
+            # name in lowercase letters, digits and dashes ("Rust-Rewrite" → "rust-rewrite")
+            CHANNEL=$(printf '%s' "$BRANCH" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//' | cut -c1-40 | sed -E 's/-+$//')
+            if [ -n "$CHANNEL" ]; then
+              put workbench.json "channels/beta/$CHANNEL/workbench.json" application/json
+              echo "::notice::$TAG is on prodealer.works (the newest beta, and the \"$CHANNEL\" beta channel)"
+            else
+              echo "::notice::$TAG is on prodealer.works (the newest beta)"
+            fi
+          else
+            put workbench.json "channels/latest/workbench.json" application/json
+            echo "::notice::$TAG is on prodealer.works (stable)"
+          fi"
 
       - name: Publish the release
         if: steps.version.outputs.exists == 'false'

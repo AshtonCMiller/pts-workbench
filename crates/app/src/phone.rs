@@ -29,6 +29,8 @@ pub const AFTER_CHOICES: [u32; 5] = [2, 5, 10, 15, 0];
 /// A paired phone, as the server knows it
 #[derive(Debug, Clone, PartialEq)]
 pub struct PhoneInfo {
+    /// The server's id for it, to unpair just this one (none: a server from before there were ids)
+    pub id: String,
     /// "iPhone", "Android phone"
     pub name: String,
     /// When it was paired, and last opened (ms)
@@ -47,8 +49,11 @@ pub struct PhoneState {
     /// A test being sent, and how the last one went
     pub testing: bool,
     pub tested: Option<Result<usize, String>>,
-    /// Unpair pressed once (pressed again: done)
+    /// Unpair (all of them) pressed once (pressed again: done)
     pub unpair_asked: bool,
+    /// The one phone whose Unpair was pressed once (its id), and one being unpaired
+    pub unpair_one: Option<String>,
+    pub unpairing: Option<String>,
     /// When the server was last asked (s), and the QR code while the card's up (none: nothing to pair with)
     pub checked_at: Option<i64>,
     pub qr: Option<ui_kit::qr::Qr>,
@@ -124,6 +129,7 @@ pub async fn status(http: Http, keys: Keys) -> Result<Vec<PhoneInfo>, String> {
         .map(|list| {
             list.iter()
                 .map(|p| PhoneInfo {
+                    id: p.get("id").and_then(Value::as_str).unwrap_or("").to_string(),
                     name: p.get("name").and_then(Value::as_str).unwrap_or("Phone").to_string(),
                     since: p.get("since").and_then(Value::as_i64).unwrap_or(0),
                     seen: p.get("seen").and_then(Value::as_i64).unwrap_or(0),
@@ -146,6 +152,13 @@ pub async fn send(http: Http, keys: Keys, title: String, body: String, tag: Stri
 /// Unpairs every phone
 pub async fn unpair(http: Http, keys: Keys) -> Result<(), String> {
     call(&http, "/v1/push/unpair", ids(&keys)).await.map(|_| ())
+}
+
+/// Unpairs one phone (its id from `status`)
+pub async fn unpair_one(http: Http, keys: Keys, id: String) -> Result<(), String> {
+    let mut b = ids(&keys);
+    b["phone"] = json!(id);
+    call(&http, "/v1/push/unpair", b).await.map(|_| ())
 }
 
 // ---------- what goes to the phone ----------

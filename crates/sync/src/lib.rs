@@ -7,6 +7,9 @@
 //! Spiffs sync too, in a document of their own beside the hours ([`Keys::spiffs`]): the Electron app doesn't know
 //! spiffs, and would take them for deleted if they were in its document. Only this app reads that one.
 //!
+//! Predictive Pay's setup has a document of its own too ([`Keys::pay`]), saved whole ([`put_whole`],
+//! [`get_whole`]) by whichever of your computers or your phone changed it last.
+//!
 //! How: each piece is a record with a time; when two computers changed things, the records are merged one by one
 //! and the newest change to each wins, so nothing else is lost. Deleted things leave a "deleted" marker. Everything
 //! is compressed and encrypted (AES-256-GCM) here before it's sent: the server sees a hashed ID and unreadable text,
@@ -58,6 +61,15 @@ impl Keys {
     pub fn ros(&self) -> Keys {
         Keys {
             id: hex(&Sha256::digest(format!("ros|{}", self.id).as_bytes())),
+            key: self.key,
+        }
+    }
+
+    /// Predictive Pay's setup (crates/hours `pay`): its own document, written whole by whichever of your computers
+    /// or your phone changed it last (the phone page works out the same ID: `pay|` and yours)
+    pub fn pay(&self) -> Keys {
+        Keys {
+            id: hex(&Sha256::digest(format!("pay|{}", self.id).as_bytes())),
             key: self.key,
         }
     }
@@ -781,6 +793,19 @@ pub async fn put_whole(http: &Http, url: &str, keys: &Keys, value: &Value) -> Re
         }
     }
     Err("the sync server was busy".into())
+}
+
+/// A document saved whole ([`put_whole`]), opened (none: nothing's been saved there yet)
+pub async fn get_whole(http: &Http, url: &str, keys: &Keys) -> Result<Option<Value>, String> {
+    let at = format!("{}/v1/store/{}", url.trim_end_matches('/'), keys.id);
+    let (status, got) = request(http, Method::GET, &at, None).await?;
+    if status != 200 {
+        return Err(format!("the sync server said {status}"));
+    }
+    match got.data.as_deref().filter(|d| !d.is_empty()) {
+        None => Ok(None),
+        Some(d) => decrypt(keys, d).map(Some).map_err(|_| "Couldn't read the synced data".to_string()),
+    }
 }
 
 /// One sync (`sync.js` `run`): the server's copy merged with this computer's, this computer brought up to date,

@@ -75,6 +75,8 @@ pub struct Tabs<'a, Message> {
     active: usize,
     spacing: f32,
     radius: f32,
+    /// One above the other (a side menu, like Settings'), as wide as there's room for
+    vertical: bool,
 }
 
 /// A row of tab buttons; `active`: which one is selected (its highlight slides there when it changes)
@@ -84,12 +86,24 @@ pub fn tabs<'a, Message>(active: usize, children: Vec<Element<'a, Message>>) -> 
         active,
         spacing: 4.0,
         radius: 6.0,
+        vertical: false,
     }
 }
 
 impl<Message> Tabs<'_, Message> {
     pub fn spacing(mut self, spacing: f32) -> Self {
         self.spacing = spacing;
+        self
+    }
+
+    /// A column of them instead (a side menu), filling the width: the highlight slides up and down
+    pub fn vertical(mut self) -> Self {
+        self.vertical = true;
+        self
+    }
+
+    pub fn radius(mut self, radius: f32) -> Self {
+        self.radius = radius;
         self
     }
 }
@@ -112,7 +126,7 @@ impl<Message> Tabs<'_, Message> {
 
 impl<'a, Message> Widget<Message, Theme, Renderer> for Tabs<'a, Message> {
     fn size(&self) -> Size<Length> {
-        Size::new(Length::Shrink, Length::Shrink)
+        Size::new(if self.vertical { Length::Fill } else { Length::Shrink }, Length::Shrink)
     }
 
     fn tag(&self) -> tree::Tag {
@@ -144,15 +158,20 @@ impl<'a, Message> Widget<Message, Theme, Renderer> for Tabs<'a, Message> {
     }
 
     fn layout(&self, tree: &mut Tree, renderer: &Renderer, limits: &layout::Limits) -> layout::Node {
+        let (axis, width, align) = if self.vertical {
+            (layout::flex::Axis::Vertical, Length::Fill, Alignment::Start)
+        } else {
+            (layout::flex::Axis::Horizontal, Length::Shrink, Alignment::Center)
+        };
         layout::flex::resolve(
-            layout::flex::Axis::Horizontal,
+            axis,
             renderer,
             limits,
-            Length::Shrink,
+            width,
             Length::Shrink,
             Padding::ZERO,
             self.spacing,
-            Alignment::Center,
+            align,
             &self.children,
             &mut tree.children,
         )

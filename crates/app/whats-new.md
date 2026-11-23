@@ -8,6 +8,13 @@
   leave older ones here. (The same file format as the Electron app's src/whats-new.md.)
 -->
 
+## v0.5.2
+
+# Improvements
+- **Settings** has now been redesigned to have a similar style to Chrome settings. Settings are separated by tabs (**Profiles**, **Appearance**, **Linked Accounts**, and **About Workbench**)
+- **Predictive Pay:** Hours now shows how much you will make before spiffs by looking at the hours you have flagged. Set it up from two of your pay stubs. After initial setup, the app will track your hours live and show much your check will be. Encrypted and synced with the mobile app.
+- **Hour Sheet Scanning** is not on the mobile app. It is still in very early testing and issues are expected. All images are kept on-device, and is using a very primitive image upscaling standard in order to get information from images.
+
 ## v0.5.1
 
 # Improvements

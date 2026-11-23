@@ -23,6 +23,7 @@
 mod app;
 mod clock;
 mod notes;
+mod pay;
 mod phone;
 mod print;
 mod profiles;

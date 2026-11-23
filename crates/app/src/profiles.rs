@@ -50,9 +50,18 @@ pub struct Profile {
     /// Its PIN's hash (none: no PIN)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pin: Option<String>,
+    /// When it was last the one in use (ms; none: not since this was kept)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_used: Option<i64>,
 }
 
 impl Profile {
+    /// When it was added (ms): its ID is the time it was made ("p" and the time in hex). None for the first one (it
+    /// was there before profiles were).
+    pub fn added(&self) -> Option<i64> {
+        self.id.strip_prefix('p').and_then(|h| i64::from_str_radix(h, 16).ok())
+    }
+
     pub fn initials(&self) -> String {
         let s: String = self
             .name
@@ -135,6 +144,7 @@ impl Profiles {
                 name,
                 kind: None,
                 pin: None,
+                last_used: None,
             });
         }
         if !p.list.iter().any(|x| x.id == p.active) {
@@ -169,6 +179,9 @@ impl Profiles {
             return;
         }
         self.active = id.to_string();
+        if let Some(p) = self.list.iter_mut().find(|p| p.id == id) {
+            p.last_used = Some(crate::timecard::now_ms());
+        }
         self.save();
         let d = dir_of(id);
         let _ = std::fs::create_dir_all(&d);
@@ -213,6 +226,7 @@ impl Profiles {
             name: name.trim().to_string(),
             kind: None,
             pin: pin.filter(|p| valid_pin(p)).map(|p| hash(&id, p)),
+            last_used: None,
         });
         self.save();
         id
@@ -278,6 +292,7 @@ mod tests {
                 name: "Ashton Miller".into(),
                 kind: Some(Kind::Main),
                 pin: None,
+                last_used: None,
             }],
         };
         assert_eq!(p.active().initials(), "AM");
@@ -289,5 +304,16 @@ mod tests {
         // the first profile is the app's own folder
         assert_eq!(dir_of(FIRST), base());
         assert_eq!(dir_of("p1"), base().join("profiles").join("p1"));
+        // when one was added: its ID
+        let mut q = p.list[0].clone();
+        assert_eq!(q.added(), None);
+        q.id = "p19a2b3c4d5e".into();
+        assert_eq!(q.added(), Some(0x19a2b3c4d5e));
+    }
+
+    #[test]
+    fn old_lists_still_load() {
+        let p: Profiles = serde_json::from_str(r#"{"active":"default","list":[{"id":"default","name":"A","kind":"main"}]}"#).unwrap();
+        assert_eq!(p.list[0].last_used, None);
     }
 }
