@@ -19,7 +19,7 @@ default-members = ["crates/app"]
 
 # Set version number here once; each crate listens with `name.workspace = true`
 [workspace.package]
-version = "0.5.2"
+version = "0.5.3"
 edition = "2024"
 rust-version = "1.85"
 publish = false

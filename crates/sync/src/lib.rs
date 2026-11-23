@@ -32,7 +32,7 @@ use sha2::{Digest, Sha256};
 use workbench_net::{Http, Method, Url};
 
 /// The sync server (the Electron app's `ptsWorkbench.syncUrl`)
-pub const URL: &str = "https://https://pts-sync.parkourdev.workers.dev"; //"https://prodealer.works";
+pub const URL: &str = "https://pts-sync.parkourdev.workers.dev"; //"https://prodealer.works";
 
 const DAY: i64 = 24 * 60 * 60 * 1000;
 /// How long a "deleted" marker is kept
