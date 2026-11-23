@@ -323,7 +323,7 @@ jobs:
           else
             put workbench.json "channels/latest/workbench.json" application/json
             echo "::notice::$TAG is on prodealer.works (stable)"
-          fi"
+          fi
 
       - name: Publish the release
         if: steps.version.outputs.exists == 'false'
