@@ -208,7 +208,7 @@ fn open_item<'a>(app: &'a App, ws: &'a Workspace) -> Element<'a, Message> {
     for (label, color) in xtime_ui::my_ros::status_tags(&ws.ro) {
         tags = tags.push(pill(label, color));
     }
-    if !ws.is_sample() && app.ros_loaded_at.is_some() && !app.my_ros.iter().any(|r| r.ro == ws.ro.ro) {
+    if app.ros_loaded_at.is_some() && !app.my_ros.iter().any(|r| r.ro == ws.ro.ro) {
         tags = tags.push(pill("Not on your list", [0x5d, 0x66, 0x70]));
     }
     let item = row![
@@ -314,7 +314,11 @@ impl<M> iced::widget::canvas::Program<M> for SidebarIcon {
         let mut frame = Frame::new(renderer, bounds.size());
         let (w, h) = (bounds.width, bounds.height);
         let pad = 1.5;
-        let outline = Path::rounded_rectangle(Point::new(pad, pad + 1.0), Size::new(w - pad * 2.0, h - pad * 2.0 - 2.0), 3.0.into());
+        let outline = Path::rounded_rectangle(
+            Point::new(pad, pad + 1.0),
+            Size::new(w - pad * 2.0, h - pad * 2.0 - 2.0),
+            3.0.into(),
+        );
         // the side panel, about a third of the way across
         let split = pad + (w - pad * 2.0) * 0.36;
         if self.open {

@@ -152,7 +152,7 @@ impl DiagView {
             DiagMsg::Search => {
                 let q = self.query.trim().to_string();
                 self.token += 1;
-                if q.is_empty() || env.sample {
+                if q.is_empty() {
                     self.search = None;
                     return (Task::none(), outs);
                 }
@@ -388,14 +388,7 @@ fn problem<'a>(e: &FordError) -> Element<'a, DiagMsg> {
     }
 }
 
-pub fn view(d: &DiagView, sample: bool) -> Element<'_, DiagMsg> {
-    if sample {
-        return container(card(
-            text("Diagnostics searches your real ROs' vehicles, once you're signed in to Xtime.").style(style::muted),
-        ))
-        .padding(16)
-        .into();
-    }
+pub fn view(d: &DiagView) -> Element<'_, DiagMsg> {
     let bar = row![
         text_input("DTCs and/or words: P0420 U3000:49 no crank…", &d.query)
             .id(input_id())

@@ -217,7 +217,7 @@ impl ChatPanel {
 
     /// Reads the list (your ROs: their older messages count too), unless it's loading already
     pub fn load(&mut self, env: &Env, ros: Vec<String>) -> Task<ChatMsg> {
-        if self.loading || env.sample {
+        if self.loading {
             return Task::none();
         }
         self.loading = true;
@@ -259,7 +259,7 @@ impl ChatPanel {
             .filter_map(|m| m.time)
             .max();
         let Some(newest) = newest else { return Task::none() };
-        if self.marked.get(ch).is_some_and(|at| *at >= newest) || env.sample {
+        if self.marked.get(ch).is_some_and(|at| *at >= newest) {
             return Task::none();
         }
         self.marked.insert(ch.to_string(), newest);
@@ -309,7 +309,7 @@ impl ChatPanel {
 
     /// The people you can mention, read once
     fn load_people(&mut self, env: &Env) -> Task<ChatMsg> {
-        if !self.people.is_empty() || self.people_loading || env.sample {
+        if !self.people.is_empty() || self.people_loading {
             return Task::none();
         }
         self.people_loading = true;
@@ -474,7 +474,7 @@ impl ChatPanel {
                 if let Some(ch) = self.channel_for_ro(&ro) {
                     return self.update(ChatMsg::Open(ch), env, ros);
                 }
-                if env.sample || self.finding.is_some() {
+                if self.finding.is_some() {
                     return (Task::none(), outs);
                 }
                 self.open = None;
@@ -674,8 +674,8 @@ pub struct ChatShown<'a> {
     pub ro: Option<&'a str>,
     /// Your ROs (an RO's conversation offers to open it)
     pub my_ros: Vec<String>,
-    /// Xtime isn't connected yet (samples are showing)
-    pub sample: bool,
+    /// You're not signed in to Xtime (there's nothing to show yet)
+    pub signed_out: bool,
     pub now: i64,
 }
 
@@ -753,7 +753,7 @@ pub fn panel<'a>(chat: &'a ChatPanel, shown: ChatShown<'a>) -> Element<'a, ChatM
     // the RO tab: for the vehicle showing (another vehicle since: the list, until its tab's picked)
     let ro_view = chat.filter == Filter::ThisRo && shown.ro.is_some() && chat.this_ro.as_deref() == shown.ro;
     let mut head = row![text("Dealership chat").size(16).font(style::BOLD), horizontal_space()].align_y(Alignment::Center);
-    if !shown.sample {
+    if !shown.signed_out {
         head = head.push(
             button(text(if chat.loading { "Checking…" } else { "Refresh" }).size(12))
                 .padding([3, 8])
@@ -804,7 +804,7 @@ pub fn panel<'a>(chat: &'a ChatPanel, shown: ChatShown<'a>) -> Element<'a, ChatM
     };
     let top: Element<'a, ChatMsg> = match (&chat.showing, ro_view && chat.open.is_none()) {
         // the RO tab, and no conversation on it yet
-        (_, true) => over(if shown.sample {
+        (_, true) => over(if shown.signed_out {
             note("Your Xtime conversations show here once you're signed in to Xtime.")
         } else if chat.loaded_at.is_none() {
             note("Reading your chat…")
@@ -849,7 +849,7 @@ fn start_card<'a>(chat: &'a ChatPanel, ro: &'a str) -> Element<'a, ChatMsg> {
 }
 
 fn list<'a>(chat: &'a ChatPanel, shown: &ChatShown<'a>) -> Element<'a, ChatMsg> {
-    if shown.sample {
+    if shown.signed_out {
         return note("Your Xtime conversations show here once you're signed in to Xtime.");
     }
     let convs: Vec<ChatMessage> = chat.conversations();

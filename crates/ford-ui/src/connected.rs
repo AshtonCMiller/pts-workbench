@@ -166,7 +166,7 @@ impl ConnectedView {
 
     /// Reads the status, unless it's being read or was read already (unless `force`): everything else follows
     pub fn load(&mut self, env: &Env, force: bool) -> Task<ConnectedMsg> {
-        if self.loading || env.sample || self.vin.trim().is_empty() || (self.status.is_some() && !force) {
+        if self.loading || self.vin.trim().is_empty() || (self.status.is_some() && !force) {
             return Task::none();
         }
         if force || self.status.is_none() {
@@ -668,7 +668,7 @@ fn article_chip(a: &CvArticle, short: bool) -> Element<'_, ConnectedMsg> {
 // The tab
 // =====================================================================================================================
 
-pub fn view(cv: &ConnectedView, sample: bool) -> Element<'_, ConnectedMsg> {
+pub fn view(cv: &ConnectedView) -> Element<'_, ConnectedMsg> {
     // the parts along the top, and Refresh
     let parts = anim::tabs(
         Part::ALL.iter().position(|p| *p == cv.part).unwrap_or(0),
@@ -690,9 +690,7 @@ pub fn view(cv: &ConnectedView, sample: bool) -> Element<'_, ConnectedMsg> {
         .on_press_maybe((!cv.loading).then_some(ConnectedMsg::Refresh));
     let bar = container(row![parts, horizontal_space(), refresh].spacing(8).align_y(Alignment::Center)).padding([0, 16]);
 
-    let body: Element<'_, ConnectedMsg> = if sample {
-        card(text("Connected vehicle data shows for your real ROs, once you're signed in to Xtime.").style(style::muted))
-    } else if let Some(st) = &cv.status {
+    let body: Element<'_, ConnectedMsg> = if let Some(st) = &cv.status {
         match cv.part {
             Part::Home => home(cv, st),
             Part::Ota => ota(cv, st),
@@ -725,7 +723,7 @@ pub fn view(cv: &ConnectedView, sample: bool) -> Element<'_, ConnectedMsg> {
         .height(Length::Fill)
         .remember(format!("cv:{}:{}", cv.vin, cv.part.label()));
     let mut page = column![container(bar).padding([10, 0]), scrolled];
-    if cv.part == Part::Home && !cv.picked.is_empty() && !sample {
+    if cv.part == Part::Home && !cv.picked.is_empty() {
         page = page.push(pick_bar(cv));
     }
     page.into()

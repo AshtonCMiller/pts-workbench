@@ -194,8 +194,8 @@ pub fn panel<'a>(app: &'a App, ro: &'a str, summary: Option<RoSummary>) -> Eleme
     match counted {
         None => {
             c = c.push(
-                text(if app.sample_data {
-                    "Lines show once Xtime is connected."
+                text(if app.xtime_pending {
+                    "Lines show once you're signed in to Xtime."
                 } else {
                     "No approved lines on this RO yet (they show once its Xtime View has loaded)."
                 })

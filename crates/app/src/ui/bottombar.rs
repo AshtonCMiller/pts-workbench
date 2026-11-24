@@ -91,7 +91,9 @@ pub fn view(app: &App) -> Element<'_, Message> {
                     .align_y(Alignment::Center),
                 )
             }
-            None if app.ros_loading && app.sample_data => bar = bar.push(text("Loading your ROs from Xtime…").size(13).style(style::muted)),
+            None if app.ros_loading && app.xtime_pending => {
+                bar = bar.push(text("Loading your ROs from Xtime…").size(13).style(style::muted))
+            }
             None => {
                 if let Some(at) = app.ros_loaded_at {
                     bar = bar.push(
@@ -101,9 +103,6 @@ pub fn view(app: &App) -> Element<'_, Message> {
                     );
                 }
             }
-        }
-        if app.sample_data && !app.ros_loading {
-            bar = bar.push(pill("Sample data", [0xd9, 0x77, 0x06]));
         }
     }
 

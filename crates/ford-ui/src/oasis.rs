@@ -67,7 +67,7 @@ impl OasisView {
 
     /// Reads OASIS, unless it's being read or was read already (unless `force`)
     pub fn load(&mut self, env: &Env, force: bool) -> Task<OasisMsg> {
-        if self.loading || env.sample || self.vin.trim().is_empty() || (self.data.is_some() && !force) {
+        if self.loading || self.vin.trim().is_empty() || (self.data.is_some() && !force) {
             return Task::none();
         }
         self.loading = true;
@@ -193,14 +193,14 @@ fn copyable<'a>(value: &'a str, what: &str, mono: bool) -> Element<'a, OasisMsg>
 
 /// What's showing: OASIS, or why it isn't (loading, signed out, a problem)
 /// OASIS (scrolling on its own)
-pub fn view<'a>(o: &'a OasisView, cv: &'a ConnectedView, sample: bool, today: NaiveDate) -> Element<'a, OasisMsg> {
-    scrollable(container(page(o, cv, sample, today)).padding(16).width(Length::Fill))
+pub fn view<'a>(o: &'a OasisView, cv: &'a ConnectedView, today: NaiveDate) -> Element<'a, OasisMsg> {
+    scrollable(container(page(o, cv, today)).padding(16).width(Length::Fill))
         .height(Length::Fill)
         .remember(format!("oasis:{}", o.vin))
         .into()
 }
 
-fn page<'a>(o: &'a OasisView, cv: &'a ConnectedView, sample: bool, today: NaiveDate) -> Element<'a, OasisMsg> {
+fn page<'a>(o: &'a OasisView, cv: &'a ConnectedView, today: NaiveDate) -> Element<'a, OasisMsg> {
     let state = |title: &'a str, why: String, button_: Option<(&'a str, OasisMsg)>| -> Element<'a, OasisMsg> {
         let mut c = column![text(title).size(18).font(style::BOLD), text(why).style(style::muted)].spacing(8);
         if let Some((label, msg)) = button_ {
@@ -210,11 +210,6 @@ fn page<'a>(o: &'a OasisView, cv: &'a ConnectedView, sample: bool, today: NaiveD
     };
     let Some(data) = &o.data else {
         return match (&o.error, o.loading) {
-            _ if sample => state(
-                "OASIS",
-                "OASIS shows for your real ROs, once you're signed in to Xtime.".into(),
-                None,
-            ),
             _ if o.setting_up => state(
                 "Setting up PTS…",
                 "Opening this vehicle in PTS once, so its pages are ready. This takes a few seconds.".into(),

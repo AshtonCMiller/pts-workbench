@@ -64,7 +64,7 @@ impl TsbView {
 
     /// Reads the list, unless it's being read or was read already (unless `force`)
     pub fn load(&mut self, env: &Env, force: bool) -> Task<TsbMsg> {
-        if self.loading || env.sample || self.vin.trim().is_empty() || (self.list.is_some() && !force) {
+        if self.loading || self.vin.trim().is_empty() || (self.list.is_some() && !force) {
             return Task::none();
         }
         self.loading = true;
@@ -160,10 +160,9 @@ fn state<'a>(title: &'a str, why: String, action: Option<(&'a str, TsbMsg)>) -> 
     container(c).padding(14).width(Length::Fill).style(style::card).into()
 }
 
-pub fn view(t: &TsbView, sample: bool) -> Element<'_, TsbMsg> {
+pub fn view(t: &TsbView) -> Element<'_, TsbMsg> {
     let Some(list) = &t.list else {
         let s = match (&t.error, t.loading) {
-            _ if sample => state("TSBs", "TSBs show for your real ROs, once you're signed in to Xtime.".into(), None),
             (_, true) => state("Loading TSBs…", format!("Asking Ford about {}", t.vin), None),
             (Some(FordError::SignedOut), _) => state(
                 "Sign in to PTS",

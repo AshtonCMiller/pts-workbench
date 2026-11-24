@@ -176,7 +176,7 @@ impl ManualView {
 
     /// Reads the contents, unless they're being read or were read already (unless `force`)
     pub fn load(&mut self, env: &Env, force: bool) -> Task<ManualMsg> {
-        if self.loading || env.sample || self.vin.trim().is_empty() || (self.toc.is_some() && !force) {
+        if self.loading || self.vin.trim().is_empty() || (self.toc.is_some() && !force) {
             return Task::none();
         }
         self.loading = true;
@@ -1265,17 +1265,7 @@ fn tabs_bar<'a>(m: &'a ManualView) -> Element<'a, ManualMsg> {
     container(r).padding([8, 10]).width(Length::Fill).into()
 }
 
-pub fn view<'a>(m: &'a ManualView, sample: bool) -> Element<'a, ManualMsg> {
-    if sample {
-        return container(
-            container(text("The Workshop Manual shows for your real ROs, once you're signed in to Xtime.").style(style::muted))
-                .padding(18)
-                .width(Length::Fill)
-                .style(style::card),
-        )
-        .padding(16)
-        .into();
-    }
+pub fn view<'a>(m: &'a ManualView) -> Element<'a, ManualMsg> {
     let main = row![
         anim::side(contents(m), m.contents_open, anim::Edge::Left, TOC_W),
         column![tabs_bar(m), procedure(m)].width(Length::Fill).height(Length::Fill),

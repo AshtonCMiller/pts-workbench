@@ -45,14 +45,37 @@ pub fn view(app: &App) -> Element<'_, Message> {
             })
             .collect(),
     );
+    // the RO and vehicle in the room left, on one line: all of it when it fits, else the RO alone, else nothing (never
+    // cut off or squeezed onto two lines); Copy VIN keeps its size however narrow the window
+    let (ro_no, vehicle) = (ws.ro.ro.clone(), ws.vehicle());
+    let info = iced::widget::responsive(move |room| {
+        const SIZE: f32 = 14.0;
+        // (about how wide a line of it is: the app's font averages a little over half its size a letter)
+        let fits = |t: &str| t.chars().count() as f32 * SIZE * 0.58 + 16.0 <= room.width;
+        let full = format!("RO {ro_no} · {vehicle}");
+        let short = format!("RO {ro_no}");
+        let shown = if fits(&full) {
+            full
+        } else if fits(&short) {
+            short
+        } else {
+            String::new()
+        };
+        container(text(shown).size(SIZE).wrapping(text::Wrapping::None).style(style::muted))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .padding([0, 8])
+            .align_x(iced::alignment::Horizontal::Right)
+            .align_y(iced::alignment::Vertical::Center)
+            .into()
+    });
     let tabs = Row::new()
         .spacing(4)
         .align_y(Alignment::Center)
         .push(main_tabs)
-        .push(horizontal_space())
-        .push(text(format!("RO {} · {}", ws.ro.ro, ws.vehicle())).style(style::muted))
+        .push(container(info).width(Length::Fill).height(30))
         .push(
-            button(text("Copy VIN"))
+            button(text("Copy VIN").wrapping(text::Wrapping::None))
                 .padding([5, 10])
                 .style(style::ghost)
                 .on_press(Message::CopyVin),
@@ -136,7 +159,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
         // a Quick Lane's: the specs a quick service needs
         Tab::Maintenance => maintenance(ws),
         // the websites themselves (crates/webpane: a web view over this room)
-        Tab::XtimeSite | Tab::PtsSite => site(app, tab, &ws.ro.ro, ws.is_sample()),
+        Tab::XtimeSite | Tab::PtsSite => site(app, tab, &ws.ro.ro),
     };
     page.push(anim::page(content, app.inner.phase)).into()
 }
@@ -153,9 +176,6 @@ fn maintenance(ws: &Workspace) -> Element<'_, Message> {
     .spacing(2);
     let mut page = column![head].spacing(14);
     match &ws.maint {
-        _ if ws.is_sample() => {
-            page = page.push(text("The sample ROs aren't real vehicles: connect Xtime to see a vehicle's specs.").style(style::muted));
-        }
         Maint::NotRead | Maint::Reading => {
             page = page.push(
                 row![
@@ -252,7 +272,7 @@ fn maintenance(ws: &Workspace) -> Element<'_, Message> {
 }
 
 /// Xtime's own RO page or PTS: a bar to reload it, then the room the page shows in
-fn site<'a>(app: &'a App, tab: Tab, ro: &str, sample: bool) -> Element<'a, Message> {
+fn site<'a>(app: &'a App, tab: Tab, ro: &str) -> Element<'a, Message> {
     let what = if tab == Tab::PtsSite {
         "PTS, opened on this vehicle"
     } else {
@@ -268,19 +288,15 @@ fn site<'a>(app: &'a App, tab: Tab, ro: &str, sample: bool) -> Element<'a, Messa
     ]
     .align_y(Alignment::Center)
     .padding([4, 10]);
-    column![bar, site_room(app, crate::app::pane_id(tab, ro), sample)].into()
+    column![bar, site_room(app, crate::app::pane_id(tab, ro))].into()
 }
 
 /// The room a website shows in (what's drawn there: until it's over it, or why it can't be)
-pub fn site_room<'a>(app: &'a App, id: String, sample: bool) -> Element<'a, Message> {
-    let note = if sample {
-        "The sample ROs aren't real: connect Xtime to see its pages.".to_string()
-    } else {
-        app.pane_error.clone().unwrap_or_else(|| "Opening…".into())
-    };
+pub fn site_room<'a>(app: &'a App, id: String) -> Element<'a, Message> {
+    let note = app.pane_error.clone().unwrap_or_else(|| "Opening…".into());
     // (a card over it: the page's picture, taken as it was covered, so it still looks to be there)
     let content: Element<'a, Message> = match &app.pane_picture {
-        Some((pid, picture)) if *pid == id && !sample => iced::widget::image(picture.clone())
+        Some((pid, picture)) if *pid == id => iced::widget::image(picture.clone())
             .width(Length::Fill)
             .height(Length::Fill)
             .content_fit(iced::ContentFit::Fill)
@@ -398,7 +414,7 @@ fn history<'a>(app: &'a App, ws: &'a Workspace) -> Element<'a, Message> {
     ]
     .align_y(Alignment::Center)
     .padding([4, 10]);
-    column![bar, site_room(app, crate::app::history_pane_id(&ws.ro.ro), ws.is_sample())].into()
+    column![bar, site_room(app, crate::app::history_pane_id(&ws.ro.ro))].into()
 }
 
 fn manual<'a>(app: &'a App, ws: &'a Workspace, tab: ManualTab) -> Element<'a, Message> {
@@ -407,15 +423,15 @@ fn manual<'a>(app: &'a App, ws: &'a Workspace, tab: ManualTab) -> Element<'a, Me
         // crates/ford-ui: its own messages, for this RO
         ManualTab::Oasis => {
             let today = chrono::Local::now().date_naive();
-            ford_ui::oasis::view(&ws.oasis, &ws.cv, ws.is_sample(), today).map(move |m| Message::Oasis(ro.clone(), m))
+            ford_ui::oasis::view(&ws.oasis, &ws.cv, today).map(move |m| Message::Oasis(ro.clone(), m))
         }
-        ManualTab::ConnectedVehicle => ford_ui::connected::view(&ws.cv, ws.is_sample()).map(move |m| Message::Cv(ro.clone(), m)),
+        ManualTab::ConnectedVehicle => ford_ui::connected::view(&ws.cv).map(move |m| Message::Cv(ro.clone(), m)),
         ManualTab::History => history(app, ws),
-        ManualTab::Tsbs => ford_ui::tsb::view(&ws.tsb, ws.is_sample()).map(move |m| Message::Tsb(ro.clone(), m)),
-        ManualTab::Workshop => ford_ui::manual::view(&ws.wsm, ws.is_sample()).map(move |m| Message::Wsm(ro.clone(), m)),
-        ManualTab::Diagnostics => ford_ui::diagnostics::view(&ws.diag, ws.is_sample()).map(move |m| Message::Diag(ro.clone(), m)),
-        ManualTab::Labor => ford_ui::labor::view(&ws.labor, ws.is_sample()).map(move |m| Message::Labor(ro.clone(), m)),
-        ManualTab::Wiring => ford_ui::wiring::view(&ws.wiring, ws.is_sample()).map(move |m| Message::Wiring(ro.clone(), m)),
+        ManualTab::Tsbs => ford_ui::tsb::view(&ws.tsb).map(move |m| Message::Tsb(ro.clone(), m)),
+        ManualTab::Workshop => ford_ui::manual::view(&ws.wsm).map(move |m| Message::Wsm(ro.clone(), m)),
+        ManualTab::Diagnostics => ford_ui::diagnostics::view(&ws.diag).map(move |m| Message::Diag(ro.clone(), m)),
+        ManualTab::Labor => ford_ui::labor::view(&ws.labor).map(move |m| Message::Labor(ro.clone(), m)),
+        ManualTab::Wiring => ford_ui::wiring::view(&ws.wiring).map(move |m| Message::Wiring(ro.clone(), m)),
         ManualTab::Doc(key) => match ws.docs.iter().find(|d| d.key == key) {
             Some(d) => ford_ui::doc_tab::view(d).map(move |m| Message::Doc(ro.clone(), key, m)),
             None => text("This tab was closed.").into(),

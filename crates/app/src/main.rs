@@ -16,7 +16,6 @@
 //!   print/        printing inside the app (the spiff sheet): Windows' Print window, then drawn on the printer
 //!   ros.rs        your ROs from Xtime (loaded every minute while signed in)
 //!   reports.rs    the Feedback screen: sending bug reports and ideas, their replies (the feedback crate asks)
-//!   sample.rs     sample ROs until Xtime is connected
 //!   ui/           the screens: top bar, sidebar, dashboard, workbench, settings; style.rs the colors
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // no console window on Windows
 
@@ -29,7 +28,6 @@ mod print;
 mod profiles;
 mod reports;
 mod ros;
-mod sample;
 mod settings;
 mod signin;
 mod syncing;

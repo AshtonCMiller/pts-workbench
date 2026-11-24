@@ -8,6 +8,20 @@
   leave older ones here. (The same file format as the Electron app's src/whats-new.md.)
 -->
 
+## v0.5.4
+
+# Improvements
+- **Xtime sign-in:** If you're not signed in to XTime, its sign-in now opens as soon as the app starts (and again if XTime signs you out), instead of waiting for you to find the button.
+
+# Bug Fixes
+- **Predictive Pay** now syncs between computers and your phone.
+- **Copy Vin** at the top of the vehicle is no longer cut off on smaller windows.
+
+## v0.5.3
+
+# Bug Fixes
+- Fixed an issue with the new custom domain getting blocked by company IT, leading to the app not correctly syncing or being able to fetch updates.
+
 ## v0.5.2
 
 # Improvements

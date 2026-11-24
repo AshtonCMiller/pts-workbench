@@ -12,9 +12,9 @@ use crate::ros::{self, LoadError, Loaded};
 use crate::settings::{Settings, ThemeChoice};
 use crate::signin::{self, Outcome, Site};
 use crate::timecard;
+use crate::ui;
 use crate::ui::anim::{self, Phase};
 use crate::workspace::{ManualTab, Tab, Workspace};
-use crate::{sample, ui};
 
 /// Top bar: Xtime (your dashboard), the Workbench (the vehicles you have open), or Diagnostics (the vehicle plugged
 /// into the VCI)
@@ -177,9 +177,12 @@ pub struct App {
     pub draft: Settings,
     pub screen: Screen,
     pub mode: Mode,
-    /// Your ROs from Xtime's dashboard (samples until Xtime is connected)
+    /// Your ROs from Xtime's dashboard (none until they've been read)
     pub my_ros: Vec<AssignedRo>,
-    pub sample_data: bool,
+    /// Your ROs haven't been read from Xtime yet (since the app started): nothing's asked of Xtime about an RO
+    pub xtime_pending: bool,
+    /// Xtime's sign-in has been offered (once each time it's needed, so Cancel doesn't bring it straight back)
+    xtime_asked: bool,
     /// Xtime's data, asked with the profile's sign-in
     pub xtime: Xtime,
     /// Ford PTS (the Service Manual's tabs), asked with the profile's PTS sign-in
@@ -711,8 +714,9 @@ impl App {
             settings,
             screen,
             mode: Mode::Workbench,
-            my_ros: sample::my_ros(),
-            sample_data: true,
+            my_ros: Vec::new(),
+            xtime_pending: true,
+            xtime_asked: false,
             xtime,
             ford,
             ros_loading: false,
@@ -825,7 +829,9 @@ impl App {
     /// The window tells the taskbar to pin the launcher (in the installed folder), not this program (which can be a
     /// downloaded update's). Only when started by the launcher: not during development.
     fn taskbar(&self) -> Task<Message> {
-        let Ok(home) = std::env::var(launcher::ENV_HOME) else { return Task::none() };
+        let Ok(home) = std::env::var(launcher::ENV_HOME) else {
+            return Task::none();
+        };
         let exe = std::path::Path::new(&home).join(launcher::LAUNCHER_EXE);
         if !exe.is_file() {
             return Task::none();
@@ -1083,9 +1089,9 @@ impl App {
             return None;
         }
         let (url, id) = match self.mode {
-            Mode::Xtime if self.settings.xtime_site && !self.sample_data => (XTIME_SITE.to_string(), "xtime-dashboard".to_string()),
+            Mode::Xtime if self.settings.xtime_site => (XTIME_SITE.to_string(), "xtime-dashboard".to_string()),
             Mode::Workbench => {
-                let ws = self.workspace().filter(|w| !w.is_sample())?;
+                let ws = self.workspace()?;
                 match ws.tab {
                     Tab::XtimeSite => (XTIME_RO_PAGE.replace("{RO}", &ws.ro.ro), pane_id(ws.tab, &ws.ro.ro)),
                     Tab::PtsSite => (PTS_VEHICLE_PAGE.replace("{VIN}", &ws.ro.vin), pane_id(ws.tab, &ws.ro.ro)),
@@ -1157,8 +1163,7 @@ impl App {
             return;
         }
         self.open_saved = now;
-        // (the samples aren't real vehicles: not kept)
-        let real: Vec<&Workspace> = self.open.iter().filter(|w| !w.is_sample()).collect();
+        let real: Vec<&Workspace> = self.open.iter().collect();
         let selected = self.selected.as_deref().filter(|s| real.iter().any(|w| w.ro.ro == *s));
         let saved = crate::vehicles::save(&real, selected);
         let mut open_ros = crate::vehicles::open_ros(&real);
@@ -1322,7 +1327,7 @@ impl App {
             // (OASIS's connected vehicle data is the Connected Vehicle tab's)
             Message::Oasis(ro, ford_ui::OasisMsg::Cv(m)) => return self.update(Message::Cv(ro, m)),
             Message::Oasis(ro, msg) => {
-                let env = self.ford_env_for(&ro);
+                let env = self.ford_env();
                 let Some(ws) = self.open.iter_mut().find(|w| w.ro.ro == ro) else {
                     return Task::none();
                 };
@@ -1346,7 +1351,7 @@ impl App {
                 return Task::batch(tasks);
             }
             Message::Cv(ro, msg) => {
-                let env = self.ford_env_for(&ro);
+                let env = self.ford_env();
                 let Some(ws) = self.open.iter_mut().find(|w| w.ro.ro == ro) else {
                     return Task::none();
                 };
@@ -1362,7 +1367,7 @@ impl App {
             }
             Message::DiagMenu(open) => self.diag_menu = open,
             Message::Tsb(ro, msg) => {
-                let env = self.ford_env_for(&ro);
+                let env = self.ford_env();
                 let Some(ws) = self.open.iter_mut().find(|w| w.ro.ro == ro) else {
                     return Task::none();
                 };
@@ -1377,7 +1382,7 @@ impl App {
                 return Task::batch(tasks);
             }
             Message::Wsm(ro, msg) => {
-                let env = self.ford_env_for(&ro);
+                let env = self.ford_env();
                 let Some(ws) = self.open.iter_mut().find(|w| w.ro.ro == ro) else {
                     return Task::none();
                 };
@@ -1392,7 +1397,7 @@ impl App {
                 return Task::batch(tasks);
             }
             Message::Labor(ro, msg) => {
-                let env = self.ford_env_for(&ro);
+                let env = self.ford_env();
                 let Some(ws) = self.open.iter_mut().find(|w| w.ro.ro == ro) else {
                     return Task::none();
                 };
@@ -1407,7 +1412,7 @@ impl App {
                 return Task::batch(tasks);
             }
             Message::Wiring(ro, msg) => {
-                let env = self.ford_env_for(&ro);
+                let env = self.ford_env();
                 let Some(ws) = self.open.iter_mut().find(|w| w.ro.ro == ro) else {
                     return Task::none();
                 };
@@ -1422,7 +1427,7 @@ impl App {
                 return Task::batch(tasks);
             }
             Message::Diag(ro, msg) => {
-                let env = self.ford_env_for(&ro);
+                let env = self.ford_env();
                 let Some(ws) = self.open.iter_mut().find(|w| w.ro.ro == ro) else {
                     return Task::none();
                 };
@@ -1437,7 +1442,7 @@ impl App {
                 return Task::batch(tasks);
             }
             Message::Doc(ro, key, msg) => {
-                let env = self.ford_env_for(&ro);
+                let env = self.ford_env();
                 let Some(d) = self
                     .open
                     .iter_mut()
@@ -1478,7 +1483,7 @@ impl App {
                 };
                 // the TSBs tab, when it was waiting on PTS too
                 let ok = r.is_ok();
-                let env = self.ford_env_for(&ro);
+                let env = self.ford_env();
                 let tsb = match self.open.iter_mut().find(|w| w.ro.ro == ro) {
                     Some(ws) if ok && ws.tsb.error == Some(ford_ui::FordError::NotSetUp) => {
                         let ro = ro.clone();
@@ -1634,7 +1639,7 @@ impl App {
                 if let Some(v) = self.open.iter().find(|w| w.ro.ro == ro).and_then(|w| w.xv.view.clone()) {
                     return self.print_spiff(v);
                 }
-                if self.sample_data {
+                if self.xtime_pending {
                     return Task::none();
                 }
                 self.notice = Some(format!("Reading RO {ro} from Xtime to print its spiff…"));
@@ -1765,7 +1770,7 @@ impl App {
                     let Some(v) = v.as_ref().filter(|v| !v.vehicle.vin.is_empty()) else {
                         continue;
                     };
-                    if self.sync.waiting.remove(ro).is_none() || self.sample_data || self.open.iter().any(|w| &w.ro.ro == ro) {
+                    if self.sync.waiting.remove(ro).is_none() || self.xtime_pending || self.open.iter().any(|w| &w.ro.ro == ro) {
                         continue;
                     }
                     {
@@ -1809,7 +1814,7 @@ impl App {
             }
             Message::AcceptRo(ro) => {
                 self.accept_ask = None;
-                if self.accepting.is_some() || self.sample_data {
+                if self.accepting.is_some() || self.xtime_pending {
                     return Task::none();
                 }
                 let tech = self.settings.tech_id.trim().to_string();
@@ -1932,7 +1937,7 @@ impl App {
                 let Some(ws) = self.workspace() else {
                     return Task::none();
                 };
-                if self.sample_data || self.service.is_some() {
+                if self.xtime_pending || self.service.is_some() {
                     return Task::none();
                 }
                 let ro = ws.ro.ro.clone();
@@ -2458,6 +2463,10 @@ impl App {
             Message::SignInDone(site, outcome) => {
                 self.signing_in = None;
                 let load = matches!((site, &outcome), (Site::Xtime, Outcome::SignedIn(_)));
+                // (signed out again later: asked again)
+                if load {
+                    self.xtime_asked = false;
+                }
                 self.notice = Some(match outcome {
                     Outcome::SignedIn(cookies) => {
                         self.http.add_site_cookies(&cookies);
@@ -2499,9 +2508,13 @@ impl App {
             Message::LoadRos => return self.load_ros(),
             Message::RosLoaded(result) => {
                 let ok = result.is_ok();
-                // the first real list (the app starts on its samples, and the Xtime View reads nothing until then)
-                let first = self.sample_data;
+                // the first list (the Xtime View reads nothing until then)
+                let first = self.xtime_pending;
                 self.ros_loaded(result);
+                // signed out of Xtime since: its sign-in, straight away
+                if self.ros_error == Some(LoadError::SignedOut) {
+                    return self.ask_xtime();
+                }
                 if ok {
                     // ROs opened on another computer whose VIN is now known; the chat's new messages (and the Chat
                     // button's count) with them, every minute
@@ -2799,11 +2812,10 @@ impl App {
     }
 
     /// What the Service Manual's tabs ask Ford with
-    /// What a vehicle's Service Manual asks Ford with (nothing, for a sample)
-    fn ford_env_for(&self, ro: &str) -> ford_ui::Env {
+    /// What a vehicle's Service Manual asks Ford with
+    fn ford_env(&self) -> ford_ui::Env {
         ford_ui::Env {
             ford: self.ford.clone(),
-            sample: self.open.iter().find(|w| w.ro.ro == ro).is_some_and(Workspace::is_sample),
             dark: self.settings.theme.resolve(self.system_dark) == ThemeChoice::Dark,
         }
     }
@@ -2814,7 +2826,7 @@ impl App {
         let ford = self.ford.clone();
         if let Some(ws) = self
             .workspace_mut()
-            .filter(|w| w.tab == Tab::Maintenance && !w.is_sample() && matches!(w.maint, crate::workspace::Maint::NotRead))
+            .filter(|w| w.tab == Tab::Maintenance && matches!(w.maint, crate::workspace::Maint::NotRead))
         {
             ws.maint = crate::workspace::Maint::Reading;
             let (ro, vin) = (ws.ro.ro.clone(), ws.ro.vin.clone());
@@ -2823,7 +2835,7 @@ impl App {
                 move |r| Message::MaintRead(ro.clone(), r),
             );
         }
-        let env = self.ford_env_for(self.selected.as_deref().unwrap_or(""));
+        let env = self.ford_env();
         let Some(ws) = self.workspace_mut().filter(|w| w.tab == Tab::ServiceManual) else {
             return Task::none();
         };
@@ -2848,8 +2860,8 @@ impl App {
     /// A vehicle just opened: its OASIS is read in the background (as the Electron app's "loading ahead"), so it's
     /// there by the time its tab is opened. Only with a PTS sign-in (nothing asks to sign in from here).
     fn load_ahead(&mut self, ro: &str) -> Task<Message> {
-        let env = self.ford_env_for(ro);
-        if env.sample || !self.signed_in(Site::Ford) {
+        let env = self.ford_env();
+        if !self.signed_in(Site::Ford) {
             return Task::none();
         }
         let Some(ws) = self.open.iter_mut().find(|w| w.ro.ro == ro) else {
@@ -2883,7 +2895,7 @@ impl App {
             ford_ui::Out::SignIn => Task::done(Message::SignIn(Site::Ford)),
             // one of Ford's documents: a Service Manual tab of its own (the one already open for it, if any)
             ford_ui::Out::OpenDoc { kind, id, title, url } => {
-                let env = self.ford_env_for(ro);
+                let env = self.ford_env();
                 let Some(ws) = self.open.iter_mut().find(|w| w.ro.ro == ro) else {
                     return Task::none();
                 };
@@ -2904,7 +2916,7 @@ impl App {
             // from the Diagnostics tab: a procedure or pinpoint test in the Workshop Manual tab (in a tab of its own, at
             // the test)
             ford_ui::Out::OpenProcedure { link, title } => {
-                let env = self.ford_env_for(ro);
+                let env = self.ford_env();
                 let Some(ws) = self.open.iter_mut().find(|w| w.ro.ro == ro) else {
                     return Task::none();
                 };
@@ -2926,7 +2938,7 @@ impl App {
                 self.open_print(what, build)
             }
             ford_ui::Out::OpenBulletin { kind, id, title, url } => {
-                let env = self.ford_env_for(ro);
+                let env = self.ford_env();
                 let Some(ws) = self.open.iter_mut().find(|w| w.ro.ro == ro) else {
                     return Task::none();
                 };
@@ -2942,7 +2954,7 @@ impl App {
             }
             // a wiring page from Diagnostics: in the Wiring tab
             ford_ui::Out::OpenWiring(at) => {
-                let env = self.ford_env_for(ro);
+                let env = self.ford_env();
                 let Some(ws) = self.open.iter_mut().find(|w| w.ro.ro == ro) else {
                     return Task::none();
                 };
@@ -2977,12 +2989,15 @@ impl App {
             xtime: self.xtime.clone(),
             store: self.settings.store_id.clone(),
             tech_id: self.settings.tech_id.clone(),
-            sample: self.sample_data,
         }
     }
 
     /// Reads an RO for its Xtime View, unless it's being read, or was read in the last 20 s (unless `force`)
+    /// (not until your ROs have been read from Xtime: signed in, and the first list read)
     fn load_view(&mut self, ro: &str, force: bool) -> Task<Message> {
+        if self.xtime_pending {
+            return Task::none();
+        }
         let env = self.xtime_env();
         let Some(ws) = self.open.iter_mut().find(|w| w.ro.ro == ro) else {
             return Task::none();
@@ -3072,6 +3087,10 @@ impl App {
             self.ros_error,
             Some(LoadError::SignedOut | LoadError::NoEmployee | LoadError::NotFound(_))
         );
+        // not signed in to Xtime: its sign-in, straight away (once: Cancel leaves it to the Sign in button)
+        if !self.settings.needs_setup() && (!self.signed_in(Site::Xtime) || self.ros_error == Some(LoadError::SignedOut)) {
+            return self.ask_xtime();
+        }
         if self.ros_loading
             || waiting
             || self.settings.needs_setup()
@@ -3086,6 +3105,15 @@ impl App {
             ros::load(self.xtime.clone(), s.tech_id.clone(), s.employee_number.clone(), s.store_id.clone()),
             Message::RosLoaded,
         )
+    }
+
+    /// Xtime's sign-in window, when you're not signed in (once until you are: Cancel leaves it to the Sign in button)
+    fn ask_xtime(&mut self) -> Task<Message> {
+        if self.xtime_asked || self.signing_in.is_some() || self.settings.needs_setup() {
+            return Task::none();
+        }
+        self.xtime_asked = true;
+        Task::done(Message::SignIn(Site::Xtime))
     }
 
     fn save_hours(&mut self) {
@@ -3178,7 +3206,7 @@ impl App {
     /// Predictive Pay's setup from your other computers and phone (every few minutes; `now`: now, as when Hours
     /// opens). Not with sync off.
     fn fetch_pay(&mut self, now: bool) -> Task<Message> {
-        if self.pay_busy || self.settings.sync_off || self.sample_data {
+        if self.pay_busy || self.settings.sync_off {
             return Task::none();
         }
         if !now && self.pay_checked_at.is_some_and(|t| self.now - t < crate::pay::EVERY) {
@@ -3198,12 +3226,13 @@ impl App {
 
     /// Predictive Pay's setup, to your other computers and phone (encrypted)
     fn send_pay(&mut self) -> Task<Message> {
-        if self.settings.sync_off || self.sample_data {
+        if self.settings.sync_off {
             return Task::none();
         }
-        let (Some(p), Some(keys)) =
-            (&self.pay, crate::syncing::derive_keys(&self.settings.store_id, &self.settings.employee_number))
-        else {
+        let (Some(p), Some(keys)) = (
+            &self.pay,
+            crate::syncing::derive_keys(&self.settings.store_id, &self.settings.employee_number),
+        ) else {
             return Task::none();
         };
         let doc = crate::pay::doc(p);
@@ -3221,7 +3250,7 @@ impl App {
         let want = self.hours.open_ros.clone();
         let mut tasks = Vec::new();
         let mut keep = false;
-        let open_here: Vec<String> = self.open.iter().filter(|w| !w.is_sample()).map(|w| w.ro.ro.clone()).collect();
+        let open_here: Vec<String> = self.open.iter().map(|w| w.ro.ro.clone()).collect();
         for ro in open_here {
             if want.contains_key(&ro) {
                 continue;
@@ -3256,7 +3285,7 @@ impl App {
         let mut tasks = Vec::new();
         for r in ready {
             self.sync.waiting.remove(&r.ro);
-            if self.open.iter().any(|w| w.ro.ro == r.ro) || self.sample_data {
+            if self.open.iter().any(|w| w.ro.ro == r.ro) || self.xtime_pending {
                 continue;
             }
             let ro = r.ro.clone();
@@ -3274,7 +3303,7 @@ impl App {
             .filter(|ro| self.waiting_tried.get(*ro).is_none_or(|at| now - at >= 10 * 60))
             .cloned()
             .collect();
-        if !ask.is_empty() && !self.sample_data {
+        if !ask.is_empty() && !self.xtime_pending {
             for ro in &ask {
                 self.waiting_tried.insert(ro.clone(), now);
             }
@@ -3401,7 +3430,7 @@ impl App {
     /// Reads the chat again, when there's an Xtime sign-in to ask with (and Xtime is connected)
     fn refresh_chat(&mut self) -> Task<Message> {
         let signed_out = self.ros_error == Some(LoadError::SignedOut);
-        if self.sample_data || signed_out || self.settings.needs_setup() || !self.signed_in(Site::Xtime) {
+        if self.xtime_pending || signed_out || self.settings.needs_setup() || !self.signed_in(Site::Xtime) {
             return Task::none();
         }
         let env = self.xtime_env();
@@ -3472,7 +3501,7 @@ impl App {
             };
             return self.open_added(r, None);
         }
-        if self.sample_data {
+        if self.xtime_pending {
             a.error = Some("Sign in to Xtime first so the RO can be looked up, or type its VIN to open it anyway.".into());
             a.ask_vin = true;
             return Task::none();
@@ -3502,7 +3531,7 @@ impl App {
         let read = match view {
             Some(v) => self.took_views(vec![(ro.clone(), Some(v))]),
             // (the VIN typed: what Xtime has on it, if it can)
-            None if !self.sample_data => {
+            None if !self.xtime_pending => {
                 let (x, store, r) = (self.xtime.clone(), self.settings.store_id.clone(), ro.clone());
                 Task::perform(async move { vec![(r.clone(), x.ro_view(&store, &r).await.ok())] }, Message::RosRead)
             }
@@ -3591,9 +3620,6 @@ impl App {
 
     /// What pairs a phone and sends to it: this profile's sync keys (its store ID and employee number)
     fn phone_keys(&self) -> Option<workbench_sync::Keys> {
-        if self.sample_data {
-            return None;
-        }
         crate::syncing::derive_keys(&self.settings.store_id, &self.settings.employee_number)
     }
 
@@ -3623,11 +3649,7 @@ impl App {
         for r in &self.my_ros {
             list.push(crate::phone::list_item(r, true, open(&r.ro)));
         }
-        for w in self
-            .open
-            .iter()
-            .filter(|w| !w.is_sample() && !self.my_ros.iter().any(|r| r.ro == w.ro.ro))
-        {
+        for w in self.open.iter().filter(|w| !self.my_ros.iter().any(|r| r.ro == w.ro.ro)) {
             list.push(crate::phone::list_item(&w.ro, false, true));
         }
         let text = serde_json::json!(list).to_string();
@@ -3676,7 +3698,7 @@ impl App {
 
     /// New notifications: kept in the list, the newest popped up in the corner, the taskbar button flashed
     fn notify(&mut self, news: Vec<crate::notes::New>) -> Task<Message> {
-        if news.is_empty() || self.sample_data {
+        if news.is_empty() || self.xtime_pending {
             return Task::none();
         }
         let ids = self.notes.add(news, timecard::now_ms());
@@ -3740,7 +3762,7 @@ impl App {
     /// totals (My ROs shows which have a spiff to turn in); and open ROs that aren't on your list (added by hand) every
     /// minute, as nothing else keeps them up to date
     fn check_spiffs(&mut self) -> Task<Message> {
-        if self.checking_spiffs || self.sample_data {
+        if self.checking_spiffs || self.xtime_pending {
             return Task::none();
         }
         let now = clock::now();
@@ -3761,7 +3783,7 @@ impl App {
         due.extend(
             self.open
                 .iter()
-                .filter(|w| !w.is_sample() && !self.my_ros.iter().any(|r| r.ro == w.ro.ro))
+                .filter(|w| !self.my_ros.iter().any(|r| r.ro == w.ro.ro))
                 .map(|w| w.ro.ro.clone())
                 .filter(|ro| self.spiff_checked.get(ro).is_none_or(|at| now - at >= 50)),
         );
@@ -3795,14 +3817,7 @@ impl App {
         self.now = clock::now();
         self.ros_error = None;
         self.ros_loaded_at = Some(self.now);
-        if self.sample_data {
-            // the samples' vehicles were never real: close them (vehicles reopened from last time stay)
-            self.sample_data = false;
-            self.open.retain(|w| !w.is_sample());
-            if !self.selected.as_ref().is_some_and(|s| self.open.iter().any(|w| &w.ro.ro == s)) {
-                self.selected = None;
-            }
-        }
+        self.xtime_pending = false;
         // open vehicles get their RO's latest (mode, waiting…); one that's gone from your list stays open as it was
         for ws in &mut self.open {
             if let Some(r) = loaded.ros.iter().find(|r| r.ro == ws.ro.ro) {

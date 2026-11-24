@@ -131,7 +131,7 @@ fn chat(app: &App) -> Element<'_, Message> {
     let shown = xtime_ui::chat::ChatShown {
         ro,
         my_ros: app.my_ros.iter().map(|r| r.ro.clone()).collect(),
-        sample: app.sample_data,
+        signed_out: !app.signed_in(crate::signin::Site::Xtime),
         now: app.now,
     };
     container(xtime_ui::chat::panel(&app.chat_panel, shown).map(Message::Chat))
@@ -169,7 +169,7 @@ fn xtime_page(app: &App) -> Element<'_, Message> {
         );
     }
     let body: Element<'_, Message> = if site {
-        workbench::site_room(app, "xtime-dashboard".into(), app.sample_data)
+        workbench::site_room(app, "xtime-dashboard".into())
     } else {
         xtime_ui::my_ros::dashboard(&app.my_ros, &app.search).map(Message::from)
     };

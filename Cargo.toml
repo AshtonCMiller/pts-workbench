@@ -19,7 +19,7 @@ default-members = ["crates/app"]
 
 # Set version number here once; each crate listens with `name.workspace = true`
 [workspace.package]
-version = "0.5.3"
+version = "0.5.4"
 edition = "2024"
 rust-version = "1.85"
 publish = false
@@ -57,7 +57,7 @@ thiserror = "2"
 url = "2"
 regex = "1"
 # Native Rust UI
-iced = { version = "0.13", features = ["tokio", "advanced", "canvas", "image"] }
+iced = { version = "0.13", features = ["tokio", "advanced", "canvas", "image", "lazy"] }
 # local dates and times (the printed spiff sheet; pay periods for the hours report)
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 # passwords kept by the system (Windows Credential Manager, the Secret Service on Linux): the feedback admin's

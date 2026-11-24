@@ -80,11 +80,6 @@ impl Workspace {
     pub fn vehicle(&self) -> String {
         vehicle_name(&self.ro)
     }
-
-    /// One of the sample ROs shown before Xtime is connected (its VIN isn't real: nothing is asked about it)
-    pub fn is_sample(&self) -> bool {
-        self.ro.vin.starts_with("SAMPLE")
-    }
 }
 
 /// A vehicle's main tabs

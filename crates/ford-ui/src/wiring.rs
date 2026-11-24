@@ -172,7 +172,7 @@ impl WiringView {
     /// Reads the contents (unless they're read, or being read)
     pub fn load(&mut self, env: &Env, force: bool) -> Task<WiringMsg> {
         self.dark = env.dark;
-        if env.sample || self.loading || (self.toc.is_some() && !force) {
+        if self.loading || (self.toc.is_some() && !force) {
             return Task::none();
         }
         self.loading = true;
@@ -392,7 +392,7 @@ impl WiringView {
             }
             WiringMsg::Search => {
                 let q = self.filter.trim().to_string();
-                if q.chars().count() < 2 || env.sample {
+                if q.chars().count() < 2 {
                     return (Task::none(), outs);
                 }
                 if self
@@ -785,14 +785,7 @@ fn problem<'a>(e: &FordError, what: &'a str, retry: WiringMsg) -> Element<'a, Wi
     )
 }
 
-pub fn view(w: &WiringView, sample: bool) -> Element<'_, WiringMsg> {
-    if sample {
-        return container(card(
-            text("Wiring diagrams show for your real ROs' vehicles, once you're signed in to Xtime.").style(style::muted),
-        ))
-        .padding(16)
-        .into();
-    }
+pub fn view(w: &WiringView) -> Element<'_, WiringMsg> {
     match &w.at {
         Some(at) => page_view(w, at),
         None => contents(w),

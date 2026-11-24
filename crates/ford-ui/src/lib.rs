@@ -43,8 +43,6 @@ pub use wiring::{WiringMsg, WiringView};
 #[derive(Clone)]
 pub struct Env {
     pub ford: ford::Ford,
-    /// The app is showing its sample ROs (their VINs aren't real: nothing is asked)
-    pub sample: bool,
     /// The dark appearance (the wiring diagrams are drawn in it)
     pub dark: bool,
 }

@@ -24,8 +24,6 @@ pub struct Env {
     pub store: String,
     /// Your technician ID (whose ROs are yours, for Send to Approval / Review)
     pub tech_id: String,
-    /// The app is showing its sample ROs (they aren't in Xtime: nothing is read)
-    pub sample: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -236,9 +234,6 @@ impl XtimeView {
 
     /// Reads the RO, unless it's being read, or was read in the last 20 s (unless `force`)
     pub fn load(&mut self, env: &Env, force: bool) -> Task<Msg> {
-        if env.sample {
-            return Task::none(); // the samples aren't in Xtime
-        }
         let fresh = self.at.is_some_and(|at| crate::now() - at < 20) && self.error.is_none();
         if self.loading || (fresh && !force) {
             return Task::none();
@@ -250,7 +245,7 @@ impl XtimeView {
 
     /// Reads the inspection form (not while it's being read, or an item's being saved or typed)
     pub fn load_form(&mut self, env: &Env) -> Task<Msg> {
-        if env.sample || self.form_loading || !self.saving.is_empty() || !self.drafts.is_empty() {
+        if self.form_loading || !self.saving.is_empty() || !self.drafts.is_empty() {
             return Task::none();
         }
         self.form_loading = true;
@@ -272,7 +267,7 @@ impl XtimeView {
     /// Reads the moves Xtime offers you (only in Inspection and Repair, the stages a technician moves an RO on from)
     pub fn load_stage(&mut self, env: &Env) -> Task<Msg> {
         let mode = self.view.as_ref().map(|v| v.mode).unwrap_or(0);
-        if env.sample || self.stage_loading || self.moving.is_some() || !matches!(mode, 3 | 6) {
+        if self.stage_loading || self.moving.is_some() || !matches!(mode, 3 | 6) {
             if !matches!(mode, 3 | 6) {
                 self.stage = None;
             }
@@ -599,7 +594,7 @@ impl XtimeView {
             }
             Msg::AskMove(mv) => self.confirm = mv,
             Msg::MakeMove(mv) => {
-                if self.moving.is_some() || env.sample {
+                if self.moving.is_some() {
                     return just(vec![]);
                 }
                 return (self.make_move(env, mv, None), vec![]);
@@ -673,7 +668,7 @@ impl XtimeView {
                 let Some(line) = self.view.as_ref().and_then(|v| v.lines.iter().find(|l| l.key() == key)) else {
                     return just(vec![]);
                 };
-                if env.sample || self.line_moving.is_some() || self.busy.contains(&key) || line.is_inspection() {
+                if self.line_moving.is_some() || self.busy.contains(&key) || line.is_inspection() {
                     return just(vec![]);
                 }
                 let now = Instant::now();

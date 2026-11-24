@@ -363,7 +363,7 @@ impl LaborView {
         let busy = self.busy.is_some();
         let task = match msg {
             LaborMsg::Open => {
-                if self.opened || busy || env.sample {
+                if self.opened || busy {
                     return (Task::none(), outs);
                 }
                 let token = self.started("Opening SLTS…");
@@ -478,7 +478,7 @@ impl LaborView {
                 Task::none()
             }
             LaborMsg::Search => {
-                if busy || env.sample {
+                if busy {
                     return (Task::none(), outs);
                 }
                 let q = self.q.trim().to_string();
@@ -1365,15 +1365,7 @@ fn parts_window<'a>(v: &'a LaborView, w: &'a PartsWindow) -> Element<'a, LaborMs
         .into()
 }
 
-pub fn view(v: &LaborView, sample: bool) -> Element<'_, LaborMsg> {
-    if sample {
-        return container(card(
-            text("Labor Times opens SLTS for your real ROs' vehicles, once you're signed in to Xtime.").style(style::muted),
-        ))
-        .padding(16)
-        .into();
-    }
-
+pub fn view(v: &LaborView) -> Element<'_, LaborMsg> {
     // the search (mirrors SLTS's own)
     let picked_kind = v.form.types.iter().find(|c| c.value == v.kind).cloned();
     let mut bar = Row::new().spacing(10).align_y(Alignment::Center).push(
