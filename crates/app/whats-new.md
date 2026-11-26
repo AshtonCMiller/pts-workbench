@@ -8,6 +8,11 @@
   leave older ones here. (The same file format as the Electron app's src/whats-new.md.)
 -->
 
+## v0.5.5
+
+# Improvements
+- **Windows Application Signing** has now been implemented. What does this mean? No more "Windows Protected your PC" or "Suspicious Download blocked" messages. This program has now been fully validated to run on all windows computers, with no scary popups getting in the way.
+
 ## v0.5.4
 
 # Improvements
