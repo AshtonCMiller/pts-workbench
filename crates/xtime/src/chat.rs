@@ -990,6 +990,38 @@ impl Xtime {
     }
 }
 
+impl Xtime {
+    /// A picture sent in chat: the message is its address, on Amazon's storage (S3), where Xtime's app puts them
+    /// ("https://sdkmobileapi-….s3.us-west-2.amazonaws.com/media/…/….jpg"). Its bytes. Only from there (a
+    /// message's words aren't sent anywhere else).
+    pub async fn chat_picture(&self, url: &str) -> Result<Vec<u8>> {
+        let u = workbench_net::Url::parse(url).map_err(|_| Error::Format(format!("not an address: {url}")))?;
+        let host = u.host_str().unwrap_or_default().to_ascii_lowercase();
+        if u.scheme() != "https" || !host.ends_with(".amazonaws.com") {
+            return Err(Error::Format("Not a chat picture".into()));
+        }
+        let res = self.http.send_bytes(workbench_net::Http::request(Method::GET, u)).await?;
+        if !res.status.is_success() {
+            return Err(Error::Status(res.status.as_u16()));
+        }
+        Ok(res.bytes)
+    }
+}
+
+/// A chat message that's a picture: its address ("https://….amazonaws.com/…/x.jpg", on its own or in the words)
+pub fn picture_urls(text: &str) -> Vec<String> {
+    text.split_whitespace()
+        .filter(|w| {
+            let lower = w.to_ascii_lowercase();
+            let path = lower.split(['?', '#']).next().unwrap_or("");
+            lower.starts_with("https://")
+                && lower.contains(".amazonaws.com/")
+                && [".jpg", ".jpeg", ".png", ".gif", ".webp"].iter().any(|e| path.ends_with(e))
+        })
+        .map(str::to_string)
+        .collect()
+}
+
 /// A request to chat's own sites (no Inspect headers: those are for Inspect only)
 fn chat_request(method: Method, url: &str) -> Result<workbench_net::Request> {
     let url = workbench_net::Url::parse(url).map_err(|_| Error::Format(format!("not an address: {url}")))?;
@@ -1018,6 +1050,16 @@ fn enc(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finds_pictures() {
+        let url = "https://sdkmobileapi-969674f0-5c81-475e-8a94-027769595a05.s3.us-west-2.amazonaws.com/media/d65381eb/e626e934.jpg";
+        assert_eq!(picture_urls(url), [url]);
+        assert_eq!(picture_urls(&format!("Look at this {url} ok")), [url]);
+        assert!(picture_urls("https://example.com/x.jpg").is_empty());
+        assert!(picture_urls("https://x.s3.amazonaws.com/doc.pdf").is_empty());
+        assert!(picture_urls("RO 820326 is done").is_empty());
+    }
 
     fn names() -> HashMap<String, String> {
         staff_names(&[

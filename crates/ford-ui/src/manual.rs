@@ -1276,27 +1276,27 @@ pub fn view<'a>(m: &'a ManualView) -> Element<'a, ManualMsg> {
         Pic::Ready(h) => Some(h.clone()),
         _ => None,
     });
-    match big {
-        Some(h) => stack![
-            main,
-            mouse_area(
-                container(
-                    image(h)
-                        .content_fit(iced::ContentFit::Contain)
-                        .width(Length::Fill)
-                        .height(Length::Fill)
-                )
-                .padding(24)
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .style(|_: &Theme| container::Style {
-                    background: Some(Color { a: 0.82, ..Color::BLACK }.into()),
-                    ..Default::default()
-                })
+    // (always in a stack, the picture or nothing over it: the page keeps its place under the widget tree's same spot,
+    // so where it's scrolled to isn't lost when a picture opens or closes)
+    let over: Element<'a, ManualMsg> = match big {
+        Some(h) => mouse_area(
+            container(
+                image(h)
+                    .content_fit(iced::ContentFit::Contain)
+                    .width(Length::Fill)
+                    .height(Length::Fill),
             )
-            .on_press(ManualMsg::Zoom(None)),
-        ]
+            .padding(24)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(|_: &Theme| container::Style {
+                background: Some(Color { a: 0.82, ..Color::BLACK }.into()),
+                ..Default::default()
+            }),
+        )
+        .on_press(ManualMsg::Zoom(None))
         .into(),
-        None => main.into(),
-    }
+        None => Space::new(0, 0).into(),
+    };
+    stack![main, over].into()
 }

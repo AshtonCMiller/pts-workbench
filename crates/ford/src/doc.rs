@@ -39,6 +39,9 @@ pub enum Block {
     Para(Vec<Inline>, Option<Callout>),
     List {
         ordered: bool,
+        /// A numbered list's first number (Ford often has each step in a list of its own: each carries on from the one
+        /// before)
+        start: usize,
         items: Vec<Vec<Block>>,
     },
     /// `grid`: a real table (with borders or headings), not just Ford's page layout
@@ -805,10 +808,28 @@ impl<'b> Builder<'b> {
                     .filter(|b| !b.is_empty())
                     .collect();
                 if !items.is_empty() {
-                    self.out.push(Block::List {
-                        ordered: tag == "ol",
-                        items,
-                    });
+                    let ordered = tag == "ol";
+                    // where its numbers start: as the page says, else carrying on from the numbered list before it (Ford
+                    // often puts each step in a list of its own, and they'd all be 1.), unless a heading's come between
+                    let start = match e.attr("start").and_then(|n| n.trim().parse::<usize>().ok()) {
+                        _ if !ordered => 1,
+                        Some(n) => n,
+                        None => self
+                            .out
+                            .iter()
+                            .rev()
+                            .take_while(|b| !matches!(b, Block::Heading(..)))
+                            .find_map(|b| match b {
+                                Block::List {
+                                    ordered: true,
+                                    start,
+                                    items,
+                                } => Some(start + items.len()),
+                                _ => None,
+                            })
+                            .unwrap_or(1),
+                    };
+                    self.out.push(Block::List { ordered, start, items });
                 }
             }
             "table" => {
@@ -1324,6 +1345,32 @@ mod tests {
     }
 
     #[test]
+    fn steps_in_lists_of_their_own_count_on() {
+        // (the Adaptive Learning Drive Cycle: each step in an <ol> of its own, a note between two)
+        let html = r#"<html><body><h2>Configuration</h2>
+          <ol><li>Clear the DTC.</li></ol>
+          <p>NOTE: The engine must be warm.</p>
+          <ol><li>Bring it to temperature.</li></ol>
+          <ol><li>Follow the table.</li><li>Then this.</li></ol>
+          <h2>Next</h2>
+          <ol><li>Starts again.</li></ol>
+          <ol start="7"><li>As the page says.</li></ol>
+          <ul><li>Bullets</li></ul>
+        </body></html>"#;
+        let starts: Vec<(bool, usize, usize)> = read(html, "https://ford.x/")
+            .iter()
+            .filter_map(|b| match b {
+                Block::List { ordered, start, items } => Some((*ordered, *start, items.len())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            starts,
+            [(true, 1, 1), (true, 2, 1), (true, 3, 2), (true, 1, 1), (true, 7, 1), (false, 1, 1)]
+        );
+    }
+
+    #[test]
     fn reads_an_article() {
         let html = r#"<html><head><title>TSB</title><style>p{}</style></head><body>
           <table><tr><td><img src="spacer.gif" width=1><h2>Engine   noise</h2></td></tr></table>
@@ -1358,7 +1405,7 @@ mod tests {
         );
         assert_eq!(b[2], Block::Rule);
         assert!(matches!(&b[3], Block::Para(_, Some(Callout::Note))));
-        let Block::List { ordered: false, items } = &b[4] else {
+        let Block::List { ordered: false, items, .. } = &b[4] else {
             panic!("{:?}", b[4])
         };
         assert_eq!(items.len(), 2);

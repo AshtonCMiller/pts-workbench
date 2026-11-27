@@ -114,8 +114,8 @@ fn block<'a>(b: &'a Block, pics: &'a HashMap<String, Pic>) -> Element<'a, DocMsg
                 })
                 .into()
         }
-        Block::List { ordered, items } => Column::with_children(items.iter().enumerate().map(|(n, item)| {
-            let mark = if *ordered { format!("{}.", n + 1) } else { "•".to_string() };
+        Block::List { ordered, start, items } => Column::with_children(items.iter().enumerate().map(|(n, item)| {
+            let mark = if *ordered { format!("{}.", start + n) } else { "•".to_string() };
             row![text(mark).size(14).width(22), blocks(item, pics)].spacing(4).into()
         }))
         .spacing(6)

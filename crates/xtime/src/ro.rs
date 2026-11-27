@@ -123,10 +123,107 @@ pub struct Line {
     pub tech_end: String,
     pub part_list: Vec<Part>,
     pub sub_lines: Vec<String>,
+    /// How many pictures (and videos) are on it in Xtime, and where each one is, when the RO says
     pub images: usize,
+    pub media: Vec<Media>,
     pub techs: Vec<String>,
     pub added_by: String,
     pub order: f64,
+}
+
+/// A picture or video on a line (added in Xtime's app): where it is, its name, whether it's a video
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct Media {
+    /// Its address (as Xtime gives it: a full address, or one on Xtime's site)
+    pub url: String,
+    pub name: String,
+    pub video: bool,
+}
+
+/// A line's pictures, from its "Images" list. Xtime's entries are a picture's address, or a record holding it: the
+/// address is under a name like "Url", "ImageUrl", "MediaUrl", "Path" (a thumbnail's only when there's nothing else),
+/// or else it's whatever in it is an address.
+fn media_of(items: &[Value]) -> Vec<Media> {
+    const KEYS: [&str; 10] = [
+        "url", "imageurl", "mediaurl", "fileurl", "uri", "link", "path", "filepath", "src", "source",
+    ];
+    const VIDEO: [&str; 5] = [".mp4", ".mov", ".webm", ".m4v", ".avi"];
+    let is_address = |s: &str| {
+        let s = s.trim();
+        s.starts_with("https://") || s.starts_with("http://") || (s.starts_with('/') && s.contains('.'))
+    };
+    items
+        .iter()
+        .filter_map(|it| {
+            let (url, name, kind) = match it {
+                Value::String(s) if is_address(s) => (s.trim().to_string(), String::new(), String::new()),
+                Value::Object(o) => {
+                    let strings: Vec<(String, &str)> = o.iter().filter_map(|(k, v)| Some((k.to_ascii_lowercase(), v.as_str()?))).collect();
+                    let by = |k: &str| {
+                        strings
+                            .iter()
+                            .find(|(n, v)| n == k && is_address(v))
+                            .map(|(_, v)| v.trim().to_string())
+                    };
+                    let url = KEYS
+                        .iter()
+                        .find_map(|k| by(k))
+                        .or_else(|| {
+                            strings
+                                .iter()
+                                .find(|(n, v)| !n.contains("thumb") && is_address(v))
+                                .map(|(_, v)| v.trim().to_string())
+                        })
+                        .or_else(|| strings.iter().find(|(_, v)| is_address(v)).map(|(_, v)| v.trim().to_string()))?;
+                    let pick = |ks: &[&str]| {
+                        ks.iter()
+                            .find_map(|k| {
+                                strings
+                                    .iter()
+                                    .find(|(n, v)| n == k && !v.trim().is_empty())
+                                    .map(|(_, v)| v.trim().to_string())
+                            })
+                            .unwrap_or_default()
+                    };
+                    (
+                        url,
+                        pick(&["filename", "name", "caption", "description", "title"]),
+                        pick(&["mediatype", "type", "contenttype", "mimetype"]),
+                    )
+                }
+                _ => return None,
+            };
+            let path = url.to_ascii_lowercase();
+            let path = path.split(['?', '#']).next().unwrap_or("").to_string();
+            let video = kind.to_ascii_lowercase().contains("video") || VIDEO.iter().any(|e| path.ends_with(e));
+            Some(Media { url, name, video })
+        })
+        .collect()
+}
+
+impl Xtime {
+    /// A picture on a line (its address from [`Media`]): its bytes. Only from Xtime's own sites and where it keeps
+    /// pictures (Amazon's storage), with your Xtime sign-in.
+    pub async fn line_media(&self, url: &str) -> Result<Vec<u8>> {
+        let u = self
+            .base
+            .join(url.trim())
+            .map_err(|_| Error::Format(format!("not an address: {url}")))?;
+        let host = u.host_str().unwrap_or_default().to_ascii_lowercase();
+        let ours = [self.base.host_str().unwrap_or_default().to_ascii_lowercase()];
+        let allowed = ours.contains(&host)
+            || ["amazonaws.com", "xtime.com", "coxautoinc.com", "xtime.net"]
+                .iter()
+                .any(|d| host == *d || host.ends_with(&format!(".{d}")));
+        if u.scheme() != "https" || !allowed {
+            return Err(Error::Format("Not a picture from Xtime".into()));
+        }
+        let res = self.http.send_bytes(workbench_net::Http::request(Method::GET, u)).await?;
+        if !res.status.is_success() {
+            return Err(Error::Status(res.status.as_u16()));
+        }
+        Ok(res.bytes)
+    }
 }
 
 impl Line {
@@ -506,6 +603,7 @@ fn line_of(l: &Value) -> Line {
             .filter(|s| !s.is_empty())
             .collect(),
         images: list("Images").len(),
+        media: media_of(&list("Images")),
         techs: list("LineTechnicians")
             .iter()
             .map(|x| name_of(Some(get(x, "Technician").filter(|v| truthy(Some(v))).unwrap_or(x))))
@@ -747,6 +845,14 @@ pub fn clock_time(h: u32, m: u32) -> String {
 
 /// Xtime's "2026-11-15T10:30:00" (no zone: the store's local time) → "Nov 15, 10:30 AM"; anything else as it is
 pub fn when(s: &str) -> String {
+    // (Xtime's other way of writing a time: "/Date(1795638969000+0000)/", milliseconds since 1970: in this
+    // computer's time)
+    if let Some(ms) = net_date(s) {
+        use chrono::{Datelike, TimeZone, Timelike};
+        if let Some(t) = chrono::Local.timestamp_millis_opt(ms).single() {
+            return format!("{} {}, {}", MONTHS[t.month0() as usize], t.day(), clock_time(t.hour(), t.minute()));
+        }
+    }
     let n = |a: usize, b: usize| s.get(a..b).and_then(|x| x.parse::<u32>().ok());
     match (n(0, 4), n(5, 7), n(8, 10), n(11, 13), n(14, 16)) {
         (Some(_), Some(mo @ 1..=12), Some(d), Some(h @ 0..=23), Some(mi @ 0..=59)) => {
@@ -755,6 +861,18 @@ pub fn when(s: &str) -> String {
         (Some(_), Some(mo @ 1..=12), Some(d), _, _) => format!("{} {d}", MONTHS[mo as usize - 1]),
         _ => s.to_string(),
     }
+}
+
+/// "/Date(1795638969000+0000)/" → its milliseconds since 1970 (the offset after them is only what time zone it was
+/// written in: the milliseconds are the moment itself)
+fn net_date(s: &str) -> Option<i64> {
+    let rest = s.trim().strip_prefix("/Date(")?;
+    let end = rest
+        .char_indices()
+        .skip(1)
+        .find(|(_, c)| !c.is_ascii_digit())
+        .map_or(rest.len(), |(i, _)| i);
+    rest[..end].parse().ok()
 }
 
 /// The promise date and time: "11/15/2026" and "17:00" → ("Nov 15", "5:00 PM")
@@ -775,6 +893,44 @@ pub fn promised(date: &str, time: &str) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finds_line_pictures() {
+        let items = vec![
+            json!("https://x.s3.amazonaws.com/media/a.jpg"),
+            json!({ "ImageId": 4, "ThumbnailUrl": "https://x.s3.amazonaws.com/t/b.jpg", "ImageUrl": "https://x.s3.amazonaws.com/b.jpg", "FileName": "Leak.jpg" }),
+            json!({ "Id": 5, "Path": "/api/media/c.mp4" }),
+            json!({ "Something": "https://x.s3.amazonaws.com/d.png" }),
+            json!({ "Id": 6 }),
+            json!(7),
+        ];
+        let m = media_of(&items);
+        assert_eq!(m.len(), 4);
+        assert_eq!(m[0].url, "https://x.s3.amazonaws.com/media/a.jpg");
+        assert_eq!(
+            (m[1].url.as_str(), m[1].name.as_str()),
+            ("https://x.s3.amazonaws.com/b.jpg", "Leak.jpg")
+        );
+        assert!(m[2].video && m[2].url == "/api/media/c.mp4");
+        assert_eq!(m[3].url, "https://x.s3.amazonaws.com/d.png");
+    }
+
+    #[test]
+    fn net_dates() {
+        use chrono::{Datelike, TimeZone, Timelike};
+        assert_eq!(net_date("/Date(1795638969000+0000)/"), Some(1795638969000));
+        assert_eq!(net_date("/Date(1700000000000)/"), Some(1700000000000));
+        assert_eq!(net_date("/Date(-5000-0600)/"), Some(-5000));
+        assert_eq!(net_date("2026-11-15T09:05:00"), None);
+        // in this computer's time, like the others
+        let t = chrono::Local.timestamp_millis_opt(1795638969000).unwrap();
+        assert_eq!(
+            when("/Date(1795638969000+0000)/"),
+            format!("{} {}, {}", MONTHS[t.month0() as usize], t.day(), clock_time(t.hour(), t.minute()))
+        );
+        assert!(!when("/Date(1795638969000+0000)/").contains("Date"));
+        assert_eq!(when("2026-11-15T09:05:00"), "Nov 15, 9:05 AM");
+    }
 
     fn sample() -> Value {
         json!({ "Data": {

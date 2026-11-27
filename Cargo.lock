@@ -1269,7 +1269,7 @@ checksum = "21d8ad60dd5b13a4ee6bd8fa2d5d88965c597c67bce32b5fc49c94f55cb50810"
 
 [[package]]
 name = "diag-ui"
-version = "0.5.5"
+version = "0.5.6"
 dependencies = [
  "chrono",
  "ford",
@@ -1589,7 +1589,7 @@ dependencies = [
 
 [[package]]
 name = "feedback"
-version = "0.5.5"
+version = "0.5.6"
 dependencies = [
  "serde",
  "serde_json",
@@ -1707,7 +1707,7 @@ dependencies = [
 
 [[package]]
 name = "ford"
-version = "0.5.5"
+version = "0.5.6"
 dependencies = [
  "chrono",
  "serde",
@@ -1719,7 +1719,7 @@ dependencies = [
 
 [[package]]
 name = "ford-ui"
-version = "0.5.5"
+version = "0.5.6"
 dependencies = [
  "chrono",
  "ford",
@@ -2437,7 +2437,7 @@ dependencies = [
 
 [[package]]
 name = "hours"
-version = "0.5.5"
+version = "0.5.6"
 dependencies = [
  "chrono",
  "serde",
@@ -2446,7 +2446,7 @@ dependencies = [
 
 [[package]]
 name = "hours-ui"
-version = "0.5.5"
+version = "0.5.6"
 dependencies = [
  "chrono",
  "hours",
@@ -3182,7 +3182,7 @@ dependencies = [
 
 [[package]]
 name = "launcher"
-version = "0.5.5"
+version = "0.5.6"
 dependencies = [
  "serde",
  "serde_json",
@@ -4590,7 +4590,7 @@ checksum = "33cb294fe86a74cbcf50d4445b37da762029549ebeea341421c7c70370f86cac"
 
 [[package]]
 name = "pts-workbench"
-version = "0.5.5"
+version = "0.5.6"
 dependencies = [
  "chrono",
  "diag-ui",
@@ -5428,7 +5428,7 @@ dependencies = [
 
 [[package]]
 name = "signin"
-version = "0.5.5"
+version = "0.5.6"
 dependencies = [
  "keyring",
  "serde",
@@ -6369,7 +6369,7 @@ dependencies = [
 
 [[package]]
 name = "ui-kit"
-version = "0.5.5"
+version = "0.5.6"
 dependencies = [
  "iced",
 ]
@@ -6555,7 +6555,7 @@ checksum = "3a3b425286980a367278453f3b6d28cdcb134b574e5a35824a6ff5eebad50bb6"
 
 [[package]]
 name = "vci"
-version = "0.5.5"
+version = "0.5.6"
 dependencies = [
  "serde",
  "serde_json",
@@ -6564,7 +6564,7 @@ dependencies = [
 
 [[package]]
 name = "vci-bridge"
-version = "0.5.5"
+version = "0.5.6"
 dependencies = [
  "serde_json",
  "vci",
@@ -6902,7 +6902,7 @@ dependencies = [
 
 [[package]]
 name = "webpane"
-version = "0.5.5"
+version = "0.5.6"
 dependencies = [
  "iced",
  "keyring",
@@ -7558,7 +7558,7 @@ checksum = "f17a85883d4e6d00e8a97c586de764dabcc06133f7f1d55dce5cdc070ad7fe59"
 
 [[package]]
 name = "workbench-net"
-version = "0.5.5"
+version = "0.5.6"
 dependencies = [
  "cookie_store 0.21.1",
  "futures-util",
@@ -7578,7 +7578,7 @@ dependencies = [
 
 [[package]]
 name = "workbench-sync"
-version = "0.5.5"
+version = "0.5.6"
 dependencies = [
  "aes-gcm",
  "flate2",
@@ -7742,8 +7742,9 @@ checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
 
 [[package]]
 name = "xtime"
-version = "0.5.5"
+version = "0.5.6"
 dependencies = [
+ "chrono",
  "getrandom 0.2.17",
  "hmac",
  "pbkdf2",
@@ -7759,7 +7760,7 @@ dependencies = [
 
 [[package]]
 name = "xtime-ui"
-version = "0.5.5"
+version = "0.5.6"
 dependencies = [
  "chrono",
  "iced",

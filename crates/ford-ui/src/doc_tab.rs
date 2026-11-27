@@ -317,9 +317,11 @@ pub fn view(d: &DocTab) -> Element<'_, DocMsg> {
             .padding([4, 16])
             .align_x(Alignment::Center)
             .width(Length::Fill);
+            // (each document keeps its own place: the bulletin where you left it, the technical instructions where you
+            // left that)
             scrollable(sheets)
                 .height(Length::Fill)
-                .remember(format!("doc-pdf:{}", d.url))
+                .remember(format!("doc-pdf:{}|{}", d.url, current.map(|c| c.url.as_str()).unwrap_or("")))
                 .into()
         }
     };

@@ -8,6 +8,22 @@
   leave older ones here. (The same file format as the Electron app's src/whats-new.md.)
 -->
 
+## v0.5.6
+
+# Nothing exciting in this update, just lots of bug fixes.
+
+# Improvements
+- Added support for viewing XTime Images within Chat.
+- Added support for viewing media within XTime View
+
+# Bug Fixes
+- Fixed an issue with XTime View that would cause Tabs within Notes to appear like a garbled mess.
+- Fixed an issue with Ford WSM Parsing that would cause procedures to be listed out as 1. 1. 1. 1. (so on) instead of 1. 2. 3. Determined issue was caused by Ford returning multiple separate lists within a single procedure, and the parser (until now) took that at face value. Now, the parser pays attention to prior lists in order to effectively lay out instructions.
+- Fixed a bug with Ford WSM Rendering that would reset procedure scroll bar position to the very top when opening images.
+- Fixed an issue with the XTime View rendering that would list the `Since` Date incorrectly. (may display as /Date(1795638969000+0000)/ instead of the correct date.) Previously, app would not parse XTime's specific date rendering as XTime renders time as milliseconds since 1970 (commonly referred to as the unix time standard), whereas this app was only trained to respond to text-based date formats (like 2026-11-15T09:05)
+- Fixed an issue with how wiring diagrams are rendered that would lead to the diagram appearing low-resolution when not actively moving the image.
+- Fixed an issue with how FSAs are rendered in that led to incorrect article names being displayed alongside the FSA (like showing S1Bull instead of Dealer Bulletin)
+
 ## v0.5.5
 
 # Improvements

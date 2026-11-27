@@ -1492,10 +1492,13 @@ pub fn view(v: &LaborView) -> Element<'_, LaborMsg> {
     ]
     .height(Length::Fill);
 
-    match &v.parts {
-        Some(w) => stack![page, anim::modal(parts_window(v, w), w.phase, LaborMsg::CloseParts)].into(),
-        None => page.into(),
-    }
+    // (always in a stack, the parts window or nothing over it: the page keeps its place in the widget tree, so where
+    // it's scrolled to isn't lost when the window opens or closes)
+    let over: Element<'_, LaborMsg> = match &v.parts {
+        Some(w) => anim::modal(parts_window(v, w), w.phase, LaborMsg::CloseParts).into(),
+        None => Space::new(0, 0).into(),
+    };
+    stack![page, over].into()
 }
 
 #[cfg(test)]

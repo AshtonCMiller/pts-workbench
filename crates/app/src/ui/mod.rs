@@ -86,6 +86,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 // (answered, not put away)
                 Overlay::ProfileKind => (profiles::kind_card(app), Message::Ignore),
                 Overlay::Phone => (phone::card(app), Message::ClosePhone),
+                Overlay::Picture => (picture_card(app), Message::ClosePicture),
                 Overlay::Hours => (
                     hours_ui::card(
                         &app.hours_view,
@@ -113,6 +114,44 @@ pub fn view(app: &App) -> Element<'_, Message> {
     // (always the same layers, the page always the first: iced keeps what each widget remembers, such as how far each
     // page is scrolled, only while it stays in the same place among them, so nothing popping up moves the page)
     iced::widget::stack![page, toast, menu, over].into()
+}
+
+/// A picture from Xtime (sent in chat, or on an RO's line), as big as the window lets it be (click outside it, or
+/// Esc, to put it away); Open in browser for the picture itself (to save it)
+fn picture_card(app: &App) -> Element<'_, Message> {
+    let Some((url, h)) = app.picture.as_ref() else {
+        return nothing();
+    };
+    let bar = row![
+        text("Picture from Xtime").size(15).font(style::BOLD).width(Length::Fill),
+        button(text("Open in browser").size(13))
+            .padding([5, 12])
+            .style(style::ghost)
+            .on_press(Message::OpenPictureOutside(url.to_string())),
+        button(text("Close").size(13))
+            .padding([5, 12])
+            .style(style::ghost)
+            .on_press(Message::ClosePicture),
+    ]
+    .spacing(8)
+    .align_y(iced::Alignment::Center);
+    container(
+        column![
+            bar,
+            iced::widget::image(h.clone())
+                .content_fit(iced::ContentFit::Contain)
+                .width(Length::Fill)
+                .height(Length::Fill),
+        ]
+        .spacing(12),
+    )
+    .padding(16)
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .max_width(1400)
+    .max_height(1000)
+    .style(style::floating_card)
+    .into()
 }
 
 /// An empty layer

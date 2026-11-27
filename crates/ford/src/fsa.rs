@@ -27,32 +27,85 @@ pub struct FsaPage {
     pub blocks: Vec<Block>,
 }
 
-/// What Ford's file names mean ("24S10_BULL.pdf" → "Dealer bulletin")
-const NAMES: &[(&str, &str)] = &[
-    ("_TECHX", "Technical instructions"),
-    ("_TECH", "Technical instructions"),
-    ("_BULL", "Dealer bulletin"),
-    ("_MSRA", "Mobile repair assessment"),
-    ("_DELIV_REC", "Pick-up & delivery record"),
-    ("_REIMBURSEMENT", "Reimbursement"),
-    ("_OWNER_LETTER_SPN", "Owner letter (Spanish)"),
-    ("_OWNER_LETTER", "Owner letter"),
-];
-
-/// A document's name from its address: Ford's file names, or the file name made readable
+/// A document's name from its address: what Ford's file names mean ("24S10_BULL.pdf", "22S51_S1Bull.pdf" →
+/// "Dealer bulletin"), or the file name made readable
 pub fn doc_name(url: &str) -> String {
     let file = url.split(['?', '#']).next().unwrap_or("").rsplit('/').next().unwrap_or("Document");
     let file = doc::query_value(&format!("x?f={file}"), "f").unwrap_or_else(|| file.to_string());
-    let stem = file.strip_suffix(".pdf").or_else(|| file.strip_suffix(".PDF")).unwrap_or(&file).to_string();
-    let up = stem.to_uppercase();
-    // the known endings, longest first ("_TECHX" before "_TECH"); "_OWNER_LETTER" anywhere in it
-    let known = NAMES.iter().find(|(end, _)| {
-        if end.starts_with("_OWNER") || *end == "_REIMBURSEMENT" { up.contains(end) } else { up.ends_with(end) }
-    });
-    match known {
-        Some((_, name)) => name.to_string(),
-        None => stem.replace('_', " ").chars().take(40).collect(),
+    let stem = file
+        .strip_suffix(".pdf")
+        .or_else(|| file.strip_suffix(".PDF"))
+        .unwrap_or(&file)
+        .to_string();
+    known_name(&stem).unwrap_or_else(|| stem.replace('_', " ").chars().take(40).collect())
+}
+
+/// What a Ford file name means. The names go: the recall's number ("22S51"), sometimes which supplement it's for
+/// ("S1"), then what it is: "Bull", "Tech", "Reimburse", "MSRA", "Owner_Letter", "F_Owner", "L_SP_Owner", "Owner2"…
+/// (in any case, with or without "_" between)
+fn known_name(stem: &str) -> Option<String> {
+    let up = stem.to_uppercase().replace([' ', '-'], "_");
+    let mut parts: Vec<&str> = up.split('_').filter(|p| !p.is_empty()).collect();
+    // the recall's number first ("22S51", "24S10", "25C03"): not part of the name
+    if parts
+        .first()
+        .is_some_and(|p| p.len() >= 4 && p.chars().take(2).all(|c| c.is_ascii_digit()))
+    {
+        parts.remove(0);
     }
+    // which supplement ("S1", or stuck to the rest: "S1BULL", "S1F")
+    let mut rest: Vec<String> = parts.iter().map(|p| p.to_string()).collect();
+    if let Some(first) = rest.first_mut() {
+        let b = first.as_bytes();
+        if b.len() >= 2 && b[0] == b'S' && b[1].is_ascii_digit() {
+            let digits = first[1..].chars().take_while(char::is_ascii_digit).count();
+            *first = first[1 + digits..].to_string();
+        }
+    }
+    rest.retain(|p| !p.is_empty());
+    let joined = rest.concat();
+    // what it is: the first part (what's left of it: "BULL" of "S1BULL"), or the last ("…_TECHX"), not a word that
+    // only starts the same ("FDRS_FSA_Software_Verification_Technical" is no technical instructions)
+    let is = |w: &str, alt: &[&str]| {
+        let fits = |p: &String| p == w || alt.contains(&p.as_str());
+        rest.first().is_some_and(fits) || rest.last().is_some_and(fits)
+    };
+    let name = if is("BULL", &["BULLETIN"]) {
+        "Dealer bulletin".to_string()
+    } else if is("TECH", &["TECHX"]) {
+        "Technical instructions".to_string()
+    } else if joined.contains("REIMB") {
+        "Reimbursement".to_string()
+    } else if is("MSRA", &[]) {
+        "Mobile repair assessment".to_string()
+    } else if joined.contains("DELIV") {
+        "Pick-up & delivery record".to_string()
+    } else if joined.contains("OWNER") {
+        // an owner letter, and which: what's before "OWNER" ("F", "L", "SP"…) and a number after it ("OWNER2")
+        let at = joined.find("OWNER").unwrap_or(0);
+        let before = &joined[..at];
+        let after = joined[at + 5..].trim_start_matches("LETTER");
+        let spanish = before.contains("SP") || after.contains("SP");
+        // whose: "F" Ford's, "L" Lincoln's
+        let kind = before.replace("SPN", "").replace("SP", "");
+        let mut n = match kind.as_str() {
+            "F" => String::from("Ford Owner Letter"),
+            "L" => String::from("Lincoln Owner Letter"),
+            "" => String::from("Owner letter"),
+            k => format!("Owner letter {k}"),
+        };
+        let number: String = after.chars().filter(char::is_ascii_digit).collect();
+        if !number.is_empty() {
+            n.push_str(&format!(" #{number}"));
+        }
+        if spanish {
+            n.push_str(" (Spanish)");
+        }
+        n
+    } else {
+        return None;
+    };
+    Some(name)
 }
 
 fn is_pdf(url: &str) -> bool {
@@ -140,7 +193,12 @@ impl Ford {
     /// when they're there already (unless `force`). Whether they're there now.
     pub async fn content_sign_on(&self, force: bool) -> bool {
         let content = workbench_net::Url::parse("https://www.fordservicecontent.com/").expect("address");
-        let has = |ford: &Ford| ford.http().cookie_sizes(&content).iter().any(|(n, _)| n.eq_ignore_ascii_case("CONTENT_AUTH"));
+        let has = |ford: &Ford| {
+            ford.http()
+                .cookie_sizes(&content)
+                .iter()
+                .any(|(n, _)| n.eq_ignore_ascii_case("CONTENT_AUTH"))
+        };
         if !force && has(self) {
             return true;
         }
@@ -171,7 +229,10 @@ impl Ford {
             .take(3)
             .collect();
         if sso.is_empty() {
-            self.log(&format!("content sign-on: no sign-on address on PTS's home page ({} scripts)", srcs.len()));
+            self.log(&format!(
+                "content sign-on: no sign-on address on PTS's home page ({} scripts)",
+                srcs.len()
+            ));
             return false;
         }
         for u in sso {
@@ -248,7 +309,13 @@ impl Ford {
                 Err(e) => self.log(&format!("   FSA page frame: {e}")),
             }
         }
-        let docs: Vec<FsaDoc> = links.into_iter().map(|u| FsaDoc { name: doc_name(&u), url: u }).collect();
+        let docs: Vec<FsaDoc> = links
+            .into_iter()
+            .map(|u| FsaDoc {
+                name: doc_name(&u),
+                url: u,
+            })
+            .collect();
         self.log(&format!(
             "   FSA page: {} documents ({})",
             docs.len(),
@@ -268,7 +335,22 @@ mod tests {
         assert_eq!(doc_name("https://x/fsa/24S10_TECHX.pdf"), "Technical instructions");
         assert_eq!(doc_name("https://x/fsa/24S10_Owner_Letter_SPN.pdf"), "Owner letter (Spanish)");
         assert_eq!(doc_name("https://x/fsa/24S10_Owner_Letter.pdf?v=2"), "Owner letter");
+        assert_eq!(doc_name("https://x/fsa/24S10_MSRA.pdf"), "Mobile repair assessment");
         assert_eq!(doc_name("https://x/fsa/Some%20Other_Doc.pdf"), "Some Other Doc");
+        // the newer names: the supplement ("S1") stuck to what it is, in any case
+        assert_eq!(doc_name("https://x/fsa/22S51_S1Bull.pdf"), "Dealer bulletin");
+        assert_eq!(doc_name("https://x/fsa/22S51_S1Tech.pdf"), "Technical instructions");
+        assert_eq!(doc_name("https://x/fsa/22S51_S1Reimburse.pdf"), "Reimbursement");
+        assert_eq!(doc_name("https://x/fsa/22S51_S1F_Owner.pdf"), "Ford Owner Letter");
+        assert_eq!(doc_name("https://x/fsa/22S51_S1_F_Owner.pdf"), "Ford Owner Letter");
+        assert_eq!(doc_name("https://x/fsa/22S51_S1L_Owner2.pdf"), "Lincoln Owner Letter #2");
+        assert_eq!(doc_name("https://x/fsa/22S51_S1_L_SP_Owner.pdf"), "Lincoln Owner Letter (Spanish)");
+        assert_eq!(doc_name("https://x/fsa/22S51_S1F_SP_Owner.pdf"), "Ford Owner Letter (Spanish)");
+        // (an FSA's own other papers: as they're called)
+        assert_eq!(
+            doc_name("https://x/fsa/FDRS_FSA_Software_Verification_Technical.pdf"),
+            "FDRS FSA Software Verification Technical"
+        );
     }
 
     #[test]
@@ -288,7 +370,13 @@ mod tests {
                 "https://www.fordtechservice.dealerconnection.com/content/24S10/24S10_BULL.pdf",
             ]
         );
-        assert_eq!(frames(html, base), ["https://www.fordtechservice.dealerconnection.com/oasis/fsa/Blank.aspx"]);
-        assert_eq!(script_sources(html), ["https://sso.fordservicecontent.com/x?sig=1&cb=akamaiCallback"]);
+        assert_eq!(
+            frames(html, base),
+            ["https://www.fordtechservice.dealerconnection.com/oasis/fsa/Blank.aspx"]
+        );
+        assert_eq!(
+            script_sources(html),
+            ["https://sso.fordservicecontent.com/x?sig=1&cb=akamaiCallback"]
+        );
     }
 }

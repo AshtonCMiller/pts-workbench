@@ -73,6 +73,9 @@ fn union(a: Rectangle, b: Rectangle) -> Rectangle {
 pub fn build(p: &Prepared) -> Result<Drawing, String> {
     let mut opt = usvg::Options::default();
     opt.fontdb = fonts();
+    // Ford's drawings don't say which font: the default would be Times New Roman, thin and hard to read small. Arial
+    // (on every Windows computer) reads much better at the sizes the writing on a wiring page is.
+    opt.font_family = "Arial".into();
     let tree = usvg::Tree::from_str(&p.svg, &opt).map_err(|e| format!("Couldn't read the drawing ({e})"))?;
     let size = tree.size();
     let found = |id: &str| tree.node_by_id(id).map(|n| rect(n.abs_bounding_box()));
@@ -185,7 +188,27 @@ impl View {
 
 // ---------- drawing it ----------
 
-/// Ford's black, white and gray drawn in the dark appearance's colors (its blue lighter); the wires keep theirs
+/// How much heavier thin lines and small writing are drawn: the edges of the black ink (gray, as they're smoothed)
+/// count as more ink than paper, so they read as a little bolder (1: as Ford drew them)
+const INK_WEIGHT: f32 = 1.7;
+
+/// Ford's black, white and gray: the ink a little heavier ([`INK_WEIGHT`]); in the light appearance, on white
+fn heavier(px: &mut [u8]) {
+    for p in px.chunks_exact_mut(4) {
+        let (r, g, b) = (p[0], p[1], p[2]);
+        let (hi, lo) = (r.max(g).max(b), r.min(g).min(b));
+        if hi - lo < 24 && hi < 250 {
+            let t = (u16::from(r) + u16::from(g) + u16::from(b)) as f32 / (3.0 * 255.0);
+            let v = (t.powf(INK_WEIGHT) * 255.0).round() as u8;
+            p[0] = v;
+            p[1] = v;
+            p[2] = v;
+        }
+    }
+}
+
+/// Ford's black, white and gray drawn in the dark appearance's colors (its blue lighter; the ink a little heavier,
+/// [`INK_WEIGHT`]); the wires keep theirs
 fn darken(px: &mut [u8]) {
     const INK: [f32; 3] = [0xe6 as f32, 0xe8 as f32, 0xeb as f32];
     const PAPER: [f32; 3] = [0x1c as f32, 0x20 as f32, 0x26 as f32];
@@ -194,7 +217,7 @@ fn darken(px: &mut [u8]) {
         let (hi, lo) = (r.max(g).max(b), r.min(g).min(b));
         if hi - lo < 24 {
             // gray: white paper → dark, black ink → light
-            let t = (u16::from(r) + u16::from(g) + u16::from(b)) as f32 / (3.0 * 255.0);
+            let t = ((u16::from(r) + u16::from(g) + u16::from(b)) as f32 / (3.0 * 255.0)).powf(INK_WEIGHT);
             for i in 0..3 {
                 p[i] = (INK[i] + (PAPER[i] - INK[i]) * t).round() as u8;
             }
@@ -215,6 +238,8 @@ fn draw(d: &Drawing, view: View, w: u32, h: u32, dark: bool) -> Option<Handle> {
     let mut px = pm.take();
     if dark {
         darken(&mut px);
+    } else {
+        heavier(&mut px);
     }
     Some(Handle::from_rgba(w.max(1), h.max(1), px))
 }
@@ -231,10 +256,24 @@ pub fn render_page(d: &Drawing, longest: f32, dark: bool) -> Option<Handle> {
     )
 }
 
-/// What's on screen (`size`, in pixels), sharp
+/// What's on screen (`size`, in the window's units), sharp: drawn at twice that many pixels, so it's as sharp as
+/// the screen on a display scaled up in Windows (125%, 150%, 200%) and smoother at 100% (shown smaller, its thin
+/// lines and small writing lose their jagged edges)
 pub fn render_view(d: &Drawing, view: View, size: Size, dark: bool) -> Option<Handle> {
-    draw(d, view, size.width.ceil() as u32, size.height.ceil() as u32, dark)
+    // (at most about 40 million pixels' worth of memory: a very big window gets a little less)
+    let area = (size.width * size.height).max(1.0);
+    let s = SHARP.min((10_000_000.0 / area).sqrt()).max(1.0);
+    draw(
+        d,
+        View { z: view.z * s, ..view },
+        (size.width * s).ceil() as u32,
+        (size.height * s).ceil() as u32,
+        dark,
+    )
 }
+
+/// How many pixels the part on screen is drawn with, for each of the window's
+const SHARP: f32 = 2.0;
 
 // ---------- the widget ----------
 

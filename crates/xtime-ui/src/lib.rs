@@ -18,7 +18,7 @@ pub mod ro_view;
 pub mod service;
 pub mod view;
 
-pub use ro_view::{Ask, Env, Msg, Out, XtimeView};
+pub use ro_view::{Ask, Env, LineMedia, Msg, Out, XtimeView};
 
 /// Why reading or changing something in Xtime didn't work (kept short: it's shown in the bottom bar)
 #[derive(Debug, Clone, PartialEq)]

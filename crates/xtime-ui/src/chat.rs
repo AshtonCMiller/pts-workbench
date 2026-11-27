@@ -16,12 +16,12 @@ use std::sync::Arc;
 use iced::keyboard::{Key, key::Named};
 use iced::widget::text_editor::{Action, Binding, Content, Edit, KeyPress};
 use iced::widget::{
-    Column, Space, button, column, container, horizontal_space, rich_text, row, scrollable::RelativeOffset, span, text, text_editor,
+    Column, Space, button, column, container, horizontal_space, image, rich_text, row, scrollable::RelativeOffset, span, text, text_editor,
 };
 use iced::{Alignment, Border, Color, Element, Length, Task, Theme};
 use ui_kit::scroll::scrollable;
 use ui_kit::{anim, pill, style};
-use xtime::chat::{ChatConfig, ChatMessage, ChatPerson, conversations, to_markup};
+use xtime::chat::{ChatConfig, ChatMessage, ChatPerson, conversations, picture_urls, to_markup};
 
 use crate::{Env, LoadError};
 
@@ -51,6 +51,8 @@ pub struct ChatPanel {
     /// The conversation drawn over the list: the open one, or the last one while it slides back out
     pub showing: Option<String>,
     pub history: HashMap<String, Vec<ChatMessage>>,
+    /// Pictures sent in chat (by their address): read once, kept while the app runs
+    pub pictures: HashMap<String, Picture>,
     /// The conversation being read (its channel id)
     pub history_loading: Option<String>,
     pub history_error: Option<LoadError>,
@@ -80,6 +82,14 @@ pub struct ChatPanel {
     /// An RO whose chat channel is being read from Xtime (to start its conversation), and why that didn't work
     pub finding: Option<String>,
     pub start_error: Option<String>,
+}
+
+/// A picture sent in chat
+#[derive(Debug, Clone)]
+pub enum Picture {
+    Loading,
+    Ready(image::Handle),
+    Failed,
 }
 
 /// A message you sent, on its way to Xtime
@@ -150,6 +160,9 @@ pub enum ChatMsg {
     MentionPick(usize),
     MentionPickActive,
     MentionClose,
+    /// A picture sent in chat, read (its address); opened big (in your browser)
+    Picture(String, Result<Vec<u8>, String>),
+    OpenPicture(String),
 }
 
 /// What only the app can do
@@ -159,6 +172,8 @@ pub enum ChatOut {
     OpenRo(String),
     /// Chat's settings (your dealer code and Xtime username), learned from Xtime: kept for next time
     Learned(ChatConfig),
+    /// A picture sent in chat, to open big (its address: in your browser)
+    OpenPicture(String),
 }
 
 fn scroll_id() -> iced::widget::scrollable::Id {
@@ -230,6 +245,26 @@ impl ChatPanel {
             Some(ch) => Task::batch([list, self.load_history(env, ch)]),
             None => list,
         }
+    }
+
+    /// The pictures in these messages not read yet (each once)
+    fn load_pictures(&mut self, env: &Env, list: &[ChatMessage]) -> Task<ChatMsg> {
+        let mut tasks = Vec::new();
+        for url in list.iter().filter(|m| !m.notification).flat_map(|m| picture_urls(&m.text)) {
+            if self.pictures.contains_key(&url) {
+                continue;
+            }
+            self.pictures.insert(url.clone(), Picture::Loading);
+            let x = env.xtime.clone();
+            tasks.push(Task::perform(
+                async move {
+                    let r = x.chat_picture(&url).await.map_err(|e| e.to_string());
+                    (url, r)
+                },
+                |(u, r)| ChatMsg::Picture(u, r),
+            ));
+        }
+        Task::batch(tasks)
     }
 
     fn load_history(&mut self, env: &Env, channel: String) -> Task<ChatMsg> {
@@ -424,6 +459,8 @@ impl ChatPanel {
                 match r {
                     Ok(list) => {
                         let grew = self.history.get(&ch).map(Vec::len) != Some(list.len());
+                        // its pictures, read (the ones not read yet)
+                        let pictures = self.load_pictures(env, &list);
                         self.history.insert(ch.clone(), list);
                         self.settle_outbox(&ch);
                         if self.open.as_deref() == Some(ch.as_str()) {
@@ -433,9 +470,9 @@ impl ChatPanel {
                             let receipts = self.mark_read(env, &ch);
                             if grew {
                                 let snap = iced::widget::scrollable::snap_to(scroll_id(), RelativeOffset::END);
-                                return (Task::batch([snap, receipts]), outs);
+                                return (Task::batch([snap, receipts, pictures]), outs);
                             }
-                            return (receipts, outs);
+                            return (Task::batch([receipts, pictures]), outs);
                         }
                     }
                     Err(e) => {
@@ -630,6 +667,18 @@ impl ChatPanel {
             ChatMsg::MentionClose => {
                 let at = self.open.as_ref().and_then(|ch| self.drafts.0.get(ch)).and_then(mention_at);
                 self.mention_closed = at.map(|(l, c, _)| (l, c));
+                Task::none()
+            }
+            ChatMsg::Picture(url, r) => {
+                let p = match r {
+                    Ok(bytes) => Picture::Ready(image::Handle::from_bytes(bytes)),
+                    Err(_) => Picture::Failed,
+                };
+                self.pictures.insert(url, p);
+                Task::none()
+            }
+            ChatMsg::OpenPicture(url) => {
+                outs.push(ChatOut::OpenPicture(url));
                 Task::none()
             }
         };
@@ -954,7 +1003,7 @@ fn conversation<'a>(chat: &'a ChatPanel, ch: &'a str, shown: &ChatShown<'a>, in_
                 // the sender's name once, over the first of their messages in a row
                 let named = !m.mine && last_sender != Some(m.sender.as_str());
                 last_sender = Some(if m.mine { "" } else { m.sender.as_str() });
-                col = col.push(bubble(m, named, shown.now));
+                col = col.push(bubble(m, named, shown.now, &chat.pictures));
             }
             // yours on their way (or just arrived)
             for o in outgoing {
@@ -1045,7 +1094,7 @@ fn keys(kp: KeyPress, picking: bool) -> Option<Binding<ChatMsg>> {
 }
 
 /// One message: yours on the right in the accent colour, others' on the left; Xtime's own notices plain and centred
-fn bubble<'a>(m: &'a ChatMessage, named: bool, now: i64) -> Element<'a, ChatMsg> {
+fn bubble<'a>(m: &'a ChatMessage, named: bool, now: i64, pictures: &'a HashMap<String, Picture>) -> Element<'a, ChatMsg> {
     let time = text(when(m.time, now)).size(11).style(style::muted);
     if m.notification {
         return container(
@@ -1057,6 +1106,30 @@ fn bubble<'a>(m: &'a ChatMessage, named: bool, now: i64) -> Element<'a, ChatMsg>
         .into();
     }
     let mine = m.mine;
+    // a picture sent in chat (its address, the message): the picture; tapped, opened big
+    let urls = picture_urls(&m.text);
+    let only_pictures = !urls.is_empty() && m.text.split_whitespace().all(|w| urls.iter().any(|u| u == w));
+    let pics: Vec<Element<'a, ChatMsg>> = urls
+        .iter()
+        .map(|u| {
+            let inner: Element<'a, ChatMsg> = match pictures.get(u) {
+                Some(Picture::Ready(h)) => image(h.clone()).width(Length::Fixed(220.0)).into(),
+                Some(Picture::Failed) => text("Couldn't load the picture: open it").size(13).into(),
+                _ => text("Loading the picture…").size(13).style(style::muted).into(),
+            };
+            button(inner)
+                .padding(0)
+                .style(|theme: &Theme, status| button::Style {
+                    border: Border {
+                        radius: 10.0.into(),
+                        ..Default::default()
+                    },
+                    ..style::ghost(theme, status)
+                })
+                .on_press(ChatMsg::OpenPicture(u.clone()))
+                .into()
+        })
+        .collect();
     // @mentions stand out: bold, on a tint of their own
     let mut found = Vec::new();
     let words: Vec<text::Span<'a, ChatMsg>> = mention_spans(&m.text, &m.mentions, &mut found)
@@ -1109,7 +1182,13 @@ fn bubble<'a>(m: &'a ChatMessage, named: bool, now: i64) -> Element<'a, ChatMsg>
             [0x7a, 0x5a, 0xf5],
         ));
     }
-    col = col.push(body).push(tags);
+    if !only_pictures {
+        col = col.push(body);
+    }
+    for p in pics {
+        col = col.push(p);
+    }
+    col = col.push(tags);
     let col = if mine { col.align_x(Alignment::End) } else { col };
     let r = if mine {
         row![horizontal_space(), col]

@@ -82,6 +82,8 @@ pub enum Overlay {
     ProfileKind,
     /// Pair phone (bottom right): its QR code, the phones paired, when they get notifications
     Phone,
+    /// A picture sent in Xtime chat, big ([`App::picture`])
+    Picture,
 }
 
 /// Settings' tabs, down its left side (as Chrome's settings)
@@ -305,6 +307,8 @@ pub struct App {
     pub channels: Option<Result<Vec<crate::updates::Channel>, String>>,
     /// Your phone (crate::phone): paired or not, its card's state
     pub phone: crate::phone::PhoneState,
+    /// The picture shown big (from Xtime chat, or on an RO's line): its address, and it, read
+    pub picture: Option<(String, iced::widget::image::Handle)>,
 }
 
 /// The dashboard's and My ROs' messages (crates/xtime-ui) are the app's own
@@ -588,6 +592,11 @@ pub enum Message {
     /// Your phone: the card, asking the server which phones are paired, a test, unpairing, when they're sent to
     OpenPhone,
     ClosePhone,
+    /// The chat picture shown big: put away; opened in the browser instead (to save it)
+    ClosePicture,
+    OpenPictureOutside(String),
+    /// A picture on a line of an RO open in the Workbench, big (the RO, the picture's address)
+    ShowLinePicture(String, String),
     PhoneCheck,
     PhoneChecked(Result<Vec<crate::phone::PhoneInfo>, String>),
     PhoneTest,
@@ -791,6 +800,7 @@ impl App {
             settings_since: std::time::Instant::now(),
             channels: None,
             phone: crate::phone::PhoneState::default(),
+            picture: None,
         };
         // (straight onto the vehicle showing, no transition in)
         app.outer = Transition::new(app.outer_key());
@@ -1592,6 +1602,15 @@ impl App {
                     match out {
                         xtime_ui::chat::ChatOut::SignedOut => self.ros_error = Some(LoadError::SignedOut),
                         xtime_ui::chat::ChatOut::OpenRo(ro) => tasks.push(Task::done(Message::OpenRo(ro))),
+                        // (a picture sent in chat: big, over everything; one that couldn't be read, in the browser)
+                        xtime_ui::chat::ChatOut::OpenPicture(url) => {
+                            if let Some(xtime_ui::chat::Picture::Ready(h)) = self.chat_panel.pictures.get(&url) {
+                                self.picture = Some((url, h.clone()));
+                                self.show_overlay(Overlay::Picture);
+                            } else if let Err(e) = ford_ui::open_external(&url) {
+                                self.notice = Some(format!("Couldn't open the picture ({e})"));
+                            }
+                        }
                         xtime_ui::chat::ChatOut::Learned(c) => {
                             if self.chat_saved.as_ref() != Some(&c) && save_chat_config(&c).is_ok() {
                                 self.chat_saved = Some(c);
@@ -2141,6 +2160,25 @@ impl App {
                 self.phone.unpair_one = None;
                 self.show_overlay(Overlay::Phone);
                 return self.check_phone();
+            }
+            Message::ClosePicture => return self.close_overlay(),
+            Message::ShowLinePicture(ro, url) => {
+                let read = self.open.iter().find(|w| w.ro.ro == ro).and_then(|w| match w.xv.media.get(&url) {
+                    Some(xtime_ui::LineMedia::Ready(h)) => Some(h.clone()),
+                    _ => None,
+                });
+                match read {
+                    Some(h) => {
+                        self.picture = Some((url, h));
+                        self.show_overlay(Overlay::Picture);
+                    }
+                    None => return Task::done(Message::OpenPictureOutside(url)),
+                }
+            }
+            Message::OpenPictureOutside(url) => {
+                if let Err(e) = ford_ui::open_external(&url) {
+                    self.notice = Some(format!("Couldn't open the picture ({e})"));
+                }
             }
             Message::ClosePhone => {
                 // (the code isn't kept around once it's put away)
@@ -2791,6 +2829,7 @@ impl App {
                         Overlay::Service => self.service = None,
                         Overlay::WhatsNew => self.whats_new = None,
                         Overlay::Phone => self.phone.qr = None,
+                        Overlay::Picture => self.picture = None,
                         _ => {}
                     }
                 }
@@ -3036,6 +3075,8 @@ impl App {
                     xtime_ui::Ask::MarkSpiffed(on) => Message::MarkSpiffed(ro.to_string(), on),
                     xtime_ui::Ask::Copy(text, what) => Message::Copy(text, what),
                     xtime_ui::Ask::Chat => Message::ChatAbout(ro.to_string()),
+                    xtime_ui::Ask::ShowPicture(url) => Message::ShowLinePicture(ro.to_string(), url),
+                    xtime_ui::Ask::OpenOutside(url) => Message::OpenPictureOutside(url),
                 })),
             }
         }

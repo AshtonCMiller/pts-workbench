@@ -721,7 +721,7 @@ fn line_card<'a>(cx: &Ctx<'a, '_>, l: &'a Line, place: &Place, children: Vec<&'a
 
     let mut name = column![text(if l.name.is_empty() { l.op_code.clone() } else { l.name.clone() }).font(style::BOLD)].spacing(2);
     if opened.is_none() && !l.concern.is_empty() {
-        name = name.push(text(l.concern.as_str()).size(12).style(style::muted));
+        name = name.push(text(clean(&l.concern).replace('\t', "  ")).size(12).style(style::muted));
     }
     let mut head = row![
         container(text(if l.dms.is_empty() { "·" } else { l.dms.as_str() }).font(style::BOLD))
@@ -840,7 +840,7 @@ fn line_card<'a>(cx: &Ctx<'a, '_>, l: &'a Line, place: &Place, children: Vec<&'a
             );
         }
         let body = column![
-            line_body(l),
+            line_body(l, &xv.media),
             container(actions).padding(iced::Padding {
                 top: 0.0,
                 right: 14.0,
@@ -914,9 +914,109 @@ fn line_card<'a>(cx: &Ctx<'a, '_>, l: &'a Line, place: &Place, children: Vec<&'a
 
 /// A label over its text (Concern, Cause…)
 fn labeled<'a>(k: &'a str, v: String) -> Element<'a, Msg> {
-    column![text(k).size(12).font(style::BOLD).style(style::muted), text(v)]
+    column![text(k).size(12).font(style::BOLD).style(style::muted), note_text(&v)]
         .spacing(2)
         .into()
+}
+
+/// A line's pictures (and videos), small, in a row that wraps: a picture tapped shows big; a video, or a picture
+/// that couldn't be read, opens in the browser
+fn gallery<'a>(l: &'a Line, media: &'a HashMap<String, crate::LineMedia>) -> Element<'a, Msg> {
+    const H: f32 = 96.0;
+    let tile = |inner: Element<'a, Msg>| {
+        container(inner)
+            .height(H)
+            .center_y(H)
+            .style(|theme: &iced::Theme| container::Style {
+                background: Some(style::colors(theme).hover.into()),
+                border: iced::Border {
+                    radius: 8.0.into(),
+                    width: 1.0,
+                    color: style::colors(theme).line,
+                },
+                ..Default::default()
+            })
+    };
+    let tiles = l.media.iter().enumerate().map(|(i, m)| {
+        let n = i + 1;
+        let (inner, press): (Element<'a, Msg>, Msg) = if m.video {
+            (
+                container(text(format!("Video {n}: Play")).size(13)).padding([0, 18]).into(),
+                Msg::Ask(Ask::OpenOutside(m.url.clone())),
+            )
+        } else {
+            match media.get(&m.url) {
+                Some(crate::LineMedia::Ready(h)) => (
+                    iced::widget::image(h.clone())
+                        .height(H)
+                        .content_fit(iced::ContentFit::Contain)
+                        .into(),
+                    Msg::Ask(Ask::ShowPicture(m.url.clone())),
+                ),
+                Some(crate::LineMedia::Failed) => (
+                    container(text(format!("Picture {n}: open it")).size(12)).padding([0, 14]).into(),
+                    Msg::Ask(Ask::OpenOutside(m.url.clone())),
+                ),
+                _ => (
+                    container(text("Loading…").size(12).style(style::muted)).padding([0, 18]).into(),
+                    Msg::Ask(Ask::OpenOutside(m.url.clone())),
+                ),
+            }
+        };
+        button(tile(inner)).padding(0).style(style::ghost).on_press(press).into()
+    });
+    Row::with_children(tiles).spacing(8).wrap().into()
+}
+
+/// A note as Xtime has it. Pasted from a spreadsheet or the parts system, it's often in columns split by tabs
+/// ("1<tab>Bolt<tab>6A340"): the text can't draw a tab (a box, and the spacing all wrong), so those lines are shown
+/// as a little table, lined up. Any other character that can't be drawn (a carriage return, a control character)
+/// goes too.
+fn note_text<'a>(v: &str) -> Element<'a, Msg> {
+    let lines: Vec<String> = v.replace("\r\n", "\n").replace('\r', "\n").split('\n').map(clean).collect();
+    if !v.contains('\t') {
+        return text(lines.join("\n")).into();
+    }
+    // each line's columns; a column's width from its longest entry (a short one, the quantity, as narrow as it is)
+    let cells: Vec<Vec<String>> = lines
+        .iter()
+        .map(|l| l.split('\t').map(|c| c.trim().to_string()).collect())
+        .collect();
+    let n = cells.iter().map(Vec::len).max().unwrap_or(1);
+    let widest: Vec<usize> = (0..n)
+        .map(|i| cells.iter().filter_map(|r| r.get(i)).map(|c| c.chars().count()).max().unwrap_or(0))
+        .collect();
+    let width = |i: usize| match widest[i] {
+        0..=4 => Length::Fixed(44.0),
+        w => Length::FillPortion(w.clamp(6, 60) as u16),
+    };
+    let mut table = Column::new().spacing(3);
+    for r in &cells {
+        if r.iter().all(|c| c.is_empty()) {
+            continue;
+        }
+        // (a line with no tabs: across the whole width)
+        if r.len() == 1 {
+            table = table.push(text(r[0].clone()));
+            continue;
+        }
+        let mut line = Row::new().spacing(12);
+        for i in 0..n {
+            line = line.push(container(text(r.get(i).cloned().unwrap_or_default())).width(width(i)));
+        }
+        table = table.push(line);
+    }
+    table.into()
+}
+
+/// A line of Xtime's text without what can't be drawn (tabs are kept: they split columns)
+fn clean(l: &str) -> String {
+    l.chars()
+        .filter(|c| *c == '\t' || !c.is_control())
+        .map(|c| if c == '\u{a0}' { ' ' } else { c })
+        .collect::<String>()
+        .trim_end()
+        .to_string()
 }
 
 /// The parts table's column widths (0: the rest)
@@ -932,7 +1032,7 @@ fn cell(e: Element<'_, Msg>, i: usize) -> Element<'_, Msg> {
 }
 
 /// What's under a line when it's open: concern, cause, correction, notes, parts, and the rest in one line
-fn line_body(l: &Line) -> Element<'_, Msg> {
+fn line_body<'a>(l: &'a Line, media: &'a HashMap<String, crate::LineMedia>) -> Element<'a, Msg> {
     let mut body = column![].spacing(8);
     for (k, v) in [
         ("Concern", &l.concern),
@@ -1011,7 +1111,8 @@ fn line_body(l: &Line) -> Element<'_, Msg> {
     if !l.tech_end.is_empty() {
         meta.push(format!("Finished {}", ro::when(&l.tech_end)));
     }
-    if l.images > 0 {
+    // (pictures whose address the RO doesn't give: only how many)
+    if l.images > 0 && l.media.is_empty() {
         meta.push(format!("{} picture{} in Xtime", l.images, if l.images == 1 { "" } else { "s" }));
     }
     if !l.added_by.is_empty() {
@@ -1019,6 +1120,9 @@ fn line_body(l: &Line) -> Element<'_, Msg> {
     }
     if l.parts_picked_up {
         meta.push("Parts picked up".into());
+    }
+    if !l.media.is_empty() {
+        body = body.push(column![text("Pictures").size(12).font(style::BOLD).style(style::muted), gallery(l, media)].spacing(4));
     }
     if !meta.is_empty() {
         body = body.push(text(meta.join(" · ")).size(12).style(style::muted));

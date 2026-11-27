@@ -67,6 +67,16 @@ pub struct XtimeView {
     pub line_moving: Option<String>,
     /// The RO being read when a move was made: what comes back is from before it (read again)
     stale: bool,
+    /// Lines' pictures (by their address): read when their line's opened, kept while the RO's open
+    pub media: HashMap<String, LineMedia>,
+}
+
+/// A line's picture
+#[derive(Debug, Clone)]
+pub enum LineMedia {
+    Loading,
+    Ready(iced::widget::image::Handle),
+    Failed,
 }
 
 /// A line being dragged by its handle
@@ -185,6 +195,8 @@ pub enum Msg {
     DragOff,
     DragEnd(bool),
     LineMoved(String, Result<(), LoadError>),
+    /// A line's picture, read (its address)
+    MediaLoaded(String, Result<Vec<u8>, String>),
     /// A button meant for the app
     Ask(Ask),
 }
@@ -205,6 +217,10 @@ pub enum Ask {
     Copy(String, String),
     /// Message about this RO: the chat panel, on its conversation (started if there's none)
     Chat,
+    /// A line's picture, big (its address: the view has it read)
+    ShowPicture(String),
+    /// A line's picture or video, in your browser (its address)
+    OpenOutside(String),
 }
 
 /// What the app does after an update
@@ -289,6 +305,35 @@ impl XtimeView {
             return (Task::batch([task, self.load_stage(env)]), outs);
         }
         (task, outs)
+    }
+
+    /// A line's pictures not read yet (by its key; not its videos: those open in the browser)
+    fn load_media(&mut self, env: &Env, key: &str) -> Task<Msg> {
+        let urls: Vec<String> = self
+            .view
+            .iter()
+            .flat_map(|v| v.lines.iter())
+            .filter(|l| l.key() == key)
+            .flat_map(|l| l.media.iter())
+            .filter(|m| !m.video)
+            .map(|m| m.url.clone())
+            .collect();
+        let mut tasks = Vec::new();
+        for url in urls {
+            if self.media.contains_key(&url) {
+                continue;
+            }
+            self.media.insert(url.clone(), LineMedia::Loading);
+            let x = env.xtime.clone();
+            tasks.push(Task::perform(
+                async move {
+                    let r = x.line_media(&url).await.map_err(|e| e.to_string());
+                    (url, r)
+                },
+                |(u, r)| Msg::MediaLoaded(u, r),
+            ));
+        }
+        Task::batch(tasks)
     }
 
     /// A line dropped: moved here right away, then in Xtime (its own RO page's way: the list it's in, where in it)
@@ -381,9 +426,12 @@ impl XtimeView {
                         self.error = None;
                         self.at = Some(crate::now());
                         self.view = Some(view.clone());
-                        // read with the RO: its inspection form, and the moves Xtime offers you
+                        // read with the RO: its inspection form, and the moves Xtime offers you; the open lines'
+                        // pictures
                         let stage = self.load_stage(env);
-                        return (Task::batch([self.load_form(env), stage]), vec![Out::Read(view)]);
+                        let open: Vec<String> = self.open.keys().cloned().collect();
+                        let pics = Task::batch(open.iter().map(|k| self.load_media(env, k)).collect::<Vec<_>>());
+                        return (Task::batch([self.load_form(env), stage, pics]), vec![Out::Read(view)]);
                     }
                     Err(e) => {
                         let out = if e == LoadError::SignedOut { vec![Out::SignedOut] } else { vec![] };
@@ -394,8 +442,17 @@ impl XtimeView {
             }
             Msg::ToggleLine(key) => {
                 if self.open.remove(&key).is_none() {
-                    self.open.insert(key, Instant::now());
+                    self.open.insert(key.clone(), Instant::now());
+                    // its pictures
+                    return (self.load_media(env, &key), vec![]);
                 }
+            }
+            Msg::MediaLoaded(url, r) => {
+                let m = match r {
+                    Ok(bytes) => LineMedia::Ready(iced::widget::image::Handle::from_bytes(bytes)),
+                    Err(_) => LineMedia::Failed,
+                };
+                self.media.insert(url, m);
             }
             Msg::ToggleInspection => self.show_inspection = !self.show_inspection,
             Msg::SetDone(key, done) => {
